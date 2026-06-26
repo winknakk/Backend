@@ -53,7 +53,7 @@ async function runDiscoveryTest() {
   }
 }
 
-runDiscoveryTest().catch(err => {
+runDiscoveryTest().catch((err) => {
   console.error(err);
   process.exit(1);
 });

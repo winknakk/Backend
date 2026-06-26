@@ -26,9 +26,9 @@ async function runIntegrationTest() {
   const dataDir = path.resolve(__dirname, "../data");
   const cleanTestState = () => {
     const files = fs.readdirSync(dataDir);
-    
+
     // Clean Conversations
-    const convFile = files.find(f => f.includes("Conversations") && f.endsWith(".json"));
+    const convFile = files.find((f) => f.includes("Conversations") && f.endsWith(".json"));
     if (convFile) {
       const filePath = path.join(dataDir, convFile);
       const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -37,7 +37,7 @@ async function runIntegrationTest() {
     }
 
     // Clean Messages
-    const msgFile = files.find(f => f.includes("Messages") && f.endsWith(".json"));
+    const msgFile = files.find((f) => f.includes("Messages") && f.endsWith(".json"));
     if (msgFile) {
       const filePath = path.join(dataDir, msgFile);
       const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -46,7 +46,7 @@ async function runIntegrationTest() {
     }
 
     // Clean Tickets
-    const tktFile = files.find(f => f.includes("Tickets") && f.endsWith(".json"));
+    const tktFile = files.find((f) => f.includes("Tickets") && f.endsWith(".json"));
     if (tktFile) {
       const filePath = path.join(dataDir, tktFile);
       const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -55,7 +55,7 @@ async function runIntegrationTest() {
     }
 
     // Clean Traces
-    const traceFile = files.find(f => f.includes("Traces") && f.endsWith(".json"));
+    const traceFile = files.find((f) => f.includes("Traces") && f.endsWith(".json"));
     if (traceFile) {
       const filePath = path.join(dataDir, traceFile);
       const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -69,7 +69,7 @@ async function runIntegrationTest() {
   const dbAdapter = AdapterFactory.getAdapter();
   const ticketService = new TicketService(dbAdapter);
   const knowledgeService = new KnowledgeService(dbAdapter);
-  
+
   // 2. Instantiate Policy, Tool Registry & MCP routing
   const toolRegistry = new ToolRegistry();
   const policyEngine = new PolicyEngine(toolRegistry);
@@ -95,14 +95,19 @@ async function runIntegrationTest() {
     name: "Allow Tool Commands",
     type: "permission",
     action: "allow",
-    mcpToolNames: ["create_ticket", "search_project_docs"]
+    mcpToolNames: ["create_ticket", "search_project_docs"],
   });
 
   // Keep track of ticket count before scenarios
   const files = fs.readdirSync(dataDir);
-  const ticketFile = files.find(f => f.includes("Tickets") && f.endsWith(".json"))!;
+  let ticketFile = files.find((f) => f.includes("Tickets") && f.endsWith(".json"));
+  if (!ticketFile) {
+    ticketFile = "Ticket V.2 - Tickets (Tickets).json";
+    fs.writeFileSync(path.join(dataDir, ticketFile), "[]", "utf-8");
+  }
+  const currentTicketFile = ticketFile;
   const getTicketCount = () => {
-    const raw = fs.readFileSync(path.join(dataDir, ticketFile), "utf-8");
+    const raw = fs.readFileSync(path.join(dataDir, currentTicketFile), "utf-8");
     return JSON.parse(raw).filter((t: any) => t.id1 !== null).length;
   };
 
@@ -115,12 +120,12 @@ async function runIntegrationTest() {
   console.log("\n=========================================");
   console.log("  CASE 1: Known Resolved Issue Test      ");
   console.log("=========================================");
-  
+
   const msg1: InboundMessage = {
     senderId: "U6256f0c4dbb64edacf9eea92904e49b1",
     channel: "LINE",
     text: "Cannot login Orbit App session expired",
-    receivedAt: new Date().toISOString()
+    receivedAt: new Date().toISOString(),
   };
 
   const reply1 = await orchestrator.handleIncomingMessage(msg1);
@@ -128,7 +133,7 @@ async function runIntegrationTest() {
   // Check if ticket was created
   const postCase1TicketCount = getTicketCount();
   console.log(`[Case 1 Result] Ticket count after Case 1: ${postCase1TicketCount}`);
-  
+
   if (postCase1TicketCount === initialTicketCount) {
     console.log("✅ Case 1 Success: Agent answered directly using knowledge. NO ticket was created.");
   } else {
@@ -141,12 +146,12 @@ async function runIntegrationTest() {
   console.log("\n=========================================");
   console.log("  CASE 2: Unknown Issue Test             ");
   console.log("=========================================");
-  
+
   const msg2: InboundMessage = {
     senderId: "U6256f0c4dbb64edacf9eea92904e49b1",
     channel: "LINE",
     text: "เข้าใช้งานระบบ SSO ไม่ได้ Error 500",
-    receivedAt: new Date().toISOString()
+    receivedAt: new Date().toISOString(),
   };
 
   const reply2 = await orchestrator.handleIncomingMessage(msg2);
@@ -181,7 +186,7 @@ async function runIntegrationTest() {
     console.log(`- Result: ${JSON.stringify(t.result).slice(0, 150)}...`);
   });
 
-  if (traces.some(t => t.toolName === "search_project_docs") && traces.some(t => t.toolName === "create_ticket")) {
+  if (traces.some((t) => t.toolName === "search_project_docs") && traces.some((t) => t.toolName === "create_ticket")) {
     console.log("\n✅ Test Passed: All execution traces logged correctly!");
   } else {
     console.error("❌ Test Failed: Missing search_project_docs or create_ticket in trace log!");

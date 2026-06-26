@@ -1,13 +1,15 @@
 import pino from "pino";
 import { config } from "../config/env";
+import { tracerStore } from "./tracerStore";
 
 const rootLogger = pino({
   level: config.LOG_LEVEL || "info",
   mixin() {
+    const store = tracerStore.getStore();
     return {
-      requestId: null,
-      conversationId: null,
-      traceId: null,
+      requestId: store?.requestId || null,
+      conversationId: store?.conversationId || null,
+      traceId: store?.traceId || null,
       component: null,
       durationMs: null,
     };

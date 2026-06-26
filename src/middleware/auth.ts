@@ -9,10 +9,7 @@ const logger = createLogger("auth");
  * If config.API_KEY is not set, validation is skipped (dev convenience).
  * The /health endpoint is always accessible without authentication.
  */
-export async function authHook(
-  request: FastifyRequest,
-  reply: FastifyReply
-): Promise<void> {
+export async function authHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   // Skip auth if no API_KEY is configured (dev convenience)
   if (!config.API_KEY) {
     return;

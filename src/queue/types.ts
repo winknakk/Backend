@@ -23,7 +23,7 @@ export const JobPayloadSchema = z.object({
 export type JobPayload = z.infer<typeof JobPayloadSchema>;
 
 export interface IJobQueue {
-  enqueue(payload: Omit<JobPayload, "jobId" | "status">): Promise<string>;
+  enqueue(payload: Omit<JobPayload, "jobId" | "status" | "retryCount" | "maxRetry"> & { retryCount?: number; maxRetry?: number }): Promise<string>;
   process(handler: (job: JobPayload) => Promise<any>): void;
   getJob(jobId: string): Promise<JobPayload | null>;
 }

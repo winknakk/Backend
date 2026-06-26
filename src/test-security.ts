@@ -19,7 +19,7 @@ async function runSecurityTests() {
   const { fastify, bootstrap } = await import("./api/server");
   const { stopCleanup } = await import("./middleware/rateLimit");
   // let's bootstrap the server now.
-  
+
   // Register a dummy internal route to verify API Bearer authentication
   fastify.get("/api/internal-route", async (request, reply) => {
     return reply.code(200).send({ success: true, message: "Welcome inside!" });
@@ -53,7 +53,7 @@ async function runSecurityTests() {
     console.log("Checking /api/internal-route blocked with invalid token...");
     try {
       await axios.get(`${baseUrl}/api/internal-route`, {
-        headers: { Authorization: "Bearer wrong-token" }
+        headers: { Authorization: "Bearer wrong-token" },
       });
       throw new Error("Internal route should have failed with invalid Bearer token");
     } catch (err: any) {
@@ -64,12 +64,11 @@ async function runSecurityTests() {
     // D. Allowed for /api/internal-route (valid token)
     console.log("Checking /api/internal-route allowed with valid token...");
     const internalRes = await axios.get(`${baseUrl}/api/internal-route`, {
-      headers: { Authorization: `Bearer ${process.env.API_KEY}` }
+      headers: { Authorization: `Bearer ${process.env.API_KEY}` },
     });
     console.log(`- Valid token response status: ${internalRes.status} (Expected: 200)`);
     if (internalRes.status !== 200) throw new Error("Internal route failed with valid token");
     console.log("- Response body:", internalRes.data);
-
 
     // ─── TEST 2: Webhook HMAC Signature Validation ───────────
     console.log("\n--- Test 2: Webhook HMAC Signature Validation ---");
@@ -78,7 +77,7 @@ async function runSecurityTests() {
       senderId: "U6256f0c4dbb64edacf9eea92904e49b1",
       channel: "LINE",
       text: "Testing security signature validation",
-      receivedAt: new Date().toISOString()
+      receivedAt: new Date().toISOString(),
     };
 
     // A. Blocked with missing signature
@@ -95,7 +94,7 @@ async function runSecurityTests() {
     console.log("Checking webhook blocked with invalid signature...");
     try {
       await axios.post(`${baseUrl}/webhook/message`, payload, {
-        headers: { "x-signature": "wrong-signature-hash" }
+        headers: { "x-signature": "wrong-signature-hash" },
       });
       throw new Error("Webhook should have failed with invalid signature hash");
     } catch (err: any) {
@@ -106,24 +105,22 @@ async function runSecurityTests() {
     // C. Allowed with valid signature (should hit validation/processing, expecting 200 or 400, but NOT 403)
     console.log("Checking webhook allowed with valid signature...");
     const rawBody = JSON.stringify(payload);
-    const validSignature = crypto
-      .createHmac("sha256", process.env.WEBHOOK_SECRET!)
-      .update(rawBody)
-      .digest("hex");
+    const validSignature = crypto.createHmac("sha256", process.env.WEBHOOK_SECRET!).update(rawBody).digest("hex");
 
     const webhookRes = await axios.post(`${baseUrl}/webhook/message`, payload, {
-      headers: { "x-signature": validSignature }
+      headers: { "x-signature": validSignature },
     });
-    console.log(`- Valid signature webhook response status: ${webhookRes.status} (Expected: 200 or 400, got ${webhookRes.status})`);
+    console.log(
+      `- Valid signature webhook response status: ${webhookRes.status} (Expected: 200 or 400, got ${webhookRes.status})`
+    );
     if (webhookRes.status !== 200 && webhookRes.status !== 400) {
       throw new Error(`Expected 200 or 400, got ${webhookRes.status}`);
     }
 
-
     // ─── TEST 3: Rate Limiting ───────────────────────────────
     console.log("\n--- Test 3: IP Rate Limiting ---");
     console.log("Sending multiple health check requests to trigger limit...");
-    
+
     // We configured RATE_LIMIT_MAX = 20. Loop to trigger and verify rate limiting.
     let rateLimited = false;
     for (let i = 1; i <= 25; i++) {
@@ -147,7 +144,6 @@ async function runSecurityTests() {
     }
 
     console.log("\n✅ All Security Middleware Tests PASSED successfully!");
-
   } catch (err: any) {
     console.error("\n❌ Security Middleware Test FAILED:");
     console.error(err.message);
@@ -164,7 +160,11 @@ async function runSecurityTests() {
   }
 }
 
-runSecurityTests().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+runSecurityTests()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

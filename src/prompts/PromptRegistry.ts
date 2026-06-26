@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { CacheService } from "../cache/CacheService";
 
 export interface PromptMetadata {
   name: string;
@@ -25,11 +26,40 @@ export class PromptRegistry {
     this.promptDir = promptDir;
   }
 
-  getPrompt(name: string, variables: Record<string, any> = {}): PromptRecord {
-    const record = this.loadPrompt(name);
+  async getPrompt(
+    name: string,
+    variables: Record<string, any> = {},
+    version?: string,
+    tenantId?: string
+  ): Promise<PromptRecord> {
+    const tId = tenantId || "global";
+    const ver = version || "default";
+    const cacheKey = `tenant:${tId}:prompt:${name}:${ver}`;
+
+    let record = await CacheService.getInstance().get<PromptRecord>(cacheKey);
+
+    if (!record) {
+      let loaded: CachedPrompt;
+      if (version && version !== "default") {
+        try {
+          loaded = this.loadPrompt(`${version}/${name}`);
+        } catch {
+          loaded = this.loadPrompt(name);
+        }
+      } else {
+        loaded = this.loadPrompt(name);
+      }
+      record = {
+        metadata: loaded.metadata,
+        template: loaded.template,
+      };
+
+      await CacheService.getInstance().set(cacheKey, record, 300);
+    }
+
     return {
       metadata: record.metadata,
-      template: this.interpolate(record.template, variables)
+      template: this.interpolate(record.template, variables),
     };
   }
 
@@ -61,10 +91,10 @@ export class PromptRegistry {
         name,
         version,
         filePath,
-        loadedAt: new Date().toISOString()
+        loadedAt: new Date().toISOString(),
       },
       template,
-      mtimeMs: stat.mtimeMs
+      mtimeMs: stat.mtimeMs,
     };
 
     this.cache.set(name, record);
@@ -75,7 +105,7 @@ export class PromptRegistry {
     const candidates = [
       path.join(this.promptDir, `${name}.json`),
       path.join(this.promptDir, `${name}.prompt`),
-      path.join(this.promptDir, `${name}.txt`)
+      path.join(this.promptDir, `${name}.txt`),
     ];
     const match = candidates.find((candidate) => fs.existsSync(candidate));
     if (!match) {

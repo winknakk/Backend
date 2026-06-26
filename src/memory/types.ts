@@ -8,17 +8,21 @@ export const CompanyContextSchema = z.object({
   status: z.enum(["Active", "Inactive"]),
   aiPromptTemplate: z.string(),
   knowledgeBaseUrl: z.string().optional(),
-  projects: z.array(z.object({
-    projectId: z.string(),
-    projectName: z.string(),
-    projectType: z.string(),
-  })),
-  slaConfig: z.array(z.object({
-    projectId: z.string(),
-    severity: z.string(),
-    responseTimeHours: z.number(),
-    resolveTimeHours: z.number(),
-  })),
+  projects: z.array(
+    z.object({
+      projectId: z.string(),
+      projectName: z.string(),
+      projectType: z.string(),
+    })
+  ),
+  slaConfig: z.array(
+    z.object({
+      projectId: z.string(),
+      severity: z.string(),
+      responseTimeHours: z.number(),
+      resolveTimeHours: z.number(),
+    })
+  ),
 });
 export type CompanyContext = z.infer<typeof CompanyContextSchema>;
 

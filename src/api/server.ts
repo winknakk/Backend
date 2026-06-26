@@ -6,6 +6,7 @@ import { TicketService } from "../tools/TicketService";
 import { KnowledgeService } from "../tools/search-project-docs/KnowledgeService";
 import { EmbeddingService } from "../rag/EmbeddingService";
 import { PgVectorStore } from "../rag/PgVectorStore";
+import { InMemoryVectorStore } from "../rag/InMemoryVectorStore";
 import { VectorStoreRetriever } from "../rag/VectorStoreRetriever";
 import { ToolRegistry, CreateTicketTool } from "../tools/ToolRegistry";
 import { SearchProjectDocsTool } from "../tools/search-project-docs/SearchProjectDocsTool";
@@ -13,6 +14,12 @@ import { PieceAdapter } from "../piece-adapter/PieceAdapter";
 import { PieceMcpTool } from "../piece-adapter/PieceMcpTool";
 import { DynamicMcpTool } from "../tools/DynamicMcpTool";
 import { PromptXMcpClient } from "../mcp/PromptXMcpClient";
+import { TakeoverManager } from "../human-takeover/TakeoverManager";
+import { TrafficSplitter } from "../aiops/prompt-control/TrafficSplitter";
+import { MetricAggregator } from "../aiops/dashboard/MetricAggregator";
+import { IngestionService } from "../aiops/ragops/IngestionService";
+import { EvalTestRunner } from "../aiops/llmops/EvalTestRunner";
+import { registerAdminRoutes } from "./routes/admin";
 import { PolicyEngine } from "../policy/PolicyEngine";
 import { ExecutionTraceService } from "../execution/ExecutionTrace";
 import { McpToolRouter } from "../mcp/McpToolRouter";
@@ -26,20 +33,24 @@ import { authHook } from "../middleware/auth";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
 import { pool } from "../adapters/postgres/PostgresAdapter";
-import { runMigrations } from "../adapters/postgres/migrations";
-import { SyncJobQueue } from "../queue/SyncJobQueue";
+import { QueueFactory } from "../queue/QueueFactory";
+import { startConfigWatcher } from "../cache/ConfigWatcher";
+import { GracefulShutdownService } from "./GracefulShutdownService";
+import { CacheService } from "../cache/CacheService";
 import { randomUUID } from "crypto";
 import { MetricsService } from "../observability/MetricsService";
 
 const serverLogger = createLogger("server");
-const fastify = Fastify({ loggerInstance: rootLogger });
+const fastify = Fastify({ loggerInstance: rootLogger as any });
 
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
 const ticketService = new TicketService(dbAdapter);
-const knowledgeRetriever = config.DATABASE_PROVIDER === "postgres"
-  ? new VectorStoreRetriever(new EmbeddingService(), new PgVectorStore())
-  : undefined;
+
+const embeddingService = new EmbeddingService();
+const vectorStore =
+  config.DATABASE_PROVIDER === "postgres" ? new PgVectorStore() : new InMemoryVectorStore(embeddingService);
+const knowledgeRetriever = new VectorStoreRetriever(embeddingService, vectorStore);
 const knowledgeService = new KnowledgeService(dbAdapter, knowledgeRetriever);
 
 // 2. Initialize Policy, Tool Registry & MCP routing
@@ -50,12 +61,20 @@ const mcpRouter = new McpToolRouter(policyEngine, traceService, toolRegistry);
 
 // 3. Setup Memory, Agent Manager, and Orchestrator
 const memoryService = new MemoryService(dbAdapter);
-const agentManager = new AgentManager(memoryService, mcpRouter, policyEngine);
-const orchestrator = new Orchestrator(memoryService, agentManager);
+const agentManager = new AgentManager(memoryService, mcpRouter, policyEngine, traceService);
+
+// Phase 9 Governance Components
+const takeoverManager = new TakeoverManager();
+const trafficSplitter = new TrafficSplitter();
+const metricAggregator = new MetricAggregator(dbAdapter);
+const ingestionService = new IngestionService(vectorStore, embeddingService);
+const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
+
+const orchestrator = new Orchestrator(memoryService, agentManager, takeoverManager);
 const promptXMcpClient = new PromptXMcpClient();
 
 // 4. Initialize Job Queue
-const jobQueue = new SyncJobQueue();
+const jobQueue = QueueFactory.getQueue();
 
 // Register Default Policy Rules
 policyEngine.registerRule({
@@ -63,7 +82,7 @@ policyEngine.registerRule({
   name: "Allow Core Tool Commands",
   type: "permission",
   action: "allow",
-  mcpToolNames: ["create_ticket", "search_project_docs", "activepieces.nocodb_create_record"]
+  mcpToolNames: ["create_ticket", "search_project_docs", "activepieces.nocodb_create_record"],
 });
 
 // Register Middleware Hooks
@@ -79,15 +98,11 @@ fastify.addHook("onRequest", async (request) => {
 async function bootstrap() {
   serverLogger.info("Initializing AutomationX V2 API Server bootstrap...");
 
-  // Run migrations if using Postgres
-  if (config.DATABASE_PROVIDER.toLowerCase() === "postgres") {
-    try {
-      await runMigrations(pool);
-    } catch (err: any) {
-      serverLogger.error({ error: err.message }, "Database migrations failed on startup. Exiting.");
-      process.exit(1);
-    }
-  }
+  // Register graceful shutdown handlers
+  GracefulShutdownService.register(fastify);
+
+  // Start dynamic config watcher for hot reloading
+  startConfigWatcher();
 
   // Register local tools
   const createTicketTool = new CreateTicketTool(ticketService);
@@ -103,8 +118,16 @@ async function bootstrap() {
   // Register Piece Adapter Tool
   try {
     const pieceAdapter = new PieceAdapter();
-    const nocodbCreateRecordDef = await pieceAdapter.generateMcpDefinition("@activepieces/piece-nocodb", "nocodb-create-record");
-    const nocodbPieceTool = new PieceMcpTool(pieceAdapter, "@activepieces/piece-nocodb", "nocodb-create-record", nocodbCreateRecordDef);
+    const nocodbCreateRecordDef = await pieceAdapter.generateMcpDefinition(
+      "@activepieces/piece-nocodb",
+      "nocodb-create-record"
+    );
+    const nocodbPieceTool = new PieceMcpTool(
+      pieceAdapter,
+      "@activepieces/piece-nocodb",
+      "nocodb-create-record",
+      nocodbCreateRecordDef
+    );
     toolRegistry.registerTool(nocodbPieceTool);
     serverLogger.info("Registered Piece Adapter: activepieces.nocodb_create_record");
   } catch (err: any) {
@@ -121,16 +144,16 @@ async function bootstrap() {
       if (tool.name === "chat") {
         continue; // Skip orchestration chat agent tool
       }
-      
+
       const remoteName = `promptx.${tool.name}`;
-      
+
       // Ensure policy allows the namespaced tool
       policyEngine.registerRule({
         ruleId: `rule-allow-${remoteName}`,
         name: `Allow dynamic remote tool ${remoteName}`,
         type: "permission",
         action: "allow",
-        mcpToolNames: [remoteName]
+        mcpToolNames: [remoteName],
       });
 
       const dynamicTool = new DynamicMcpTool(
@@ -161,7 +184,7 @@ fastify.post("/webhook/message", async (request, reply) => {
       serverLogger.warn({ requestId, issues: parsedInput.error.issues }, "Bad request validation failed");
       return reply.code(400).send({
         error: "Bad Request",
-        message: parsedInput.error.issues.map(e => `${e.path.join(".")}: ${e.message}`).join(", ")
+        message: parsedInput.error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", "),
       });
     }
 
@@ -172,9 +195,18 @@ fastify.post("/webhook/message", async (request, reply) => {
       data: parsedInput.data,
       metadata: {
         requestId,
-        receivedAt: new Date().toISOString()
-      }
+        receivedAt: new Date().toISOString(),
+      },
     });
+
+    if (config.QUEUE_PROVIDER === "redis") {
+      const durationMs = timer();
+      MetricsService.getInstance().recordLatency(durationMs);
+      return reply.code(202).send({
+        jobId,
+        status: "QUEUED",
+      });
+    }
 
     const job = await jobQueue.getJob(jobId);
     if (!job) {
@@ -196,17 +228,24 @@ fastify.post("/webhook/message", async (request, reply) => {
     serverLogger.error({ requestId, durationMs, error: err.message, component: "server" }, "Webhook handler failed");
     return reply.code(500).send({
       error: "Internal Server Error",
-      message: err.message
+      message: err.message,
     });
   }
 });
 
 fastify.get("/health", async (request, reply) => {
+  if (GracefulShutdownService.checkShuttingDown()) {
+    return reply.code(503).send({
+      status: "service_unavailable",
+      message: "Server is shutting down",
+    });
+  }
+
   let mcpStatus = "disconnected";
   try {
     const res = await axios.get(config.PROMPTX_MCP_URL, {
-      headers: { "Authorization": `Bearer ${config.PROMPTX_MCP_TOKEN}` },
-      timeout: 2000
+      headers: { Authorization: `Bearer ${config.PROMPTX_MCP_TOKEN}` },
+      timeout: 2000,
     });
     if (res.status >= 200 && res.status < 500) {
       mcpStatus = "connected";
@@ -219,23 +258,34 @@ fastify.get("/health", async (request, reply) => {
     }
   }
 
+  const queueDepth =
+    typeof (jobQueue as any).getQueueDepth === "function" ? await (jobQueue as any).getQueueDepth() : 0;
+
   return reply.code(200).send({
     status: "healthy",
     apiStatus: "ok",
     databaseProvider: config.DATABASE_PROVIDER,
     mcpStatus,
+    redisCacheActive: CacheService.getInstance().isRedisActive(),
+    queueDepth,
+    breakerState: PromptXMcpClient.circuitBreaker.getState(),
     registeredToolsCount: toolRegistry.listTools().length,
-    registeredTools: toolRegistry.listTools().map(t => ({
+    registeredTools: toolRegistry.listTools().map((t) => ({
       name: t.definition.name,
       source: t.definition.source || "local",
       version: t.definition.version || "1.0.0",
-      description: t.definition.description
-    }))
+      description: t.definition.description,
+    })),
   });
 });
 
 fastify.get("/metrics", async (request, reply) => {
-  return reply.code(200).send(MetricsService.getInstance().getMetrics());
+  const mainMetrics = MetricsService.getInstance().getMetrics();
+  const cacheMetrics = CacheService.getInstance().getMetrics();
+  return reply.code(200).send({
+    ...mainMetrics,
+    cache: cacheMetrics,
+  });
 });
 
 fastify.get("/traces", async (request, reply) => {
@@ -260,6 +310,14 @@ fastify.get("/agents", async (request, reply) => {
     name: a.name,
   }));
   return reply.code(200).send(agents);
+});
+
+// Register Phase 9 Admin Routes
+registerAdminRoutes(fastify, {
+  metricAggregator,
+  ingestionService,
+  evalTestRunner,
+  trafficSplitter,
 });
 
 const start = async () => {

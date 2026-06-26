@@ -6,7 +6,7 @@ export const McpToolDefinitionSchema = z.object({
   description: z.string(),
   inputSchema: z.object({
     type: z.literal("object"),
-    properties: z.record(z.any()),
+    properties: z.record(z.string(), z.any()),
     required: z.array(z.string()).optional(),
   }),
   source: z.string().optional(),
@@ -18,7 +18,7 @@ export const McpRequestSchema = z.object({
   jsonrpc: z.literal("2.0"),
   id: z.union([z.string(), z.number()]),
   method: z.string(),
-  params: z.record(z.any()).optional(),
+  params: z.record(z.string(), z.any()).optional(),
 });
 export type McpRequest = z.infer<typeof McpRequestSchema>;
 
@@ -26,11 +26,13 @@ export const McpResponseSchema = z.object({
   jsonrpc: z.literal("2.0"),
   id: z.union([z.string(), z.number()]),
   result: z.any().optional(),
-  error: z.object({
-    code: z.number(),
-    message: z.string(),
-    data: z.any().optional(),
-  }).optional(),
+  error: z
+    .object({
+      code: z.number(),
+      message: z.string(),
+      data: z.any().optional(),
+    })
+    .optional(),
 });
 export type McpResponse = z.infer<typeof McpResponseSchema>;
 

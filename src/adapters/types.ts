@@ -68,5 +68,9 @@ export interface DatabaseAdapter {
    * Lists all execution traces globally.
    */
   listAllTraces(): Promise<AuditLog[]>;
-}
 
+  /**
+   * Lists all tickets globally.
+   */
+  listAllTickets(): Promise<any[]>;
+}

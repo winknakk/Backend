@@ -14,11 +14,7 @@ export class McpToolRouter implements IMcpToolRouter {
   private executionTraceService: IExecutionTraceService;
   private toolRegistry: IToolRegistry;
 
-  constructor(
-    policyEngine: IPolicyEngine,
-    executionTraceService: IExecutionTraceService,
-    toolRegistry: IToolRegistry
-  ) {
+  constructor(policyEngine: IPolicyEngine, executionTraceService: IExecutionTraceService, toolRegistry: IToolRegistry) {
     this.policyEngine = policyEngine;
     this.executionTraceService = executionTraceService;
     this.toolRegistry = toolRegistry;
@@ -30,13 +26,13 @@ export class McpToolRouter implements IMcpToolRouter {
     const policyContext = {
       companyId: sessionContext.companyId,
       sessionId: sessionContext.sessionId,
-      userRole: "customer"
+      userRole: "customer",
     };
     const agentId = sessionContext.activeAgentId || "unknown-agent";
 
     // 1. Authorize Tool Call through Policy Engine
     const authResponse = await this.policyEngine.authorizeToolCall(toolName, params, policyContext);
-    
+
     if (!authResponse.isAllowed) {
       const reason = authResponse.reason || "Rejected by Policy Engine";
       const denyTraceId = await this.executionTraceService.startTrace({
@@ -48,11 +44,11 @@ export class McpToolRouter implements IMcpToolRouter {
           agentId,
           toolName,
           reason,
-          params
+          params,
         },
         requestId: sessionContext.requestId,
         conversationId: sessionContext.conversationId,
-        parentTraceId: sessionContext.parentTraceId
+        parentTraceId: sessionContext.parentTraceId,
       });
       await this.executionTraceService.failTrace(denyTraceId, reason);
 
@@ -74,7 +70,7 @@ export class McpToolRouter implements IMcpToolRouter {
         data: null,
         error: reason,
         source: "policy_engine",
-        executionId: denyTraceId
+        executionId: denyTraceId,
       };
     }
 
@@ -87,7 +83,7 @@ export class McpToolRouter implements IMcpToolRouter {
       arguments: authResponse.sanitizedParams || params,
       requestId: sessionContext.requestId,
       conversationId: sessionContext.conversationId,
-      parentTraceId: sessionContext.parentTraceId
+      parentTraceId: sessionContext.parentTraceId,
     });
 
     try {
@@ -106,7 +102,7 @@ export class McpToolRouter implements IMcpToolRouter {
         },
         `Running tool '${toolName}'`
       );
-      
+
       const result = await tool.execute(authResponse.sanitizedParams || params);
 
       // 4. Complete Execution Trace
@@ -118,7 +114,7 @@ export class McpToolRouter implements IMcpToolRouter {
         data: isExecutionResult ? result.data : result,
         error: isExecutionResult ? result.error : null,
         source: isExecutionResult ? result.source : "local",
-        executionId: (isExecutionResult && result.executionId) ? result.executionId : actualTraceId
+        executionId: isExecutionResult && result.executionId ? result.executionId : actualTraceId,
       };
 
       const durationMs = timer();
@@ -135,11 +131,10 @@ export class McpToolRouter implements IMcpToolRouter {
       );
 
       return finalResult;
-
     } catch (e: any) {
       const errorMsg = e instanceof Error ? e.message : String(e);
       const durationMs = timer();
-      
+
       logger.error(
         {
           requestId: sessionContext.requestId,
@@ -160,7 +155,7 @@ export class McpToolRouter implements IMcpToolRouter {
         data: null,
         error: errorMsg,
         source: "execution_engine",
-        executionId: actualTraceId
+        executionId: actualTraceId,
       };
     }
   }

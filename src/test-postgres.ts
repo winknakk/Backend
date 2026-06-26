@@ -21,7 +21,7 @@ async function runPostgresTests() {
   try {
     // 1. Seed a test company and a project
     console.log("Seeding test company and project...");
-    
+
     // Clear any existing test data to ensure clean run
     await pool.query("DELETE FROM traces");
     await pool.query("DELETE FROM tickets");
@@ -32,10 +32,9 @@ async function runPostgresTests() {
     await pool.query("DELETE FROM projects");
     await pool.query("DELETE FROM companies");
 
-    const companyRes = await pool.query(
-      "INSERT INTO companies (name) VALUES ($1) RETURNING id, name",
-      ["Test Corporate Co"]
-    );
+    const companyRes = await pool.query("INSERT INTO companies (name) VALUES ($1) RETURNING id, name", [
+      "Test Corporate Co",
+    ]);
     const companyId = companyRes.rows[0].id.toString();
     console.log(`- Seeded Company ID: ${companyId}`);
 
@@ -96,7 +95,7 @@ async function runPostgresTests() {
       summary: "User gets session expired error",
       priority: "P2" as const,
       severity: "High" as const,
-      projectId
+      projectId,
     };
     const ticketRes = await adapter.createTicket(ticketInput, new Date().toISOString(), "TKT-100001");
     console.log(`- Ticket creation success: ${ticketRes.success}`);
@@ -118,7 +117,7 @@ async function runPostgresTests() {
       status: "COMPLETED" as const,
       requestId: "req-99999",
       conversationId,
-      parentTraceId: "req-99999"
+      parentTraceId: "req-99999",
     };
 
     console.log("- Saving trace...");
@@ -148,7 +147,6 @@ async function runPostgresTests() {
     if (knowledgeResults2.length === 0) throw new Error("Knowledge search did not find ticket with 'failure'");
 
     console.log("\n✅ All PostgreSQL Adapter tests PASSED successfully!");
-
   } catch (err: any) {
     console.error("\n❌ PostgreSQL Adapter Test FAILED:");
     console.error(err.message);
@@ -160,7 +158,7 @@ async function runPostgresTests() {
   }
 }
 
-runPostgresTests().catch(err => {
+runPostgresTests().catch((err) => {
   console.error(err);
   process.exit(1);
 });

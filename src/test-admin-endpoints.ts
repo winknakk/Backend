@@ -16,7 +16,7 @@ async function runAdminEndpointsTests() {
 
   // Dynamic import of the server
   const { fastify, bootstrap } = await import("./api/server");
-  
+
   await bootstrap();
   await fastify.listen({ port, host: "0.0.0.0" });
   console.log(`[Test Server] Running at ${baseUrl}`);
@@ -56,7 +56,10 @@ async function runAdminEndpointsTests() {
     if (!Array.isArray(toolsRes.data) || toolsRes.data.length === 0) {
       throw new Error("Tools endpoint returned empty or non-array data");
     }
-    console.log("- Tools list:", toolsRes.data.map((t: any) => t.name));
+    console.log(
+      "- Tools list:",
+      toolsRes.data.map((t: any) => t.name)
+    );
 
     // ─── TEST 3: GET /agents ─────────────────────────────────
     console.log("\n--- Test 3: GET /agents ---");
@@ -82,14 +85,13 @@ async function runAdminEndpointsTests() {
     const metricsRes = await axios.get(`${baseUrl}/metrics`, { headers: authHeaders });
     console.log(`- Status: ${metricsRes.status} (Expected: 200)`);
     console.log("- Metrics body:", JSON.stringify(metricsRes.data, null, 2));
-    
+
     const metrics = metricsRes.data;
     if (typeof metrics.requestCount !== "number" || typeof metrics.errors !== "number" || !metrics.latency) {
       throw new Error("Metrics endpoint returned incorrect structure");
     }
 
     console.log("\n✅ All Admin API Endpoints Tests PASSED successfully!");
-
   } catch (err: any) {
     console.error("\n❌ Admin Endpoints Test FAILED:");
     console.error(err.message);
@@ -105,7 +107,7 @@ async function runAdminEndpointsTests() {
   }
 }
 
-runAdminEndpointsTests().catch(err => {
+runAdminEndpointsTests().catch((err) => {
   console.error(err);
   process.exit(1);
 });

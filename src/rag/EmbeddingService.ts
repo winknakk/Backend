@@ -78,7 +78,7 @@ export class EmbeddingService implements IEmbeddingService {
       seed = (seed * 9301 + 49297) % 233280;
       embedding[i] = seed / 233280.0;
     }
-    
+
     // Normalize vector
     let sumSq = 0;
     for (let i = 0; i < 1536; i++) {

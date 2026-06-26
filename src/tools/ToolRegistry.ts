@@ -15,10 +15,10 @@ export class CreateTicketTool implements ITool {
         summary: { type: "string", description: "Full detailed description of the problem (at least 10 chars)" },
         severity: { type: "string", description: "Severity: Critical, High, Medium, Low" },
         priority: { type: "string", description: "Priority: P1, P2, P3, P4" },
-        projectId: { type: "string", description: "The relevant project ID" }
+        projectId: { type: "string", description: "The relevant project ID" },
       },
-      required: ["conversationId", "subject", "summary", "severity", "priority", "projectId"]
-    }
+      required: ["conversationId", "subject", "summary", "severity", "priority", "projectId"],
+    },
   };
 
   readonly inputSchema = TicketInputSchema;
@@ -58,6 +58,6 @@ export class ToolRegistry implements IToolRegistry {
   }
 
   getMcpDefinitions(): McpToolDefinition[] {
-    return this.listTools().map(t => t.definition);
+    return this.listTools().map((t) => t.definition);
   }
 }

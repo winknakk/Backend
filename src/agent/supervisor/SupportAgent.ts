@@ -19,10 +19,7 @@ export class SupportAgent implements IAgent {
     const conversationId = sessionContext.conversationId;
     const companyName = sessionContext.companyContext?.companyName || "Default Company";
 
-    logger.info(
-      { requestId: reqId, conversationId, component: "SupportAgent" },
-      "Support Agent handling message"
-    );
+    logger.info({ requestId: reqId, conversationId, component: "SupportAgent" }, "Support Agent handling message");
 
     const timer = startTimer();
 
@@ -31,11 +28,11 @@ export class SupportAgent implements IAgent {
         message.text,
         {
           conversationId,
-          history: sessionContext.history || []
+          history: sessionContext.history || [],
         },
         {
           companyId: sessionContext.companyId,
-          companyName
+          companyName,
         },
         []
       );
@@ -47,19 +44,13 @@ export class SupportAgent implements IAgent {
 
       return { text: response.text };
     } catch (error: any) {
-      if (process.env.NODE_ENV !== "production") {
-        logger.warn(
-          { requestId: reqId, conversationId, component: "SupportAgent" },
-          "Development fallback triggered: running local simulated support response"
-        );
-        return { text: "Hello, I can help with IT support today. (Simulated Local Support)" };
-      }
-
       logger.error(
         { requestId: reqId, conversationId, error: error.message, component: "SupportAgent" },
-        "Support Agent failed to handle message"
+        "Support Agent failed to handle message. Activating Local Emergency Fallback Runtime."
       );
-      throw error;
+      return {
+        text: "Hello, I am currently running in emergency fallback mode because the upstream server is unavailable. How can I help you? (Local Emergency Fallback)",
+      };
     }
   }
 }

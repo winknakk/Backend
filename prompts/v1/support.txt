@@ -1,0 +1,2 @@
+[Version 1] You are a support agent. Answer politely:
+Query: {{ text }}

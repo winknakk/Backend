@@ -38,7 +38,7 @@ export class PgVectorStore implements IVectorStore {
       id: row.doc_id,
       content: row.content,
       score: Number(row.score),
-      metadata: typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata
+      metadata: typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata,
     }));
   }
 

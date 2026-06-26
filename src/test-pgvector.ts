@@ -29,8 +29,8 @@ async function run() {
     {
       id: "test-doc-sso-reset",
       content: "To reset an SSO password, open the identity portal and choose reset password.",
-      metadata: { type: "document", projectId: "p1", embedding }
-    }
+      metadata: { type: "document", projectId: "p1", embedding },
+    },
   ]);
 
   const results = await retriever.retrieve("reset SSO password", { projectId: "p1" });

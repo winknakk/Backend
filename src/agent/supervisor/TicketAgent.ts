@@ -22,10 +22,7 @@ export class TicketAgent implements IAgent {
     const reqId = sessionContext.requestId;
     const conversationId = sessionContext.conversationId;
 
-    logger.info(
-      { requestId: reqId, conversationId, component: "TicketAgent" },
-      "Ticket Agent creating support ticket"
-    );
+    logger.info({ requestId: reqId, conversationId, component: "TicketAgent" }, "Ticket Agent creating support ticket");
 
     const timer = startTimer();
     const ticketResult = await this.mcpToolRouter.callTool(
@@ -36,7 +33,7 @@ export class TicketAgent implements IAgent {
         summary: `User reported issue: "${message.text}" on channel ${message.channel}`,
         priority: "P2",
         severity: "High",
-        projectId: "p1"
+        projectId: "p1",
       },
       sessionContext
     );
@@ -47,20 +44,20 @@ export class TicketAgent implements IAgent {
         conversationId,
         durationMs: timer(),
         component: "TicketAgent",
-        success: ticketResult.success
+        success: ticketResult.success,
       },
       "Ticket Agent ticket creation completed"
     );
 
     if (!ticketResult.success) {
       return {
-        text: `I could not create the support ticket because the tool call failed: ${ticketResult.error}`
+        text: `I could not create the support ticket because the tool call failed: ${ticketResult.error}`,
       };
     }
 
     const ticket = ticketResult.data;
     return {
-      text: `I created support ticket ${ticket.ticketId}. The support team can now follow up on this issue.`
+      text: `I created support ticket ${ticket.ticketId}. The support team can now follow up on this issue.`,
     };
   }
 }

@@ -14,6 +14,7 @@ function fsLikeExists(filePath: string): boolean {
 export const EnvSchema = z.object({
   DATABASE_PROVIDER: z.enum(["local", "nocodb", "postgres"]).default("local"),
   DATABASE_URL: z.string().optional(),
+  DATABASE_REPLICA_URL: z.string().optional(),
   NOCODB_BASE_URL: z.string().url().default("https://app.nocodb.com/"),
   NOCODB_TOKEN: z.string().min(1, "NOCODB_TOKEN is required"),
   PROMPTX_MCP_URL: z.string().url(),
@@ -28,6 +29,13 @@ export const EnvSchema = z.object({
   EMBEDDING_PROVIDER: z.enum(["mock", "external"]).default("mock"),
   MAX_AGENT_HANDOFF_DEPTH: z.coerce.number().int().positive().default(3),
   POLICY_FILE_PATH: z.string().default("data/policies.json"),
+  QUEUE_PROVIDER: z.enum(["redis", "memory"]).default("memory"),
+  CACHE_PROVIDER: z.enum(["redis", "memory"]).default("memory"),
+  REDIS_URL: z.string().default("redis://127.0.0.1:6379"),
+  BACKUP_ENCRYPTION_KEY: z.string().default("super-secret-backup-key-32-chars!"),
+  DB_POOL_MAX: z.coerce.number().default(10),
+  DB_POOL_IDLE_TIMEOUT_MS: z.coerce.number().default(30000),
+  DB_POOL_CONNECTION_TIMEOUT_MS: z.coerce.number().default(2000),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -36,7 +44,7 @@ export const validateEnv = (): Env => {
   const result = EnvSchema.safeParse(process.env);
   if (!result.success) {
     console.warn("⚠️  Invalid or incomplete environment variables:");
-    result.error.issues.forEach(err => {
+    result.error.issues.forEach((err) => {
       console.warn(`  - ${err.path.join(".")}: ${err.message}`);
     });
     // In production we strictly throw an error

@@ -22,7 +22,7 @@ export class DynamicMcpTool implements ITool {
       description,
       inputSchema,
       source,
-      version
+      version,
     };
     this.client = client;
     this.inputSchema = z.object({}).passthrough() as any;
@@ -31,7 +31,7 @@ export class DynamicMcpTool implements ITool {
 
   async execute(params: Record<string, any>): Promise<Record<string, any>> {
     console.log(`[DynamicMcpTool] Executing remote tool '${this.definition.name}' via PromptX MCP`);
-    
+
     // Strip the namespace prefix (if any) to get the original tool name to call remote
     let remoteName = this.definition.name;
     const dotIndex = remoteName.indexOf(".");

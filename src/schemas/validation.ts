@@ -64,9 +64,9 @@ export const AuditLogSchema = z.object({
   toolName: z.string(),
   calledAt: z.string().datetime(),
   reason: z.string().optional(),
-  arguments: z.record(z.any()),
-  result: z.record(z.any()).optional(),
-  status: z.enum(["RUNNING", "COMPLETED", "FAILED"]),
+  arguments: z.record(z.string(), z.any()),
+  result: z.record(z.string(), z.any()).optional(),
+  status: z.enum(["RUNNING", "COMPLETED", "FAILED", "HANDOFF"]),
   errorMessage: z.string().optional(),
   completedAt: z.string().datetime().optional(),
   requestId: z.string().optional(),
@@ -92,6 +92,6 @@ export const KnowledgeResultSchema = z.object({
   type: z.enum(["ticket", "message", "document"]),
   content: z.string(),
   confidence: z.number(), // score 0.0 to 1.0
-  metadata: z.record(z.any()).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
 });
 export type KnowledgeResult = z.infer<typeof KnowledgeResultSchema>;

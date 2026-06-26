@@ -26,7 +26,7 @@ class InMemoryTraceService implements IExecutionTraceService {
       status: "RUNNING",
       requestId: input.requestId,
       conversationId: input.conversationId,
-      parentTraceId: input.parentTraceId
+      parentTraceId: input.parentTraceId,
     });
     return traceId;
   }
@@ -45,6 +45,15 @@ class InMemoryTraceService implements IExecutionTraceService {
     if (trace) {
       trace.status = "FAILED";
       trace.errorMessage = errorMessage;
+      trace.completedAt = new Date().toISOString();
+    }
+  }
+
+  async handoffTrace(traceId: string, result: Record<string, any>): Promise<void> {
+    const trace = this.traces.find((item) => item.traceId === traceId);
+    if (trace) {
+      trace.status = "HANDOFF";
+      trace.result = result;
       trace.completedAt = new Date().toISOString();
     }
   }
@@ -70,26 +79,30 @@ async function run() {
     definition: {
       name: "blocked_tool",
       description: "A test tool",
-      inputSchema: { type: "object", properties: {}, required: [] }
+      inputSchema: { type: "object", properties: {}, required: [] },
     },
     inputSchema: z.object({}),
     outputSchema: z.object({ ok: z.boolean() }),
     async execute() {
       return { ok: true };
-    }
+    },
   });
 
   const policy = new PolicyEngine(registry, "missing-policy-file.json");
   const traces = new InMemoryTraceService();
   const router = new McpToolRouter(policy, traces, registry);
 
-  const result = await router.callTool("blocked_tool", {}, {
-    sessionId: "sess-policy",
-    companyId: "tenant-1",
-    conversationId: "conv-policy",
-    requestId: "req-policy",
-    activeAgentId: "knowledge"
-  });
+  const result = await router.callTool(
+    "blocked_tool",
+    {},
+    {
+      sessionId: "sess-policy",
+      companyId: "tenant-1",
+      conversationId: "conv-policy",
+      requestId: "req-policy",
+      activeAgentId: "knowledge",
+    }
+  );
 
   assert(result.success === false, "Expected strict default deny.");
   assert(traces.traces.length === 1, "Expected deny audit trace.");

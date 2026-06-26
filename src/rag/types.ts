@@ -7,9 +7,12 @@ export interface IEmbeddingService {
 
 export interface IVectorStore {
   addDocuments(documents: Array<{ id: string; content: string; metadata?: any }>): Promise<void>;
-  similaritySearch(queryVector: number[], k?: number): Promise<Array<{ id: string; content: string; score: number; metadata?: any }>>;
+  similaritySearch(
+    queryVector: number[],
+    k?: number
+  ): Promise<Array<{ id: string; content: string; score: number; metadata?: any }>>;
 }
 
 export interface IRetriever {
-  retrieve(query: string, filters?: { projectId?: string }): Promise<KnowledgeResult[]>;
+  retrieve(query: string, filters?: { projectId?: string; tenantId?: string }): Promise<KnowledgeResult[]>;
 }

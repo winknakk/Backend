@@ -10,15 +10,18 @@ export class VectorStoreRetriever implements IRetriever {
     this.vectorStore = vectorStore;
   }
 
-  async retrieve(query: string, filters?: { projectId?: string }): Promise<KnowledgeResult[]> {
+  async retrieve(query: string, filters?: { projectId?: string; tenantId?: string }): Promise<KnowledgeResult[]> {
     const queryVector = await this.embeddingService.embedQuery(query);
     const searchResults = await this.vectorStore.similaritySearch(queryVector, 5);
 
     let filtered = searchResults;
-    if (filters?.projectId) {
-      filtered = searchResults.filter(
-        (doc) => doc.metadata?.projectId === filters.projectId
+    if (filters?.tenantId) {
+      filtered = filtered.filter(
+        (doc) => doc.metadata?.tenantId === filters.tenantId || doc.metadata?.companyId === filters.tenantId
       );
+    }
+    if (filters?.projectId) {
+      filtered = filtered.filter((doc) => doc.metadata?.projectId === filters.projectId);
     }
 
     return filtered.map((doc) => {

@@ -15,14 +15,18 @@ export class MemoryService implements IMemoryService {
 
   async getConversationHistory(conversationId: string, limit: number = 10): Promise<AgentMessage[]> {
     const list = await this.dbAdapter.getConversationHistory(conversationId, limit);
-    return list.map(m => ({
+    return list.map((m) => ({
       role: m.role as "customer" | "ai" | "system",
       content: m.content || "",
-      timestamp: m.timestamp || new Date().toISOString()
+      timestamp: m.timestamp || new Date().toISOString(),
     }));
   }
 
-  async appendConversationLog(conversationId: string, role: "customer" | "ai" | "system", message: string): Promise<void> {
+  async appendConversationLog(
+    conversationId: string,
+    role: "customer" | "ai" | "system",
+    message: string
+  ): Promise<void> {
     await this.dbAdapter.saveMessage(conversationId, role, message);
   }
 

@@ -1,7 +1,8 @@
 import axios from "axios";
 import { randomUUID } from "crypto";
 import { DatabaseAdapter } from "../adapters/types";
-import { TicketInput, ExecutionResult, SessionContext, CompanyContext, AuditLog } from "../schemas/validation";
+import { TicketInput, ExecutionResult, AuditLog } from "../schemas/validation";
+import { SessionContext, CompanyContext } from "../memory/types";
 
 export class NocoDBAdapter implements DatabaseAdapter {
   private apiToken: string | undefined;
@@ -27,7 +28,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
       status: "Open",
       startDate: new Date().toISOString(),
       dueDate: slaDueDate,
-      createdBy: "AI Support Agent"
+      createdBy: "AI Support Agent",
     };
 
     try {
@@ -36,26 +37,21 @@ export class NocoDBAdapter implements DatabaseAdapter {
       }
 
       const tableId = "t_tickets";
-      const response = await axios.post(
-        `${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/${tableId}`,
-        ticketData,
-        {
-          headers: {
-            "xc-token": this.apiToken,
-            "Content-Type": "application/json"
-          },
-          timeout: 2000
-        }
-      );
+      const response = await axios.post(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/${tableId}`, ticketData, {
+        headers: {
+          "xc-token": this.apiToken,
+          "Content-Type": "application/json",
+        },
+        timeout: 2000,
+      });
 
       return {
         success: true,
         data: response.data,
         error: null,
         source: "nocodb_live",
-        executionId
+        executionId,
       };
-
     } catch (e: any) {
       const errorMsg = e instanceof Error ? e.message : String(e);
 
@@ -65,7 +61,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
           data: null,
           error: `NocoDB Connection Failure: ${errorMsg}`,
           source: "nocodb_live",
-          executionId
+          executionId,
         };
       } else {
         console.warn(`[NocoDBAdapter] Development Fallback: NocoDB is offline (${errorMsg}). Mocking ticket creation.`);
@@ -74,7 +70,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
           data: ticketData,
           error: null,
           source: "nocodb_mock",
-          executionId
+          executionId,
         };
       }
     }
@@ -94,24 +90,20 @@ export class NocoDBAdapter implements DatabaseAdapter {
       role,
       content,
       created_at: new Date().toISOString(),
-      conversation: conversationId
+      conversation: conversationId,
     };
 
     try {
       if (!this.apiToken) {
         throw new Error("NocoDB API token is missing.");
       }
-      const response = await axios.post(
-        `${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_messages`,
-        messageData,
-        {
-          headers: {
-            "xc-token": this.apiToken,
-            "Content-Type": "application/json"
-          },
-          timeout: 5000
-        }
-      );
+      const response = await axios.post(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_messages`, messageData, {
+        headers: {
+          "xc-token": this.apiToken,
+          "Content-Type": "application/json",
+        },
+        timeout: 5000,
+      });
       return response.data;
     } catch (e: any) {
       const errorMsg = e.response?.data?.message || e.message || String(e);
@@ -134,7 +126,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
       status: "Active" as const,
       aiPromptTemplate: `คุณคือ Support Agent AI สำหรับช่วยเหลือผู้ใช้ระบบ IT ของ Orbit Retail`,
       projects: [{ projectId: "1", projectName: "Orbit POS System", projectType: "Support" }],
-      slaConfig: [{ projectId: "1", severity: "High", responseTimeHours: 4, resolveTimeHours: 12 }]
+      slaConfig: [{ projectId: "1", severity: "High", responseTimeHours: 4, resolveTimeHours: 12 }],
     };
 
     return {
@@ -144,7 +136,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
       customerRef: senderId,
       companyContext,
       status: "open",
-      handledBy: "ai"
+      handledBy: "ai",
     };
   }
 
@@ -166,17 +158,13 @@ export class NocoDBAdapter implements DatabaseAdapter {
       if (!this.apiToken) {
         throw new Error("NocoDB API token is missing.");
       }
-      await axios.post(
-        `${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces`,
-        trace,
-        {
-          headers: {
-            "xc-token": this.apiToken,
-            "Content-Type": "application/json"
-          },
-          timeout: 5000
-        }
-      );
+      await axios.post(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces`, trace, {
+        headers: {
+          "xc-token": this.apiToken,
+          "Content-Type": "application/json",
+        },
+        timeout: 5000,
+      });
     } catch (e: any) {
       const errorMsg = e.response?.data?.message || e.message || String(e);
       console.error(`[NocoDBAdapter] saveTrace failed: ${errorMsg}`);
@@ -191,15 +179,12 @@ export class NocoDBAdapter implements DatabaseAdapter {
       if (!this.apiToken) {
         throw new Error("NocoDB API token is missing.");
       }
-      const response = await axios.get(
-        `${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces/${traceId}`,
-        {
-          headers: {
-            "xc-token": this.apiToken
-          },
-          timeout: 5000
-        }
-      );
+      const response = await axios.get(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces/${traceId}`, {
+        headers: {
+          "xc-token": this.apiToken,
+        },
+        timeout: 5000,
+      });
       return response.data;
     } catch (e: any) {
       const errorMsg = e.response?.data?.message || e.message || String(e);
@@ -216,22 +201,63 @@ export class NocoDBAdapter implements DatabaseAdapter {
       if (!this.apiToken) {
         throw new Error("NocoDB API token is missing.");
       }
-      const response = await axios.get(
-        `${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces`,
-        {
-          headers: {
-            "xc-token": this.apiToken
-          },
-          params: {
-            where: `(sessionId,eq,${sessionId})`
-          },
-          timeout: 5000
-        }
-      );
+      const response = await axios.get(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces`, {
+        headers: {
+          "xc-token": this.apiToken,
+        },
+        params: {
+          where: `(sessionId,eq,${sessionId})`,
+        },
+        timeout: 5000,
+      });
       return response.data?.list || response.data || [];
     } catch (e: any) {
       const errorMsg = e.response?.data?.message || e.message || String(e);
       console.error(`[NocoDBAdapter] listTraces failed: ${errorMsg}`);
+      if (this.isProduction) {
+        throw e;
+      }
+      return [];
+    }
+  }
+
+  async listAllTraces(): Promise<AuditLog[]> {
+    try {
+      if (!this.apiToken) {
+        throw new Error("NocoDB API token is missing.");
+      }
+      const response = await axios.get(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_traces`, {
+        headers: {
+          "xc-token": this.apiToken,
+        },
+        timeout: 5000,
+      });
+      return response.data?.list || response.data || [];
+    } catch (e: any) {
+      const errorMsg = e.response?.data?.message || e.message || String(e);
+      console.error(`[NocoDBAdapter] listAllTraces failed: ${errorMsg}`);
+      if (this.isProduction) {
+        throw e;
+      }
+      return [];
+    }
+  }
+
+  async listAllTickets(): Promise<any[]> {
+    try {
+      if (!this.apiToken) {
+        throw new Error("NocoDB API token is missing.");
+      }
+      const response = await axios.get(`${this.baseUrl}/api/v1/db/data/v1/pf7h6to5sqv2zed/t_tickets`, {
+        headers: {
+          "xc-token": this.apiToken,
+        },
+        timeout: 5000,
+      });
+      return response.data?.list || response.data || [];
+    } catch (e: any) {
+      const errorMsg = e.response?.data?.message || e.message || String(e);
+      console.error(`[NocoDBAdapter] listAllTickets failed: ${errorMsg}`);
       if (this.isProduction) {
         throw e;
       }

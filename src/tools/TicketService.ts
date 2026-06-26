@@ -11,12 +11,12 @@ export class TicketService {
   async createTicket(input: TicketInput): Promise<ExecutionResult> {
     // 1. Calculate SLA Due Date
     const severity = input.severity;
-    
+
     const slaConfig: Record<string, number> = {
-      "Critical": 4, 
-      "High": 12,    
-      "Medium": 48,  
-      "Low": 120     
+      Critical: 4,
+      High: 12,
+      Medium: 48,
+      Low: 120,
     };
 
     const resolveHours = slaConfig[severity] || 120;

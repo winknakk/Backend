@@ -6,7 +6,7 @@ export const StartTraceInputSchema = z.object({
   agentId: z.string().optional(),
   toolName: z.string(),
   reason: z.string().optional(), // Why the Agent called this tool
-  arguments: z.record(z.any()),
+  arguments: z.record(z.string(), z.any()),
   requestId: z.string().optional(),
   conversationId: z.string().optional(),
   parentTraceId: z.string().optional(),
@@ -29,6 +29,11 @@ export interface IExecutionTraceService {
    * Logs a failed tool execution, saving the error message and updating status to FAILED.
    */
   failTrace(traceId: string, errorMessage: string): Promise<void>;
+
+  /**
+   * Logs a handoff transition, updating status to HANDOFF.
+   */
+  handoffTrace(traceId: string, result: Record<string, any>): Promise<void>;
 
   /**
    * Retrieves a single trace details by UUID.

@@ -8,8 +8,8 @@ export class PieceAdapter implements IPieceAdapter {
       name: "@activepieces/piece-nocodb",
       version: "0.4.4",
       displayName: "NocoDB",
-      description: "Creates, updates, deletes, and searches records in NocoDB database."
-    }
+      description: "Creates, updates, deletes, and searches records in NocoDB database.",
+    },
   };
 
   async getPieceMetadata(pieceName: string): Promise<PieceMetadata> {
@@ -22,7 +22,7 @@ export class PieceAdapter implements IPieceAdapter {
 
   async generateMcpDefinition(pieceName: string, actionName: string): Promise<McpToolDefinition> {
     const meta = await this.getPieceMetadata(pieceName);
-    
+
     if (pieceName === "@activepieces/piece-nocodb" && actionName === "nocodb-create-record") {
       return {
         name: "activepieces.nocodb_create_record",
@@ -32,12 +32,12 @@ export class PieceAdapter implements IPieceAdapter {
           properties: {
             baseId: { type: "string", description: "The Base ID in NocoDB" },
             tableId: { type: "string", description: "The Table ID in NocoDB" },
-            tableColumns: { type: "object", description: "The record columns to insert as a key-value object" }
+            tableColumns: { type: "object", description: "The record columns to insert as a key-value object" },
           },
-          required: ["baseId", "tableId", "tableColumns"]
+          required: ["baseId", "tableId", "tableColumns"],
         },
         source: "activepieces",
-        version: meta.version
+        version: meta.version,
       };
     }
 
@@ -47,10 +47,10 @@ export class PieceAdapter implements IPieceAdapter {
       inputSchema: {
         type: "object",
         properties: {},
-        required: []
+        required: [],
       },
       source: "activepieces",
-      version: meta.version
+      version: meta.version,
     };
   }
 
@@ -61,7 +61,7 @@ export class PieceAdapter implements IPieceAdapter {
     props: Record<string, any>
   ): Promise<any> {
     console.log(`[PieceAdapter] Calling Piece Action '${pieceName}::${actionName}'...`);
-    
+
     if (pieceName === "@activepieces/piece-nocodb" && actionName === "nocodb-create-record") {
       const { baseId, tableId, tableColumns } = props;
       const apiToken = authConnection?.apiToken || process.env.NOCODB_TOKEN || process.env.NOCODB_API_TOKEN;
@@ -76,33 +76,29 @@ export class PieceAdapter implements IPieceAdapter {
 
       console.log(`[PieceAdapter] NocoDB Create Record: baseId=${baseId}, tableId=${tableId}`);
       try {
-        const response = await axios.post(
-          `${baseUrl}/api/v1/db/data/v1/${baseId}/${tableId}`,
-          tableColumns,
-          {
-            headers: {
-              "xc-token": apiToken,
-              "Content-Type": "application/json"
-            },
-            timeout: 5000
-          }
-        );
+        const response = await axios.post(`${baseUrl}/api/v1/db/data/v1/${baseId}/${tableId}`, tableColumns, {
+          headers: {
+            "xc-token": apiToken,
+            "Content-Type": "application/json",
+          },
+          timeout: 5000,
+        });
         return {
           success: true,
           data: response.data,
           error: null,
-          source: "nocodb_piece"
+          source: "nocodb_piece",
         };
       } catch (e: any) {
         const errorMsg = e.response?.data?.message || e.message || String(e);
         console.error(`[PieceAdapter] NocoDB Piece execution failed: ${errorMsg}`);
-        
+
         if (process.env.NODE_ENV === "production") {
           return {
             success: false,
             data: null,
             error: `NocoDB Piece execution failed: ${errorMsg}`,
-            source: "nocodb_piece"
+            source: "nocodb_piece",
           };
         } else {
           // Dev fallback
@@ -111,7 +107,7 @@ export class PieceAdapter implements IPieceAdapter {
             success: true,
             data: { id: "mock-piece-id", ...tableColumns },
             error: null,
-            source: "nocodb_piece_mock"
+            source: "nocodb_piece_mock",
           };
         }
       }

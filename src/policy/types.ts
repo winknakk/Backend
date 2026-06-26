@@ -6,13 +6,14 @@ export const PolicyContextSchema = z.object({
   sessionId: z.string(),
   userRole: z.string().default("customer"),
   ipAddress: z.string().optional(),
+  agentId: z.string().optional(),
 });
 export type PolicyContext = z.infer<typeof PolicyContextSchema>;
 
 export const PolicyAuthorizationResponseSchema = z.object({
   isAllowed: z.boolean(),
   reason: z.string().optional(),
-  sanitizedParams: z.record(z.any()).optional(), // Mutated inputs (e.g., stripped PII)
+  sanitizedParams: z.record(z.string(), z.any()).optional(), // Mutated inputs (e.g., stripped PII)
 });
 export type PolicyAuthorizationResponse = z.infer<typeof PolicyAuthorizationResponseSchema>;
 

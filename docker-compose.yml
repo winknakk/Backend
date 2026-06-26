@@ -1,19 +1,23 @@
 version: '3.8'
 
 services:
-  api:
+  automationx-api:
     build: .
+    container_name: automationx-api
     ports:
-      - "3000:3000"
+      - "3001:3000"
     env_file:
       - production.env
     depends_on:
-      postgres:
+      automationx-postgres-primary:
+        condition: service_healthy
+      automationx-redis:
         condition: service_healthy
     restart: unless-stopped
 
-  postgres:
+  automationx-postgres-primary:
     image: pgvector/pgvector:pg16
+    container_name: automationx-postgres-primary
     environment:
       POSTGRES_USER: automationx
       POSTGRES_PASSWORD: changeme
@@ -21,7 +25,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata-primary:/var/lib/postgresql/data
       - ./database/migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U automationx"]
@@ -30,5 +34,43 @@ services:
       retries: 5
     restart: unless-stopped
 
+  automationx-postgres-replica:
+    image: pgvector/pgvector:pg16
+    container_name: automationx-postgres-replica
+    environment:
+      PGPASSWORD: replicator_password
+    ports:
+      - "5433:5432"
+    depends_on:
+      automationx-postgres-primary:
+        condition: service_healthy
+    volumes:
+      - pgdata-replica:/var/lib/postgresql/data
+    entrypoint: >
+      bash -c "
+      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+        echo 'Cloning database from primary...'
+        pg_basebackup -h automationx-postgres-primary -U replicator -D /var/lib/postgresql/data -Fp -Xs -P -R
+      fi
+      exec docker-entrypoint.sh postgres
+      "
+    restart: unless-stopped
+
+  automationx-redis:
+    image: redis:7-alpine
+    container_name: automationx-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
 volumes:
-  pgdata:
+  pgdata-primary:
+  pgdata-replica:
+  redisdata:

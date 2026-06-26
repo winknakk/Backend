@@ -3,6 +3,15 @@
 -- 001_initial_schema.sql
 -- ============================================================
 
+-- Create replication role if it does not exist
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
+    CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'replicator_password';
+  END IF;
+END
+$$;
+
 -- Companies
 CREATE TABLE IF NOT EXISTS companies (
   id SERIAL PRIMARY KEY,

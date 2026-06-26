@@ -1,7 +1,14 @@
 import * as fs from "fs";
 import * as path from "path";
+import { CacheService } from "../../cache/CacheService";
 import { DatabaseAdapter } from "../types";
-import { TicketInput, ExecutionResult, SessionContext, CompanyContext, AuditLog, AuditLogSchema } from "../../schemas/validation";
+import {
+  TicketInput,
+  ExecutionResult,
+  AuditLog,
+  AuditLogSchema,
+} from "../../schemas/validation";
+import { SessionContext, CompanyContext } from "../../memory/types";
 import {
   DbCompanySchema,
   DbIdentitySchema,
@@ -9,18 +16,41 @@ import {
   DbProjectSchema,
   DbConversationSchema,
   DbMessageSchema,
-  DbTicketSchema
+  DbTicketSchema,
 } from "../../schemas/database.schema";
 import { randomUUID } from "crypto";
 
 export class LocalDataAdapter implements DatabaseAdapter {
   private getFilePath(tableName: string): string {
-    const dataDir = path.resolve(__dirname, "../../../data");
+    const candidates = [
+      path.resolve(__dirname, "../../../data"),
+      path.resolve(process.cwd(), "data"),
+      path.resolve(process.cwd(), "ticket_codebase/data"),
+    ];
+
+    let dataDir = candidates[0];
+    for (const cand of candidates) {
+      if (fs.existsSync(cand)) {
+        const files = fs.readdirSync(cand);
+        const hasData = files.some(
+          (f) =>
+            f.endsWith(".json") &&
+            (f.includes("Tickets") || f.includes("Messages") || f.includes("Projects"))
+        );
+        if (hasData) {
+          dataDir = cand;
+          break;
+        }
+      }
+    }
+
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
     const files = fs.readdirSync(dataDir);
-    const match = files.find(f => f.includes(tableName) && f.endsWith(".json"));
+    const match =
+      files.find((f) => f.includes(`(${tableName})`) && f.endsWith(".json")) ||
+      files.find((f) => f.includes(tableName) && f.endsWith(".json"));
     if (!match) {
       const defaultFilename = `Ticket V.2 - ${tableName} (${tableName}).json`;
       const filePath = path.join(dataDir, defaultFilename);
@@ -34,10 +64,8 @@ export class LocalDataAdapter implements DatabaseAdapter {
     const filePath = this.getFilePath(tableName);
     const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw);
-    
-    return parsed
-      .filter((row: any) => row.id1 !== null) 
-      .map((row: any) => schema.parse(row)) as T[];
+
+    return parsed.filter((row: any) => row.id1 !== null).map((row: any) => schema.parse(row)) as T[];
   }
 
   private writeTable<T>(tableName: string, data: T[]): void {
@@ -47,17 +75,17 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
   async findProject(projectId: string): Promise<any> {
     const projects = this.readTable<any>("Projects", DbProjectSchema);
-    return projects.find(p => p.id1 === projectId);
+    return projects.find((p) => p.id1 === projectId);
   }
 
   async getConversation(conversationId: string): Promise<any> {
     const conversations = this.readTable<any>("Conversations", DbConversationSchema);
-    return conversations.find(c => c.id1 === conversationId);
+    return conversations.find((c) => c.id1 === conversationId);
   }
 
   async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
     const messages = this.readTable<any>("Messages", DbMessageSchema);
-    
+
     const maxId = messages.reduce((max, m) => {
       const id = parseInt(m.id1 || "0", 10);
       return id > max ? id : max;
@@ -69,7 +97,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       role,
       content,
       created_at: new Date().toISOString(),
-      conversation: conversationId
+      conversation: conversationId,
     };
 
     messages.push(newMessage);
@@ -99,7 +127,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       plane_issue_id: null,
       conversation: input.conversationId,
       severity: input.severity,
-      due_date: slaDueDate
+      due_date: slaDueDate,
     };
 
     tickets.push(newTicket);
@@ -116,7 +144,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       status: "Open" as const,
       startDate: new Date().toISOString(),
       dueDate: slaDueDate,
-      createdBy: "AI Support Agent"
+      createdBy: "AI Support Agent",
     };
 
     return {
@@ -124,7 +152,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       data: ticketData,
       error: null,
       source: "local",
-      executionId
+      executionId,
     };
   }
 
@@ -133,7 +161,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     const conversations = this.readTable<any>("Conversations", DbConversationSchema);
 
     let identity = identities.find(
-      id => id.channel_ref === senderId && id.channel?.toLowerCase() === channel.toLowerCase()
+      (id) => id.channel_ref === senderId && id.channel?.toLowerCase() === channel.toLowerCase()
     );
 
     if (!identity) {
@@ -143,7 +171,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       }, 0);
 
       const profiles = this.readTable<any>("Profiles", DbProfileSchema);
-      const profile = profiles.find(p => p.company === companyId) || profiles[0];
+      const profile = profiles.find((p) => p.company === companyId) || profiles[0];
 
       identity = {
         id1: String(maxId + 1),
@@ -151,16 +179,14 @@ export class LocalDataAdapter implements DatabaseAdapter {
         channel: channel.toLowerCase(),
         channel_ref: senderId,
         profile: profile.id1,
-        Conversations: ""
+        Conversations: "",
       };
 
       identities.push(identity);
       this.writeTable("Identities", identities);
     }
 
-    let conversation = conversations.find(
-      c => c.identity_id === identity!.id1 && c.status === "open"
-    );
+    let conversation = conversations.find((c) => c.identity_id === identity!.id1 && c.status === "open");
 
     if (!conversation) {
       const maxId = conversations.reduce((max, c) => {
@@ -169,7 +195,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       }, 0);
 
       const projects = this.readTable<any>("Projects", DbProjectSchema);
-      const project = projects.find(p => p.company_id === companyId) || projects[0];
+      const project = projects.find((p) => p.company_id === companyId) || projects[0];
 
       conversation = {
         id1: String(maxId + 1),
@@ -183,7 +209,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         identity: identity.id1,
         project: project.id1,
         Messages: "",
-        Tickets: ""
+        Tickets: "",
       };
 
       conversations.push(conversation);
@@ -200,45 +226,53 @@ export class LocalDataAdapter implements DatabaseAdapter {
     const projects = this.readTable<any>("Projects", DbProjectSchema);
 
     let identity = identities.find(
-      id => id.channel_ref === senderId && id.channel?.toLowerCase() === channel.toLowerCase()
+      (id) => id.channel_ref === senderId && id.channel?.toLowerCase() === channel.toLowerCase()
     );
 
     if (!identity) {
       const conversationId = await this.ensureConversation(senderId, "1", channel);
-      identity = identities.find(id => id.id1 === conversationId);
+      identity = identities.find((id) => id.id1 === conversationId);
       if (!identity) {
         identity = identities[0];
       }
     }
 
-    const profile = profiles.find(p => p.id1 === identity!.profile_id) || profiles[0];
+    const profile = profiles.find((p) => p.id1 === identity!.profile_id) || profiles[0];
 
-    const company = companies.find(c => c.id1 === profile.company) || companies[0];
+    const company = companies.find((c) => c.id1 === profile.company) || companies[0];
     const companyId = company.id1!;
 
-    const companyProjects = projects
-      .filter(p => p.company_id === companyId)
-      .map(p => ({
-        projectId: p.id1!,
-        projectName: p.name!,
-        projectType: p.Companies || "Support"
-      }));
+    const cacheKey = `tenant:${companyId}:config`;
+    let companyContext = await CacheService.getInstance().get<CompanyContext>(cacheKey);
 
-    const slaConfig = companyProjects.map(p => ([
-      { projectId: p.projectId, severity: "Critical", responseTimeHours: 1, resolveTimeHours: 4 },
-      { projectId: p.projectId, severity: "High", responseTimeHours: 4, resolveTimeHours: 12 },
-      { projectId: p.projectId, severity: "Medium", responseTimeHours: 24, resolveTimeHours: 48 },
-      { projectId: p.projectId, severity: "Low", responseTimeHours: 72, resolveTimeHours: 120 }
-    ])).flat();
+    if (!companyContext) {
+      const companyProjects = projects
+        .filter((p) => p.company_id === companyId)
+        .map((p) => ({
+          projectId: p.id1!,
+          projectName: p.name!,
+          projectType: p.Companies || "Support",
+        }));
 
-    const companyContext: CompanyContext = {
-      companyId,
-      companyName: company.name || "Default Company",
-      status: "Active" as const,
-      aiPromptTemplate: `คุณคือ Support Agent AI สำหรับช่วยเหลือผู้ใช้ระบบ IT ของบริษัท ${company.name}`,
-      projects: companyProjects,
-      slaConfig
-    };
+      const slaConfig = companyProjects
+        .map((p) => [
+          { projectId: p.projectId, severity: "Critical", responseTimeHours: 1, resolveTimeHours: 4 },
+          { projectId: p.projectId, severity: "High", responseTimeHours: 4, resolveTimeHours: 12 },
+          { projectId: p.projectId, severity: "Medium", responseTimeHours: 24, resolveTimeHours: 48 },
+          { projectId: p.projectId, severity: "Low", responseTimeHours: 72, resolveTimeHours: 120 },
+        ])
+        .flat();
+
+      companyContext = {
+        companyId,
+        companyName: company.name || "Default Company",
+        status: "Active" as const,
+        aiPromptTemplate: `คุณคือ Support Agent AI สำหรับช่วยเหลือผู้ใช้ระบบ IT ของบริษัท ${company.name}`,
+        projects: companyProjects,
+        slaConfig,
+      };
+      await CacheService.getInstance().set(cacheKey, companyContext, 300);
+    }
 
     const conversationId = await this.ensureConversation(senderId, companyId, channel);
     const conversation = await this.getConversation(conversationId);
@@ -250,25 +284,25 @@ export class LocalDataAdapter implements DatabaseAdapter {
       customerRef: senderId,
       companyContext,
       status: conversation.status || "open",
-      handledBy: conversation.handled_by || "ai"
+      handledBy: conversation.handled_by || "ai",
     };
   }
 
   async getConversationHistory(conversationId: string, limit: number = 10): Promise<any[]> {
     const messages = this.readTable<any>("Messages", DbMessageSchema);
     const filtered = messages
-      .filter(m => m.conversation_id === conversationId)
-      .map(m => ({
+      .filter((m) => m.conversation_id === conversationId)
+      .map((m) => ({
         role: m.role as "customer" | "ai" | "system",
         content: m.content || "",
-        timestamp: m.created_at || new Date().toISOString()
+        timestamp: m.created_at || new Date().toISOString(),
       }));
     return filtered.slice(-limit);
   }
 
   async updateHandoffState(conversationId: string, handledBy: "ai" | "human"): Promise<void> {
     const conversations = this.readTable<any>("Conversations", DbConversationSchema);
-    const conv = conversations.find(c => c.id1 === conversationId);
+    const conv = conversations.find((c) => c.id1 === conversationId);
     if (conv) {
       conv.handled_by = handledBy;
       conv.status = handledBy === "human" ? "escalated" : "open";
@@ -278,7 +312,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
   async searchKnowledge(query: string, filters?: { projectId?: string }): Promise<any[]> {
     const lowerQuery = query.toLowerCase();
-    const queryWords = lowerQuery.split(/\s+/).filter(w => w.length > 2);
+    const queryWords = lowerQuery.split(/\s+/).filter((w) => w.length > 2);
     const matches: any[] = [];
 
     // 1. Search Messages (resolved answers by AI or human)
@@ -286,13 +320,13 @@ export class LocalDataAdapter implements DatabaseAdapter {
       const messages = this.readTable<any>("Messages", DbMessageSchema);
       const conversations = this.readTable<any>("Conversations", DbConversationSchema);
 
-      messages.forEach(m => {
+      messages.forEach((m) => {
         const content = m.content || "";
         const lowerContent = content.toLowerCase();
-        
+
         // Find if this message belongs to the specified project (filter check)
         if (filters?.projectId) {
-          const conv = conversations.find(c => c.id1 === m.conversation_id);
+          const conv = conversations.find((c) => c.id1 === m.conversation_id);
           if (conv && conv.project_id !== filters.projectId) {
             return; // Skip if project doesn't match filter
           }
@@ -301,7 +335,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         // Calculate simple keyword overlap
         let overlapCount = 0;
         if (queryWords.length > 0) {
-          queryWords.forEach(word => {
+          queryWords.forEach((word) => {
             if (lowerContent.includes(word)) overlapCount++;
           });
         } else if (lowerContent.includes(lowerQuery)) {
@@ -309,7 +343,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         }
 
         if (overlapCount > 0) {
-          const score = queryWords.length > 0 ? (overlapCount / queryWords.length) : 0.5;
+          const score = queryWords.length > 0 ? overlapCount / queryWords.length : 0.5;
           if (m.id1 === "6") {
             console.log(`[Debug Search] Message #6: content="${lowerContent}"`);
             console.log(`[Debug Search] queryWords=${JSON.stringify(queryWords)}`);
@@ -322,8 +356,8 @@ export class LocalDataAdapter implements DatabaseAdapter {
             score,
             metadata: {
               conversationId: m.conversation_id,
-              role: m.role
-            }
+              role: m.role,
+            },
           });
         }
       });
@@ -334,7 +368,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     // 2. Search Tickets (historical issues and descriptions)
     try {
       const tickets = this.readTable<any>("Tickets", DbTicketSchema);
-      tickets.forEach(t => {
+      tickets.forEach((t) => {
         const subject = t.subject || "";
         const summary = t.summary || "";
         const textToSearch = `${subject} ${summary}`.toLowerCase();
@@ -346,7 +380,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
         let overlapCount = 0;
         if (queryWords.length > 0) {
-          queryWords.forEach(word => {
+          queryWords.forEach((word) => {
             if (textToSearch.includes(word)) overlapCount++;
           });
         } else if (textToSearch.includes(lowerQuery)) {
@@ -354,7 +388,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         }
 
         if (overlapCount > 0) {
-          const score = queryWords.length > 0 ? (overlapCount / queryWords.length) : 0.5;
+          const score = queryWords.length > 0 ? overlapCount / queryWords.length : 0.5;
           matches.push({
             id: t.id1 || "tck-unknown",
             type: "ticket",
@@ -363,8 +397,8 @@ export class LocalDataAdapter implements DatabaseAdapter {
             metadata: {
               status: t.status,
               priority: t.priority,
-              plane_issue_id: t.plane_issue_id
-            }
+              plane_issue_id: t.plane_issue_id,
+            },
           });
         }
       });
@@ -378,7 +412,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
   async saveTrace(trace: AuditLog): Promise<void> {
     const traces = this.readTable<AuditLog>("Traces", AuditLogSchema);
-    const index = traces.findIndex(t => t.traceId === trace.traceId);
+    const index = traces.findIndex((t) => t.traceId === trace.traceId);
     if (index !== -1) {
       traces[index] = trace;
     } else {
@@ -389,15 +423,24 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
   async getTrace(traceId: string): Promise<AuditLog | null> {
     const traces = this.readTable<AuditLog>("Traces", AuditLogSchema);
-    return traces.find(t => t.traceId === traceId) || null;
+    return traces.find((t) => t.traceId === traceId) || null;
   }
 
   async listTraces(sessionId: string): Promise<AuditLog[]> {
     const traces = this.readTable<AuditLog>("Traces", AuditLogSchema);
-    return traces.filter(t => t.sessionId === sessionId);
+    return traces.filter((t) => t.sessionId === sessionId);
   }
 
   async listAllTraces(): Promise<AuditLog[]> {
     return this.readTable<AuditLog>("Traces", AuditLogSchema);
+  }
+
+  async listAllTickets(): Promise<any[]> {
+    try {
+      const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+      return tickets;
+    } catch {
+      return [];
+    }
   }
 }

@@ -13,12 +13,7 @@ export type PieceMetadata = z.infer<typeof PieceMetadataSchema>;
 export interface IPieceAdapter {
   getPieceMetadata(pieceName: string): Promise<PieceMetadata>;
   generateMcpDefinition(pieceName: string, actionName: string): Promise<McpToolDefinition>;
-  executeAction(
-    pieceName: string,
-    actionName: string,
-    authConnection: any,
-    props: Record<string, any>
-  ): Promise<any>;
+  executeAction(pieceName: string, actionName: string, authConnection: any, props: Record<string, any>): Promise<any>;
   listActions(pieceName: string): Promise<string[]>;
 }
 

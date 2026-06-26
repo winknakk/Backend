@@ -12,6 +12,8 @@ import { TicketAgent } from "./supervisor/TicketAgent";
 import { AgentResult, IAgent, IAgentRouter } from "./supervisor/types";
 import { config } from "../config/env";
 
+import { IExecutionTraceService } from "../execution/types";
+
 const logger = createLogger("AgentRuntime");
 
 export interface IMcpToolRouter {
@@ -24,6 +26,7 @@ export class AgentRuntime implements IAgentSession {
   private memoryService: IMemoryService;
   private mcpToolRouter: IMcpToolRouter;
   private policyEngine: IPolicyEngine;
+  private traceService?: IExecutionTraceService;
   private status: "ACTIVE" | "HUMAN_HANDOFF" | "COMPLETED" = "ACTIVE";
   private agentRouter: IAgentRouter;
   private maxHandoffDepth: number;
@@ -33,13 +36,15 @@ export class AgentRuntime implements IAgentSession {
     companyId: string,
     memoryService: IMemoryService,
     mcpToolRouter: IMcpToolRouter,
-    policyEngine: IPolicyEngine
+    policyEngine: IPolicyEngine,
+    traceService?: IExecutionTraceService
   ) {
     this.sessionId = sessionId;
     this.companyId = companyId;
     this.memoryService = memoryService;
     this.mcpToolRouter = mcpToolRouter;
     this.policyEngine = policyEngine;
+    this.traceService = traceService;
     this.maxHandoffDepth = config.MAX_AGENT_HANDOFF_DEPTH;
 
     const supervisor = new SupervisorAgent();
@@ -57,30 +62,28 @@ export class AgentRuntime implements IAgentSession {
     const sanitizedInput = await this.policyEngine.sanitizeInputText(message.text);
 
     // 2. Load context and ensure conversation
-    const conversationId = await this.memoryService.ensureConversation(message.senderId, this.companyId, message.channel);
+    const conversationId = await this.memoryService.ensureConversation(
+      message.senderId,
+      this.companyId,
+      message.channel
+    );
     const sessionContext = await this.memoryService.loadSessionContext(message.senderId, message.channel);
     const companyName = sessionContext.companyContext?.companyName || "Default Company";
-    
-    logger.info(
-      { requestId: reqId, conversationId, component: "AgentRuntime" },
-      "Start chat processing"
-    );
+
+    logger.info({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start chat processing");
 
     // Append customer log
     await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput);
 
     // Get current message history from DB
     const history = await this.memoryService.getConversationHistory(conversationId);
-    const historyForAgent = history.map(h => ({
+    const historyForAgent = history.map((h) => ({
       role: h.role as string,
-      content: h.content as string
+      content: h.content as string,
     }));
 
     // 3. Knowledge-Aware Agentic Decision Flow
-    logger.debug(
-      { requestId: reqId, conversationId, component: "AgentRuntime" },
-      "Start PromptX reasoning loop"
-    );
+    logger.debug({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start PromptX reasoning loop");
 
     const richSessionContext = {
       ...sessionContext,
@@ -90,7 +93,7 @@ export class AgentRuntime implements IAgentSession {
       companyName,
       conversationId,
       sessionId: this.sessionId,
-      parentTraceId: reqId
+      parentTraceId: reqId,
     };
 
     const sanitizedMessage = { ...message, text: sanitizedInput };
@@ -114,7 +117,7 @@ export class AgentRuntime implements IAgentSession {
       recipientId: message.senderId,
       channel: message.channel,
       text: sanitizedOutput,
-      sentAt: new Date().toISOString()
+      sentAt: new Date().toISOString(),
     };
   }
 
@@ -123,7 +126,7 @@ export class AgentRuntime implements IAgentSession {
     const visitedAgents = new Set<string>();
     let agent = await this.agentRouter.route(message, {
       ...sessionContext,
-      handoffHistory: history
+      handoffHistory: history,
     });
 
     for (let depth = 0; depth < this.maxHandoffDepth; depth += 1) {
@@ -135,14 +138,14 @@ export class AgentRuntime implements IAgentSession {
             conversationId: sessionContext.conversationId,
             agentId: agent.id,
             handoffHistory: history,
-            component: "AgentRuntime"
+            component: "AgentRuntime",
           },
           reason
         );
         await this.memoryService.appendConversationLog(sessionContext.conversationId, "system", reason);
         return {
           text: "I could not safely continue agent routing because a handoff loop was detected.",
-          handoffHistory: history
+          handoffHistory: history,
         };
       }
 
@@ -155,7 +158,7 @@ export class AgentRuntime implements IAgentSession {
           conversationId: sessionContext.conversationId,
           agentId: agent.id,
           handoffHistory: history,
-          component: "AgentRuntime"
+          component: "AgentRuntime",
         },
         "Executing routed agent"
       );
@@ -163,7 +166,7 @@ export class AgentRuntime implements IAgentSession {
       const result = await agent.handle(message, {
         ...sessionContext,
         activeAgentId: agent.id,
-        handoffHistory: history
+        handoffHistory: history,
       });
       result.handoffHistory = [...history];
 
@@ -174,6 +177,33 @@ export class AgentRuntime implements IAgentSession {
       const nextAgent = this.agentRouter.getAgent(result.handoffTo);
       const reason = result.handoffReason || `Agent '${agent.id}' requested handoff to '${result.handoffTo}'.`;
 
+      if (this.traceService) {
+        try {
+          const traceId = await this.traceService.startTrace({
+            sessionId: sessionContext.sessionId,
+            agentId: agent.id,
+            toolName: `handoff_to_${result.handoffTo}`,
+            reason,
+            arguments: {
+              fromAgentId: agent.id,
+              toAgentId: result.handoffTo,
+              handoffHistory: history,
+              handoffContext: result.handoffContext,
+            },
+            requestId: sessionContext.requestId,
+            conversationId: sessionContext.conversationId,
+            parentTraceId: sessionContext.parentTraceId,
+          });
+          await this.traceService.handoffTrace(traceId, {
+            fromAgentId: agent.id,
+            toAgentId: result.handoffTo,
+            handoffHistory: history,
+          });
+        } catch (e: any) {
+          logger.warn({ error: e.message }, "Failed to write handoff trace log.");
+        }
+      }
+
       logger.info(
         {
           requestId: sessionContext.requestId,
@@ -183,7 +213,7 @@ export class AgentRuntime implements IAgentSession {
           reason,
           handoffContext: result.handoffContext,
           handoffHistory: history,
-          component: "AgentRuntime"
+          component: "AgentRuntime",
         },
         "Agent handoff requested"
       );
@@ -200,13 +230,13 @@ export class AgentRuntime implements IAgentSession {
             requestId: sessionContext.requestId,
             conversationId: sessionContext.conversationId,
             requestedAgentId: result.handoffTo,
-            component: "AgentRuntime"
+            component: "AgentRuntime",
           },
           "Requested handoff target is not registered"
         );
         return {
           text: `I could not hand off to '${result.handoffTo}' because that agent is not registered.`,
-          handoffHistory: history
+          handoffHistory: history,
         };
       }
 
@@ -220,7 +250,7 @@ export class AgentRuntime implements IAgentSession {
         conversationId: sessionContext.conversationId,
         maxHandoffDepth: this.maxHandoffDepth,
         handoffHistory: history,
-        component: "AgentRuntime"
+        component: "AgentRuntime",
       },
       reason
     );
@@ -228,7 +258,7 @@ export class AgentRuntime implements IAgentSession {
 
     return {
       text: "I could not safely continue agent routing because the handoff limit was reached.",
-      handoffHistory: history
+      handoffHistory: history,
     };
   }
 
@@ -239,7 +269,7 @@ export class AgentRuntime implements IAgentSession {
       sessionId: this.sessionId,
       companyId: this.companyId,
       history,
-      status: this.status
+      status: this.status,
     };
   }
 
@@ -255,17 +285,20 @@ export class AgentManager {
   private memoryService: IMemoryService;
   private mcpToolRouter: IMcpToolRouter;
   private policyEngine: IPolicyEngine;
+  private traceService?: IExecutionTraceService;
   private activeSessions: Record<string, AgentRuntime> = {};
   public agentRouter: IAgentRouter;
 
   constructor(
     memoryService: IMemoryService,
     mcpToolRouter: IMcpToolRouter,
-    policyEngine: IPolicyEngine
+    policyEngine: IPolicyEngine,
+    traceService?: IExecutionTraceService
   ) {
     this.memoryService = memoryService;
     this.mcpToolRouter = mcpToolRouter;
     this.policyEngine = policyEngine;
+    this.traceService = traceService;
 
     const supervisor = new SupervisorAgent();
     supervisor.registerAgent(new SupportAgent());
@@ -284,7 +317,8 @@ export class AgentManager {
         companyId,
         this.memoryService,
         this.mcpToolRouter,
-        this.policyEngine
+        this.policyEngine,
+        this.traceService
       );
     }
     return this.activeSessions[sessionId];

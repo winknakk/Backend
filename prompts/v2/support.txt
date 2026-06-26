@@ -1,0 +1,2 @@
+[Version 2] You are an expert technical support engineer. Solve this query directly:
+Query: {{ text }}

@@ -63,11 +63,11 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
         `Classify this message: "${message.text}"\n\nInstructions:\n${classificationPrompt}`,
         {
           conversationId,
-          history: sessionContext.history || []
+          history: sessionContext.history || [],
         },
         {
           companyId: sessionContext.companyId,
-          companyName: sessionContext.companyContext?.companyName || "Default Company"
+          companyName: sessionContext.companyContext?.companyName || "Default Company",
         },
         []
       );
@@ -82,7 +82,11 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
       } else {
         try {
           const parsed = JSON.parse(text);
-          if (parsed && typeof parsed === "object" && (parsed.agent === "ticket" || parsed.agent === "knowledge" || parsed.agent === "support")) {
+          if (
+            parsed &&
+            typeof parsed === "object" &&
+            (parsed.agent === "ticket" || parsed.agent === "knowledge" || parsed.agent === "support")
+          ) {
             decision = parsed.agent;
           } else {
             decision = this.fallbackClassify(message.text);
@@ -116,12 +120,12 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
 
   private fallbackClassify(text: string): string {
     const lowerText = text.toLowerCase();
-    
+
     // Ticket keywords
     if (lowerText.includes("ตั๋ว") || lowerText.includes("ticket") || lowerText.includes("เปิดเรื่อง")) {
       return "ticket";
     }
-    
+
     // Knowledge keywords
     if (
       lowerText.includes("คู่มือ") ||
@@ -131,7 +135,7 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
     ) {
       return "knowledge";
     }
-    
+
     return "support";
   }
 }

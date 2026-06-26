@@ -23,7 +23,7 @@ export class ExecutionTraceService implements IExecutionTraceService {
       status: "RUNNING",
       requestId: input.requestId,
       conversationId: input.conversationId,
-      parentTraceId: input.parentTraceId
+      parentTraceId: input.parentTraceId,
     };
     await this.dbAdapter.saveTrace(newTrace);
     return traceId;
@@ -44,6 +44,16 @@ export class ExecutionTraceService implements IExecutionTraceService {
     if (trace) {
       trace.errorMessage = errorMessage;
       trace.status = "FAILED";
+      trace.completedAt = new Date().toISOString();
+      await this.dbAdapter.saveTrace(trace);
+    }
+  }
+
+  async handoffTrace(traceId: string, result: Record<string, any>): Promise<void> {
+    const trace = await this.dbAdapter.getTrace(traceId);
+    if (trace) {
+      trace.result = result;
+      trace.status = "HANDOFF";
       trace.completedAt = new Date().toISOString();
       await this.dbAdapter.saveTrace(trace);
     }

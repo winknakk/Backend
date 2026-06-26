@@ -12,12 +12,7 @@ export class PieceMcpTool implements ITool {
   private pieceName: string;
   private actionName: string;
 
-  constructor(
-    pieceAdapter: IPieceAdapter,
-    pieceName: string,
-    actionName: string,
-    definition: McpToolDefinition
-  ) {
+  constructor(pieceAdapter: IPieceAdapter, pieceName: string, actionName: string, definition: McpToolDefinition) {
     this.pieceAdapter = pieceAdapter;
     this.pieceName = pieceName;
     this.actionName = actionName;
@@ -28,18 +23,13 @@ export class PieceMcpTool implements ITool {
 
   async execute(params: Record<string, any>): Promise<Record<string, any>> {
     console.log(`[PieceMcpTool] Executing piece action ${this.pieceName}::${this.actionName}`);
-    
+
     const authConnection = {
       apiToken: process.env.NOCODB_TOKEN || process.env.NOCODB_API_TOKEN,
-      baseUrl: process.env.NOCODB_BASE_URL || "https://app.nocodb.com"
+      baseUrl: process.env.NOCODB_BASE_URL || "https://app.nocodb.com",
     };
 
-    const result = await this.pieceAdapter.executeAction(
-      this.pieceName,
-      this.actionName,
-      authConnection,
-      params
-    );
+    const result = await this.pieceAdapter.executeAction(this.pieceName, this.actionName, authConnection, params);
 
     return result;
   }

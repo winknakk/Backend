@@ -11,7 +11,7 @@ export class KeywordRetriever implements IRetriever {
 
   async retrieve(query: string, filters?: { projectId?: string }): Promise<KnowledgeResult[]> {
     const rawResults = await this.dbAdapter.searchKnowledge(query, filters);
-    
+
     const results: KnowledgeResult[] = rawResults.map((raw) => {
       let confidence = raw.score || 0.5;
 

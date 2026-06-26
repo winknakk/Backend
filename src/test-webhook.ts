@@ -40,7 +40,7 @@ async function runWebhookTest() {
       senderId: "U6256f0c4dbb64edacf9eea92904e49b1",
       channel: "LINE",
       text: "Cannot login Orbit App session expired",
-      receivedAt: new Date().toISOString()
+      receivedAt: new Date().toISOString(),
     };
 
     const reply1 = await axios.post(`${baseUrl}/webhook/message`, payload1);
@@ -70,7 +70,6 @@ async function runWebhookTest() {
     }
 
     console.log("\n✅ HTTP Webhook Test PASSED successfully!");
-
   } catch (err: any) {
     console.error("\n❌ HTTP Webhook Test FAILED:");
     console.error(err.message);
@@ -86,7 +85,7 @@ async function runWebhookTest() {
   }
 }
 
-runWebhookTest().catch(err => {
+runWebhookTest().catch((err) => {
   console.error(err);
   process.exit(1);
 });

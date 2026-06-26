@@ -40,7 +40,7 @@ export class KnowledgeAgent implements IAgent {
         conversationId,
         durationMs: timer(),
         component: "KnowledgeAgent",
-        success: searchResult.success
+        success: searchResult.success,
       },
       "Knowledge Agent search completed"
     );
@@ -57,7 +57,7 @@ export class KnowledgeAgent implements IAgent {
         );
 
         return {
-          text: `I found a matching knowledge-base answer for "${message.text}":\n\n${bestMatch.content}`
+          text: `I found a matching knowledge-base answer for "${message.text}":\n\n${bestMatch.content}`,
         };
       }
     }
@@ -74,8 +74,8 @@ export class KnowledgeAgent implements IAgent {
       handoffContext: {
         searchedTool: "search_project_docs",
         query: message.text,
-        confidenceThreshold: 0.8
-      }
+        confidenceThreshold: 0.8,
+      },
     };
   }
 }
