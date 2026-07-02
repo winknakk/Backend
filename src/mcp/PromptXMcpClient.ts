@@ -24,105 +24,80 @@ export class PromptXMcpClient {
    * sends a JSON-RPC request to that POST URL, waits for the response on the SSE stream,
    * and cleans up all connections afterwards.
    */
+  private parseSseResponse(text: string, requestId: number): any {
+    const lines = text.split("\n");
+    let currentEvent = "";
+
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        currentEvent = line.substring(6).trim();
+      } else if (line.startsWith("data:")) {
+        const dataVal = line.substring(5).trim();
+
+        if (currentEvent === "message") {
+          try {
+            const parsed = JSON.parse(dataVal);
+            if (parsed.id === requestId) {
+              if (parsed.error) {
+                throw new Error(`PromptX MCP Server Error: ${parsed.error.message} (Code: ${parsed.error.code})`);
+              }
+              return parsed.result;
+            }
+          } catch (err: any) {
+            if (err.message && err.message.startsWith("PromptX MCP Server Error")) {
+              throw err;
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback: direct JSON parse
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed.id === requestId) {
+        if (parsed.error) {
+          throw new Error(`PromptX MCP Server Error: ${parsed.error.message} (Code: ${parsed.error.code})`);
+        }
+        return parsed.result;
+      }
+    } catch (err: any) {
+      if (err.message && err.message.startsWith("PromptX MCP Server Error")) {
+        throw err;
+      }
+    }
+
+    throw new Error("No valid JSON-RPC response found in HTTP POST response.");
+  }
+
   private async executeJsonRpc(method: string, params: Record<string, any>, timeoutMs: number = 20000): Promise<any> {
     return PromptXMcpClient.circuitBreaker.execute(async () => {
       if (!this.url || !this.token) {
         throw new Error("PROMPTX_MCP_URL or PROMPTX_MCP_TOKEN environment variable is not defined.");
       }
 
-      console.log(`[PromptXMcpClient] Connecting to SSE at '${this.url}'`);
-      console.log(`[PromptXMcpClient] Token length: ${this.token?.length}, value: '${this.token}'`);
+      const requestId = Math.floor(100000 + Math.random() * 900000);
+      const payload = {
+        jsonrpc: "2.0",
+        id: requestId,
+        method,
+        params,
+      };
 
-      // 1. Establish SSE GET request
-      const sseResponse = await axios.get(this.url, {
+      console.log(`[PromptXMcpClient] Sending JSON-RPC POST to '${this.url}' for method '${method}' (RequestId: ${requestId})`);
+      console.log(`[PromptXMcpClient] Token length: ${this.token?.length}`);
+
+      const res = await axios.post(this.url, payload, {
         headers: {
           Authorization: `Bearer ${this.token}`,
-          Accept: "text/event-stream",
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
         },
-        responseType: "stream",
         timeout: timeoutMs,
+        responseType: "text",
       });
 
-      return new Promise((resolve, reject) => {
-        let postUrl = "";
-        const requestId = Math.floor(100000 + Math.random() * 900000);
-        let timeoutId: NodeJS.Timeout;
-
-        const cleanup = () => {
-          clearTimeout(timeoutId);
-          sseResponse.data.destroy();
-        };
-
-        timeoutId = setTimeout(() => {
-          cleanup();
-          reject(new Error(`Timeout waiting for JSON-RPC response for method '${method}' (RequestId: ${requestId})`));
-        }, timeoutMs);
-
-        sseResponse.data.on("data", async (chunk: Buffer) => {
-          const lines = chunk.toString().split("\n");
-          let currentEvent = "";
-
-          for (const line of lines) {
-            if (line.startsWith("event:")) {
-              currentEvent = line.substring(6).trim();
-            } else if (line.startsWith("data:")) {
-              const dataVal = line.substring(5).trim();
-
-              if (currentEvent === "endpoint") {
-                postUrl = dataVal;
-                console.log(`[PromptXMcpClient] Dynamic endpoint received: ${postUrl}`);
-
-                // 2. Send the POST JSON-RPC request to the dynamic endpoint
-                try {
-                  const payload = {
-                    jsonrpc: "2.0",
-                    id: requestId,
-                    method,
-                    params,
-                  };
-
-                  await axios.post(postUrl, payload, {
-                    headers: {
-                      Authorization: `Bearer ${this.token}`,
-                      "Content-Type": "application/json",
-                    },
-                    timeout: timeoutMs,
-                  });
-                } catch (postErr: any) {
-                  cleanup();
-                  reject(new Error(`Failed to POST request to dynamic endpoint: ${postErr.message}`));
-                }
-              } else if (currentEvent === "message") {
-                try {
-                  const parsed = JSON.parse(dataVal);
-                  if (parsed.id === requestId) {
-                    cleanup();
-                    if (parsed.error) {
-                      reject(
-                        new Error(`PromptX MCP Server Error: ${parsed.error.message} (Code: ${parsed.error.code})`)
-                      );
-                    } else {
-                      resolve(parsed.result);
-                    }
-                  }
-                } catch (err) {
-                  // Ignore parsing errors for non-JSON lines or heartbeats
-                }
-              }
-            }
-          }
-        });
-
-        sseResponse.data.on("error", (err: any) => {
-          cleanup();
-          reject(err);
-        });
-
-        sseResponse.data.on("end", () => {
-          cleanup();
-          reject(new Error("SSE stream closed unexpectedly without returning response."));
-        });
-      });
+      return this.parseSseResponse(res.data, requestId);
     });
   }
 

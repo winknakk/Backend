@@ -62,4 +62,9 @@ export interface IMemoryService {
    * Updates who currently handles the chat (routes control back and forth).
    */
   updateHandoffState(conversationId: string, handledBy: "ai" | "human"): Promise<void>;
+
+  /**
+   * Retrieves the full conversation history with message Ids for memory tracking.
+   */
+  getFullConversationHistory(conversationId: string): Promise<Array<{ id: string; role: string; content: string; timestamp: string }>>;
 }

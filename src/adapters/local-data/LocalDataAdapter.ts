@@ -19,8 +19,10 @@ import {
   DbTicketSchema,
 } from "../../schemas/database.schema";
 import { randomUUID } from "crypto";
+import { TakeoverManager } from "../../human-takeover/TakeoverManager";
 
 export class LocalDataAdapter implements DatabaseAdapter {
+  private takeoverManager = new TakeoverManager();
   private getFilePath(tableName: string): string {
     const candidates = [
       path.resolve(__dirname, "../../../data"),
@@ -435,12 +437,155 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return this.readTable<AuditLog>("Traces", AuditLogSchema);
   }
 
-  async listAllTickets(): Promise<any[]> {
+  async listAllTickets(conversationId?: string): Promise<any[]> {
     try {
-      const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+      let tickets = this.readTable<any>("Tickets", DbTicketSchema);
+      if (conversationId) {
+        tickets = tickets.filter((t) => String(t.conversation_id) === String(conversationId));
+      }
       return tickets;
     } catch {
       return [];
     }
   }
+
+  async listAllConversations(): Promise<any[]> {
+    const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+    const identities = this.readTable<any>("Identities", DbIdentitySchema);
+    const messages = this.readTable<any>("Messages", DbMessageSchema);
+    const profiles = this.readTable<any>("Profiles", DbProfileSchema);
+    const companies = this.readTable<any>("Companies", DbCompanySchema);
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+
+    return conversations.map((c) => {
+      const ident = identities.find((i) => String(i.id1) === String(c.identity_id));
+      const convMsgs = messages.filter((m) => String(m.conversation_id) === String(c.id1));
+      const lastMsg = convMsgs.sort(
+        (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+      )[0];
+
+      const cid = String(c.id1);
+      const takeover = this.takeoverManager.getTakeoverState(cid);
+
+      let profileName = "Nattapong";
+      let avatarUrl: string | null = null;
+      let profileId = "unknown";
+      let profileEmail: string | null = null;
+      let profilePhone: string | null = null;
+      let companyName = "Orbit Retail";
+
+      if (ident) {
+        const profile = profiles.find((p) => String(p.id1) === String(ident.profile_id));
+        if (profile) {
+          profileName = profile.display_name || profile.name || "Nattapong";
+          avatarUrl = profile.avatar_url || null;
+          profileId = String(profile.id1 || profile.Id || "unknown");
+          profileEmail = profile.email || null;
+          profilePhone = profile.phone || null;
+
+          const company = companies.find((co) => String(co.id1) === String(profile.company));
+          if (company) {
+            companyName = company.name || "Orbit Retail";
+          }
+        }
+      }
+
+      const convTickets = tickets.filter((t) => String(t.conversation_id) === cid);
+      const highestSeverity = convTickets.reduce((max: string, t: any) => {
+        const sev = t.severity || 'Low';
+        const priorityMap: Record<string, number> = { 'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1 };
+        if ((priorityMap[sev] || 0) > (priorityMap[max] || 0)) {
+          return sev;
+        }
+        return max;
+      }, 'Low');
+
+      const ticketIds = convTickets.map((t: any) => String(t.ticket_id || t.Id || '')).join(' ');
+      const messageContents = convMsgs.map((m: any) => String(m.content || '')).join(' ');
+
+      return {
+        id: cid,
+        id1: cid,
+        customer: ident ? String(ident.channel_ref) : "unknown",
+        channel: String(c.channel),
+        status: String(c.status),
+        last_message: lastMsg ? String(lastMsg.content || "") : "",
+        last_message_timestamp: lastMsg ? lastMsg.created_at : null,
+        last_message_role: lastMsg ? lastMsg.role : null,
+        max_ticket_severity: highestSeverity,
+        company_name: companyName,
+        ticket_ids: ticketIds,
+        message_contents: messageContents,
+        handled_by: String(c.handled_by || "ai"),
+        human_session_started_at: takeover?.human_session_started_at || null,
+        human_session_expire_at: takeover?.human_session_expire_at || null,
+        last_human_reply_at: takeover?.last_human_reply_at || null,
+        profile_id: profileId,
+        profile_name: profileName,
+        avatar_url: avatarUrl,
+        profile_email: profileEmail,
+        profile_phone: profilePhone,
+      };
+    });
+  }
+
+  async getMessages(conversationId: string): Promise<any[]> {
+    const messages = this.readTable<any>("Messages", DbMessageSchema);
+    return messages
+      .filter((m) => String(m.conversation_id) === String(conversationId))
+      .sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime())
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: m.created_at,
+      }));
+  }
+
+  async getConversationIdent(conversationId: string): Promise<any> {
+    const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+    const identities = this.readTable<any>("Identities", DbIdentitySchema);
+    const localConv = conversations.find((c) => String(c.id1) === String(conversationId));
+    const ident = localConv ? identities.find((i) => String(i.id1) === String(localConv.identity_id)) : null;
+    if (ident) {
+      return {
+        channel: ident.channel,
+        channel_ref: ident.channel_ref,
+      };
+    }
+    return null;
+  }
+
+  async updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    const idx = tickets.findIndex((t) => String(t.id1) === String(ticketId));
+    if (idx !== -1) {
+      tickets[idx].plane_issue_id = planeIssueId;
+      tickets[idx].status = "In Progress";
+      this.writeTable("Tickets", tickets);
+    }
+  }
+
+  async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    const ticket = tickets.find((t) => String(t.id1) === String(ticketId));
+    let companyName = "Unknown";
+
+    if (ticket) {
+      const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+      const identities = this.readTable<any>("Identities", DbIdentitySchema);
+      const profiles = this.readTable<any>("Profiles", DbProfileSchema);
+      const companies = this.readTable<any>("Companies", DbCompanySchema);
+
+      const conv = conversations.find((c) => String(c.id1) === String(ticket.conversation_id));
+      const ident = conv ? identities.find((i) => String(i.id1) === String(conv.identity_id)) : null;
+      const profile = ident ? profiles.find((p) => String(p.id1) === String(ident.profile_id)) : null;
+      const company = profile ? companies.find((c) => String(c.id1) === String(profile.company)) : null;
+      if (company) {
+        companyName = company.name || "Unknown";
+      }
+    }
+
+    return { ticket, companyName };
+  }
 }
+

@@ -11,6 +11,7 @@ import { KnowledgeAgent } from "./supervisor/KnowledgeAgent";
 import { TicketAgent } from "./supervisor/TicketAgent";
 import { AgentResult, IAgent, IAgentRouter } from "./supervisor/types";
 import { config } from "../config/env";
+import { ConversationMemoryService } from "../memory/ConversationMemoryService";
 
 import { IExecutionTraceService } from "../execution/types";
 
@@ -30,6 +31,7 @@ export class AgentRuntime implements IAgentSession {
   private status: "ACTIVE" | "HUMAN_HANDOFF" | "COMPLETED" = "ACTIVE";
   private agentRouter: IAgentRouter;
   private maxHandoffDepth: number;
+  private conversationMemoryService: ConversationMemoryService;
 
   constructor(
     sessionId: string,
@@ -46,6 +48,7 @@ export class AgentRuntime implements IAgentSession {
     this.policyEngine = policyEngine;
     this.traceService = traceService;
     this.maxHandoffDepth = config.MAX_AGENT_HANDOFF_DEPTH;
+    this.conversationMemoryService = new ConversationMemoryService();
 
     const supervisor = new SupervisorAgent();
     supervisor.registerAgent(new SupportAgent());
@@ -75,19 +78,19 @@ export class AgentRuntime implements IAgentSession {
     // Append customer log
     await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput);
 
-    // Get current message history from DB
-    const history = await this.memoryService.getConversationHistory(conversationId);
-    const historyForAgent = history.map((h) => ({
-      role: h.role as string,
-      content: h.content as string,
-    }));
+    // Get full message history with Ids for memory tracking
+    const fullHistory = await this.memoryService.getFullConversationHistory(conversationId);
+
+    // Build memory context: summarize older messages, keep recent messages
+    const memoryContext = await this.conversationMemoryService.getOrSummarize(conversationId, fullHistory);
 
     // 3. Knowledge-Aware Agentic Decision Flow
     logger.debug({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start PromptX reasoning loop");
 
     const richSessionContext = {
       ...sessionContext,
-      history: historyForAgent,
+      history: memoryContext.recentMessages,
+      memory: memoryContext.memoryBlock,
       requestId: reqId,
       companyId: this.companyId,
       companyName,

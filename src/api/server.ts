@@ -24,6 +24,8 @@ import { PolicyEngine } from "../policy/PolicyEngine";
 import { ExecutionTraceService } from "../execution/ExecutionTrace";
 import { McpToolRouter } from "../mcp/McpToolRouter";
 import { MemoryService } from "../memory/MemoryService";
+import { HumanReplyService } from "../services/humanReplyService";
+import { PlaneService } from "../services/planeService";
 import { AgentManager } from "../agent/AgentRuntime";
 import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
@@ -63,11 +65,12 @@ const mcpRouter = new McpToolRouter(policyEngine, traceService, toolRegistry);
 const memoryService = new MemoryService(dbAdapter);
 const agentManager = new AgentManager(memoryService, mcpRouter, policyEngine, traceService);
 
-// Phase 9 Governance Components
 const takeoverManager = new TakeoverManager();
 const trafficSplitter = new TrafficSplitter();
 const metricAggregator = new MetricAggregator(dbAdapter);
 const ingestionService = new IngestionService(vectorStore, embeddingService);
+const humanReplyService = new HumanReplyService(dbAdapter);
+const planeService = new PlaneService(dbAdapter);
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
 
 const orchestrator = new Orchestrator(memoryService, agentManager, takeoverManager);
@@ -76,7 +79,6 @@ const promptXMcpClient = new PromptXMcpClient();
 // 4. Initialize Job Queue
 const jobQueue = QueueFactory.getQueue();
 
-// Register Default Policy Rules
 policyEngine.registerRule({
   ruleId: "rule-allow-core",
   name: "Allow Core Tool Commands",
@@ -86,6 +88,15 @@ policyEngine.registerRule({
 });
 
 // Register Middleware Hooks
+fastify.addHook("onRequest", async (request, reply) => {
+  reply.header("Access-Control-Allow-Origin", "*");
+  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (request.method === "OPTIONS") {
+    return reply.code(200).send();
+  }
+});
+
 fastify.addHook("onRequest", rateLimitHook);
 fastify.addHook("onRequest", authHook);
 fastify.addHook("preValidation", webhookSignatureHook);
@@ -312,12 +323,269 @@ fastify.get("/agents", async (request, reply) => {
   return reply.code(200).send(agents);
 });
 
+fastify.post("/api/v1/internal/tickets", async (request, reply) => {
+  const body = request.body as any;
+  const result = await ticketService.createTicket({
+    conversationId: body.conversationId,
+    subject: body.subject,
+    summary: body.summary,
+    severity: body.severity,
+    priority: body.priority,
+    projectId: body.projectId || "1",
+  });
+  if (!result.success || !result.data) {
+    return reply.code(200).send(result);
+  }
+  const ticket = result.data;
+  const ticketId = ticket.ticket_id || ticket.ticketId;
+  const dueDate = ticket.due_date || ticket.dueDate;
+  return reply.code(200).send({
+    success: true,
+    ticketId,
+    dueDate
+  });
+});
+
+fastify.get("/api/v1/internal/tickets/status", async (request, reply) => {
+  const query = request.query as any;
+  const tickets = await dbAdapter.listAllTickets(query.conversationId);
+  return reply.code(200).send(tickets);
+});
+
+fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) => {
+  const body = request.body as any;
+  await dbAdapter.updateHandoffState(body.conversationId, "human");
+  if (takeoverManager) {
+    const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
+    takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
+  }
+  return reply.code(200).send({ success: true, handled_by: "human" });
+});
+
+fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
+  const body = request.body as any;
+  const result = await humanReplyService.sendReply(body.conversationId, body.message);
+  if (takeoverManager) {
+    const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
+    takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
+  }
+  return reply.code(200).send(result);
+});
+
+fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
+  const body = request.body as any;
+  const result = await planeService.promoteTicketToPlane(body.ticketId);
+  return reply.code(200).send(result);
+});
+
+fastify.post("/api/v1/internal/messages", async (request, reply) => {
+  const body = request.body as any;
+  await dbAdapter.saveMessage(body.conversationId, body.role || "human", body.content);
+  return reply.code(200).send({ success: true });
+});
+
+fastify.get("/api/v1/internal/messages", async (request, reply) => {
+  const query = request.query as any;
+  const messages = await dbAdapter.getMessages(query.conversationId);
+  const list = messages.map((m: any) => ({
+    id: m.id,
+    fields: {
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      conversation_id: m.conversation_id
+    }
+  }));
+  return reply.code(200).send(list);
+});
+
+fastify.get("/api/v1/internal/conversations/identity", async (request, reply) => {
+  const query = request.query as any;
+  const ident = await dbAdapter.getConversationIdent(query.conversationId);
+  return reply.code(200).send(ident);
+});
+
+fastify.get("/api/v1/internal/tickets/details", async (request, reply) => {
+  const query = request.query as any;
+  const result = await dbAdapter.getTicketCompanyContext(query.ticketId);
+  return reply.code(200).send(result);
+});
+
+fastify.post("/api/v1/internal/tickets/update-plane", async (request, reply) => {
+  const body = request.body as any;
+  await dbAdapter.updateTicketPlaneIssue(body.ticketId, body.planeIssueId);
+  return reply.code(200).send({ success: true });
+});
+
+fastify.get("/api/v1/internal/identities/search", async (request, reply) => {
+  const query = request.query as any;
+  const channel = query.channel;
+  const channelRef = query.channelRef || query.channel_ref;
+  
+  const res = await pool.query(
+    `SELECT * FROM identities WHERE channel = $1 AND channel_ref = $2 LIMIT 1`,
+    [channel, channelRef]
+  );
+  
+  if (res.rows.length === 0) {
+    return reply.code(200).send([]);
+  }
+  
+  const ident = res.rows[0];
+  return reply.code(200).send([
+    {
+      id: ident.id,
+      fields: {
+        profile_id: ident.profile_id ? { id: ident.profile_id } : null
+      }
+    }
+  ]);
+});
+
+fastify.get("/api/v1/internal/identities/details", async (request, reply) => {
+  const query = request.query as any;
+  const identityId = query.identityId || query.identity_id;
+  const res = await pool.query(
+    `SELECT * FROM identities WHERE id = $1 LIMIT 1`,
+    [identityId]
+  );
+  if (res.rows.length === 0) {
+    return reply.code(404).send({ error: "Identity not found" });
+  }
+  const ident = res.rows[0];
+  return reply.code(200).send({
+    id: ident.id,
+    fields: {
+      id: ident.id,
+      profile_id: ident.profile_id ? { id: ident.profile_id } : null,
+      channel: ident.channel,
+      channel_ref: ident.channel_ref
+    }
+  });
+});
+
+fastify.get("/api/v1/internal/profiles/details", async (request, reply) => {
+  const query = request.query as any;
+  const profileId = query.profileId || query.profile_id;
+  
+  const res = await pool.query(
+    `SELECT * FROM profiles WHERE id = $1 LIMIT 1`,
+    [profileId]
+  );
+  
+  if (res.rows.length === 0) {
+    return reply.code(404).send({ error: "Profile not found" });
+  }
+  
+  const prof = res.rows[0];
+  return reply.code(200).send({
+    id: prof.id,
+    fields: {
+      company_id: prof.company_id ? { id: prof.company_id } : null,
+      name: prof.name
+    }
+  });
+});
+
+fastify.get("/api/v1/internal/companies/details", async (request, reply) => {
+  const query = request.query as any;
+  const companyId = query.companyId || query.company_id;
+  
+  const res = await pool.query(
+    `SELECT * FROM companies WHERE id = $1 LIMIT 1`,
+    [companyId]
+  );
+  
+  if (res.rows.length === 0) {
+    return reply.code(404).send({ error: "Company not found" });
+  }
+  
+  const comp = res.rows[0];
+  return reply.code(200).send({
+    id: comp.id,
+    fields: {
+      name: comp.name
+    }
+  });
+});
+
+fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
+  const query = request.query as any;
+  const identityId = query.identityId || query.identity_id;
+  const status = query.status || "open";
+  
+  const res = await pool.query(
+    `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
+    [identityId, status]
+  );
+  
+  if (res.rows.length === 0) {
+    return reply.code(200).send([]);
+  }
+  
+  const conv = res.rows[0];
+  return reply.code(200).send([
+    {
+      id: conv.id,
+      fields: {
+        id: conv.id,
+        identity_id: conv.identity_id,
+        project_id: conv.project_id,
+        channel: conv.channel,
+        status: conv.status,
+        handled_by: conv.handled_by,
+        assigned_pm: conv.assigned_pm
+      }
+    }
+  ]);
+});
+
+fastify.post("/api/v1/internal/conversations", async (request, reply) => {
+  const body = request.body as any;
+  const identityId = body.identityId || body.identity_id;
+  const channel = body.channel;
+  const status = body.status || "open";
+  const handledBy = body.handledBy || body.handled_by || "ai";
+  
+  const res = await pool.query(
+    `INSERT INTO conversations (identity_id, channel, status, handled_by)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [identityId, channel, status, handledBy]
+  );
+  
+  const conv = res.rows[0];
+  return reply.code(200).send({
+    id: conv.id,
+    fields: {
+      id: conv.id,
+      identity_id: conv.identity_id,
+      project_id: conv.project_id,
+      channel: conv.channel,
+      status: conv.status,
+      handled_by: conv.handled_by,
+      assigned_pm: conv.assigned_pm
+    }
+  });
+});
+
+fastify.get("/api/v1/internal/conversations/details", async (request, reply) => {
+  const query = request.query as any;
+  const conv = await dbAdapter.getConversation(query.conversationId);
+  if (!conv) {
+    return reply.code(404).send({ error: "Conversation not found" });
+  }
+  return reply.code(200).send(conv);
+});
+
 // Register Phase 9 Admin Routes
 registerAdminRoutes(fastify, {
   metricAggregator,
   ingestionService,
   evalTestRunner,
   trafficSplitter,
+  dbAdapter,
+  takeoverManager,
 });
 
 const start = async () => {

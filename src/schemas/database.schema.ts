@@ -69,6 +69,7 @@ export type DbMessage = z.infer<typeof DbMessageSchema>;
 
 export const DbTicketSchema = z.object({
   id1: z.string().nullish(),
+  ticket_id: z.string().nullish(),
   conversation_id: z.string().nullish(),
   subject: z.string().nullish(),
   summary: z.string().nullish(),

@@ -24,11 +24,26 @@ export class SupportAgent implements IAgent {
     const timer = startTimer();
 
     try {
+      // Build history with memory context layering: SYSTEM (memory) → RECENT → CURRENT
+      const recentHistory: Array<{ role: string; content: string }> = sessionContext.history || [];
+      const historyWithMemory: Array<{ role: string; content: string }> = [];
+
+      // Prepend memory as system-role advisory context
+      if (sessionContext.memory) {
+        historyWithMemory.push({
+          role: "system",
+          content: sessionContext.memory,
+        });
+      }
+
+      // Append recent messages
+      historyWithMemory.push(...recentHistory);
+
       const response = await this.promptXMcpClient.chatAgent(
         message.text,
         {
           conversationId,
-          history: sessionContext.history || [],
+          history: historyWithMemory,
         },
         {
           companyId: sessionContext.companyId,

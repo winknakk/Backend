@@ -7,6 +7,7 @@ import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
 import { CacheService } from "../../cache/CacheService";
 import { BackupManager } from "./BackupManager";
+import { TakeoverManager } from "../../human-takeover/TakeoverManager";
 
 const logger = createLogger("PostgresAdapter");
 
@@ -39,6 +40,7 @@ if (replicaPool !== pool) {
 }
 
 export class PostgresAdapter implements DatabaseAdapter {
+  private takeoverManager = new TakeoverManager();
   // Helper to execute read queries with failover
   private async executeReadQuery(
     text: string,
@@ -660,14 +662,27 @@ export class PostgresAdapter implements DatabaseAdapter {
     return res.rows.map((r: any) => this.mapRowToAuditLog(r));
   }
 
-  async listAllTickets(): Promise<any[]> {
+  async listAllTickets(conversationId?: string): Promise<any[]> {
     const fallback = async () => {
-      return await BackupManager.readFromBackup<any>("tickets");
+      let bk = await BackupManager.readFromBackup<any>("tickets");
+      if (conversationId) {
+        bk = bk.filter((t) => String(t.conversation_id) === String(conversationId));
+      }
+      return bk;
     };
 
-    const res = await this.executeReadQuery(`SELECT * FROM tickets ORDER BY created_at DESC`, [], fallback);
+    let query = `SELECT * FROM tickets`;
+    const queryParams: any[] = [];
+    if (conversationId) {
+      query += ` WHERE conversation_id = $1`;
+      queryParams.push(conversationId);
+    }
+    query += ` ORDER BY created_at DESC`;
+
+    const res = await this.executeReadQuery(query, queryParams, fallback);
 
     return res.rows.map((r: any) => ({
+      id: String(r.id),
       id1: String(r.id),
       ticketId: r.ticket_id,
       conversationId: String(r.conversation_id),
@@ -684,6 +699,140 @@ export class PostgresAdapter implements DatabaseAdapter {
       companyId: r.company_id ? String(r.company_id) : undefined,
     }));
   }
+
+  async listAllConversations(): Promise<any[]> {
+    const query = `
+      SELECT
+        c.id::text AS id,
+        c.id::text AS id1,
+        i.channel_ref AS customer,
+        c.channel,
+        c.status,
+        c.handled_by,
+        COALESCE(p.display_name, 'Nattapong') AS profile_name,
+        p.avatar_url AS avatar_url,
+        COALESCE(p.id::text, 'unknown') AS profile_id,
+        p.email AS profile_email,
+        p.phone AS profile_phone,
+        COALESCE(co.name, 'Orbit Retail') AS company_name,
+        (SELECT content FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message,
+        (SELECT created_at FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message_timestamp,
+        (SELECT role FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message_role,
+        (SELECT string_agg(severity, ' ') FROM tickets WHERE conversation_id = c.id) AS ticket_severities,
+        (SELECT string_agg(ticket_id, ' ') FROM tickets WHERE conversation_id = c.id) AS ticket_ids,
+        (SELECT string_agg(content, ' ') FROM messages WHERE conversation_id = c.id) AS message_contents
+      FROM conversations c
+      JOIN identities i ON i.id = c.identity_id
+      LEFT JOIN profiles p ON p.id = i.profile_id
+      LEFT JOIN companies co ON co.id = p.company_id
+      ORDER BY c.updated_at DESC
+    `;
+    const res = await pool.query(query);
+    return res.rows.map((row) => {
+      const takeover = this.takeoverManager.getTakeoverState(row.id);
+      
+      const severities = (row.ticket_severities || '').split(' ');
+      const highestSeverity = severities.reduce((max: string, sev: string) => {
+        const priorityMap: Record<string, number> = { 'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1 };
+        if ((priorityMap[sev] || 0) > (priorityMap[max] || 0)) {
+          return sev;
+        }
+        return max;
+      }, 'Low');
+
+      return {
+        id: row.id,
+        id1: row.id,
+        customer: row.customer,
+        channel: row.channel,
+        status: row.status,
+        last_message: row.last_message || "",
+        last_message_timestamp: row.last_message_timestamp,
+        last_message_role: row.last_message_role,
+        max_ticket_severity: highestSeverity,
+        company_name: row.company_name,
+        ticket_ids: row.ticket_ids || "",
+        message_contents: row.message_contents || "",
+        handled_by: row.handled_by || "ai",
+        human_session_started_at: takeover?.human_session_started_at || null,
+        human_session_expire_at: takeover?.human_session_expire_at || null,
+        last_human_reply_at: takeover?.last_human_reply_at || null,
+        profile_id: row.profile_id,
+        profile_name: row.profile_name,
+        avatar_url: row.avatar_url,
+        profile_email: row.profile_email,
+        profile_phone: row.profile_phone,
+      };
+    });
+  }
+
+  async getMessages(conversationId: string): Promise<any[]> {
+    const query = `
+      SELECT role, content, created_at AS timestamp
+      FROM messages
+      WHERE conversation_id = $1::integer
+      ORDER BY created_at ASC
+    `;
+    const res = await pool.query(query, [conversationId]);
+    return res.rows.map((r) => ({
+      role: r.role,
+      content: r.content,
+      timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
+    }));
+  }
+
+  async getConversationIdent(conversationId: string): Promise<any> {
+    const query = `
+      SELECT i.channel, i.channel_ref
+      FROM conversations c
+      JOIN identities i ON i.id = c.identity_id
+      WHERE c.id = $1::integer
+    `;
+    const res = await pool.query(query, [conversationId]);
+    if (res.rows.length > 0) {
+      return {
+        channel: res.rows[0].channel,
+        channel_ref: res.rows[0].channel_ref,
+      };
+    }
+    return null;
+  }
+
+  async updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void> {
+    await pool.query(
+      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE id = $2::integer",
+      [planeIssueId, ticketId]
+    );
+  }
+
+  async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
+    const ticketRes = await pool.query("SELECT * FROM tickets WHERE id = $1::integer LIMIT 1", [ticketId]);
+    let ticket: any = null;
+    if (ticketRes.rows.length > 0) {
+      ticket = {
+        ...ticketRes.rows[0],
+        id1: String(ticketRes.rows[0].id),
+        ticket_id: ticketRes.rows[0].ticket_id,
+        conversation_id: String(ticketRes.rows[0].conversation_id),
+      };
+    }
+    let companyName = "Unknown";
+    const companyRes = await pool.query(
+      `SELECT c.name AS company_name
+       FROM tickets t
+       JOIN conversations conv ON conv.id = t.conversation_id
+       JOIN identities i ON i.id = conv.identity_id
+       JOIN profiles p ON p.id = i.profile_id
+       JOIN companies c ON c.id = p.company_id
+       WHERE t.id = $1::integer`,
+      [ticketId]
+    );
+    if (companyRes.rows.length > 0) {
+      companyName = companyRes.rows[0].company_name;
+    }
+    return { ticket, companyName };
+  }
+
 
   // ─── Helpers ───────────────────────────────────────────────
 

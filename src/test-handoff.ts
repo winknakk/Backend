@@ -42,6 +42,9 @@ class FakeMemoryService implements IMemoryService {
     return "conv-1";
   }
   async updateHandoffState() {}
+  async getFullConversationHistory() {
+    return [];
+  }
 }
 
 class FakeMcpRouter implements IMcpToolRouter {

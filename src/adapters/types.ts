@@ -70,7 +70,33 @@ export interface DatabaseAdapter {
   listAllTraces(): Promise<AuditLog[]>;
 
   /**
-   * Lists all tickets globally.
+   * Lists all tickets globally or filtered by conversation.
    */
-  listAllTickets(): Promise<any[]>;
+  listAllTickets(conversationId?: string): Promise<any[]>;
+
+  /**
+   * Lists all conversations globally.
+   */
+  listAllConversations(): Promise<any[]>;
+
+  /**
+   * Retrieves messages for a specific conversation.
+   */
+  getMessages(conversationId: string): Promise<any[]>;
+
+  /**
+   * Retrieves identity and channel details for a conversation.
+   */
+  getConversationIdent(conversationId: string): Promise<any>;
+
+  /**
+   * Updates plane issue ID and status for a ticket.
+   */
+  updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void>;
+
+  /**
+   * Retrieves ticket details along with company context.
+   */
+  getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }>;
 }
+

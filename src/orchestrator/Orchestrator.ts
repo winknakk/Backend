@@ -47,6 +47,21 @@ export class Orchestrator {
 
       // Check Human Takeover State
       const takeoverState = this.takeoverManager.getTakeoverState(sessionContext.conversationId);
+      
+      // If human session expired, switch handled_by back to AI in DB
+      if (takeoverState.status === "ACTIVE_AI" && sessionContext.handledBy === "human") {
+        logger.info(
+          {
+            requestId: reqId,
+            conversationId: sessionContext.conversationId,
+            component: "Orchestrator",
+          },
+          "Human session expired. Switching database handoff state back to 'ai'."
+        );
+        await this.memoryService.updateHandoffState(sessionContext.conversationId, "ai");
+        sessionContext.handledBy = "ai";
+      }
+
       if (takeoverState.status === "PENDING_HUMAN" || takeoverState.status === "ACTIVE_HUMAN") {
         logger.info(
           {
