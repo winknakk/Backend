@@ -86,8 +86,8 @@ export class PostgresAdapter implements DatabaseAdapter {
     const executionId = randomUUID();
     try {
       const { rows } = await pool.query(
-        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, severity, due_date)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO tickets (id, conversation_id, subject, summary, status, priority, created_via)
+         VALUES ($1, $2, $3, $4, $5, $6, 'ai')
          RETURNING *`,
         [
           ticketNumber,
@@ -96,13 +96,24 @@ export class PostgresAdapter implements DatabaseAdapter {
           input.summary,
           "Open",
           input.priority,
-          input.severity,
-          slaDueDate,
         ]
       );
 
       const ticketRow = rows[0];
-      const resultData = { ...ticketRow, id: ticketRow.id.toString() };
+      const resultData = {
+        id: ticketRow.id.toString(),
+        ticketId: ticketNumber,
+        conversationId: ticketRow.conversation_id.toString(),
+        subject: ticketRow.subject,
+        summary: ticketRow.summary,
+        severity: input.severity,
+        priority: ticketRow.priority,
+        projectId: input.projectId,
+        status: ticketRow.status as any,
+        startDate: ticketRow.created_at instanceof Date ? ticketRow.created_at.toISOString() : new Date().toISOString(),
+        dueDate: slaDueDate,
+        createdBy: "AI Support Agent"
+      };
 
       // Write to local encrypted backup
       await BackupManager.saveToBackup("tickets", resultData, "id");
@@ -163,8 +174,8 @@ export class PostgresAdapter implements DatabaseAdapter {
   async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
     try {
       const { rows } = await pool.query(
-        `INSERT INTO messages (conversation_id, role, content)
-         VALUES ($1, $2, $3)
+        `INSERT INTO messages (conversation_id, role, content, created_at)
+         VALUES ($1, $2, $3, NOW())
          RETURNING *`,
         [conversationId, role, content]
       );
@@ -187,22 +198,25 @@ export class PostgresAdapter implements DatabaseAdapter {
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
     try {
       // 1. Find or create identity
-      let identityId: number;
+      let identityIdStr: string;
 
       const identityResult = await pool.query(
-        `SELECT id FROM identities WHERE channel = $1 AND channel_ref = $2 LIMIT 1`,
+        `SELECT id FROM identities WHERE LOWER(channel) = LOWER($1) AND channel_ref = $2 LIMIT 1`,
         [channel, senderId]
       );
 
       if (identityResult.rows.length > 0) {
-        identityId = identityResult.rows[0].id;
+        identityIdStr = identityResult.rows[0].id.toString();
       } else {
         // Create a profile first, then identity
+        const maxProfileRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM profiles");
+        const nextProfileId = maxProfileRes.rows[0].next_id;
+
         const profileResult = await pool.query(
-          `INSERT INTO profiles (company_id, name)
-           VALUES ($1, $2)
+          `INSERT INTO profiles (id, company_id, name)
+           VALUES ($1, $2, $3)
            RETURNING id`,
-          [companyId, senderId]
+          [nextProfileId, companyId, senderId]
         );
         const profileId = profileResult.rows[0].id;
 
@@ -213,18 +227,21 @@ export class PostgresAdapter implements DatabaseAdapter {
           "id"
         );
 
+        const maxIdentRes = await pool.query("SELECT COALESCE(MAX(id::integer), 0) + 1 AS next_id FROM identities WHERE id ~ '^[0-9]+$'");
+        const nextIdentId = maxIdentRes.rows[0].next_id.toString();
+
         const newIdentity = await pool.query(
-          `INSERT INTO identities (profile_id, channel, channel_ref)
-           VALUES ($1, $2, $3)
+          `INSERT INTO identities (id, profile_id, channel, channel_ref)
+           VALUES ($1, $2, $3, $4)
            RETURNING id`,
-          [profileId, channel, senderId]
+          [nextIdentId, profileId, channel, senderId]
         );
-        identityId = newIdentity.rows[0].id;
+        identityIdStr = newIdentity.rows[0].id.toString();
 
         // Backup identities
         await BackupManager.saveToBackup(
           "identities",
-          { id: identityId.toString(), profile_id: profileId, channel, channel_ref: senderId },
+          { id: identityIdStr, profile_id: profileId, channel, channel_ref: senderId },
           "id"
         );
       }
@@ -232,21 +249,24 @@ export class PostgresAdapter implements DatabaseAdapter {
       // 2. Find open conversation or create one
       const convResult = await pool.query(
         `SELECT id FROM conversations
-         WHERE identity_id = $1 AND channel = $2 AND status = 'open'
+         WHERE identity_id = $1 AND LOWER(channel) = LOWER($2) AND status = 'open'
          ORDER BY created_at DESC
          LIMIT 1`,
-        [identityId, channel]
+        [identityIdStr, channel]
       );
 
       if (convResult.rows.length > 0) {
         return convResult.rows[0].id.toString();
       }
 
+      const maxConvRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
+      const nextConvId = maxConvRes.rows[0].next_id;
+
       const newConv = await pool.query(
-        `INSERT INTO conversations (identity_id, channel, status, handled_by)
-         VALUES ($1, $2, 'open', 'ai')
+        `INSERT INTO conversations (id, identity_id, channel, status, handled_by)
+         VALUES ($1, $2, $3, 'open', 'ai')
          RETURNING id`,
-        [identityId, channel]
+        [nextConvId, identityIdStr, channel]
       );
 
       const convId = newConv.rows[0].id.toString();
@@ -254,7 +274,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       // Backup conversations
       await BackupManager.saveToBackup(
         "conversations",
-        { id: convId, identity_id: identityId, channel, status: "open", handled_by: "ai" },
+        { id: convId, identity_id: identityIdStr, channel, status: "open", handled_by: "ai" },
         "id"
       );
 
@@ -294,7 +314,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         `SELECT i.id AS identity_id, i.profile_id, p.company_id, p.name AS profile_name
          FROM identities i
          JOIN profiles p ON p.id = i.profile_id
-         WHERE i.channel = $1 AND i.channel_ref = $2
+         WHERE LOWER(i.channel) = LOWER($1) AND i.channel_ref = $2
          LIMIT 1`,
         [channel, senderId]
       );
@@ -321,14 +341,14 @@ export class PostgresAdapter implements DatabaseAdapter {
 
         // 3. Get projects for company
         const projectsResult = await this.executeReadQuery(
-          `SELECT id, name, project_type FROM projects WHERE company_id = $1`,
+          `SELECT id, name FROM projects WHERE company_id = $1`,
           [companyId]
         );
 
         const projects = projectsResult.rows.map((r: any) => ({
           projectId: r.id.toString(),
           projectName: r.name,
-          projectType: r.project_type,
+          projectType: "Support",
         }));
 
         companyContext = {
@@ -542,20 +562,20 @@ export class PostgresAdapter implements DatabaseAdapter {
 
       if (filters?.projectId) {
         ticketQuery = `
-          SELECT t.id, t.ticket_id, t.subject, t.summary, t.conversation_id, 'ticket' AS type
+          SELECT t.id, t.subject, t.summary, t.conversation_id, 'ticket' AS type
           FROM tickets t
           JOIN conversations c ON c.id = t.conversation_id
           WHERE (t.subject ILIKE '%' || $1 || '%' OR t.summary ILIKE '%' || $1 || '%')
             AND c.project_id = $2
-          ORDER BY t.created_at DESC
+          ORDER BY t.id DESC
           LIMIT 10`;
         ticketParams = [query, filters.projectId];
       } else {
         ticketQuery = `
-          SELECT t.id, t.ticket_id, t.subject, t.summary, 'ticket' AS type
+          SELECT t.id, t.subject, t.summary, 'ticket' AS type
           FROM tickets t
           WHERE t.subject ILIKE '%' || $1 || '%' OR t.summary ILIKE '%' || $1 || '%'
-          ORDER BY t.created_at DESC
+          ORDER BY t.id DESC
           LIMIT 10`;
         ticketParams = [query];
       }
@@ -569,7 +589,7 @@ export class PostgresAdapter implements DatabaseAdapter {
           type: "ticket",
           content: `${row.subject ?? ""} — ${row.summary ?? ""}`,
           confidence: 0.8,
-          metadata: { ticketId: row.ticket_id },
+          metadata: { ticketId: row.id.toString() },
         });
       }
 
@@ -677,27 +697,37 @@ export class PostgresAdapter implements DatabaseAdapter {
       query += ` WHERE conversation_id = $1`;
       queryParams.push(conversationId);
     }
-    query += ` ORDER BY created_at DESC`;
+    query += ` ORDER BY id DESC`;
 
     const res = await this.executeReadQuery(query, queryParams, fallback);
 
-    return res.rows.map((r: any) => ({
-      id: String(r.id),
-      id1: String(r.id),
-      ticketId: r.ticket_id,
-      conversationId: String(r.conversation_id),
-      subject: r.subject,
-      summary: r.summary,
-      status: r.status,
-      priority: r.priority,
-      severity: r.severity,
-      assignedPm: r.assigned_pm,
-      createdVia: r.created_via,
-      planeIssueId: r.plane_issue_id,
-      dueDate: r.due_date instanceof Date ? r.due_date.toISOString() : r.due_date,
-      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at,
-      companyId: r.company_id ? String(r.company_id) : undefined,
-    }));
+    return res.rows.map((r: any) => {
+      const priorityMap: Record<string, string> = { P1: "Critical", P2: "High", P3: "Medium", P4: "Low" };
+      const severity = priorityMap[r.priority] || "Low";
+
+      const baseDate = new Date();
+      const resolveHoursMap: Record<string, number> = { Critical: 4, High: 12, Medium: 48, Low: 120 };
+      const resolveHours = resolveHoursMap[severity] || 120;
+      const dueDate = new Date(baseDate.getTime() + resolveHours * 60 * 60 * 1000).toISOString();
+
+      return {
+        id: String(r.id),
+        id1: String(r.id),
+        ticketId: String(r.id),
+        conversationId: String(r.conversation_id),
+        subject: r.subject,
+        summary: r.summary,
+        status: r.status,
+        priority: r.priority,
+        severity,
+        assignedPm: r.assigned_pm,
+        createdVia: r.created_via,
+        planeIssueId: r.plane_issue_id,
+        dueDate,
+        createdAt: baseDate.toISOString(),
+        companyId: undefined,
+      };
+    });
   }
 
   async listAllConversations(): Promise<any[]> {
@@ -709,17 +739,17 @@ export class PostgresAdapter implements DatabaseAdapter {
         c.channel,
         c.status,
         c.handled_by,
-        COALESCE(p.display_name, 'Nattapong') AS profile_name,
-        p.avatar_url AS avatar_url,
+        COALESCE(p.name, 'Nattapong') AS profile_name,
+        NULL::text AS avatar_url,
         COALESCE(p.id::text, 'unknown') AS profile_id,
-        p.email AS profile_email,
-        p.phone AS profile_phone,
+        NULL::text AS profile_email,
+        NULL::text AS profile_phone,
         COALESCE(co.name, 'Orbit Retail') AS company_name,
         (SELECT content FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message,
         (SELECT created_at FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message_timestamp,
         (SELECT role FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message_role,
-        (SELECT string_agg(severity, ' ') FROM tickets WHERE conversation_id = c.id) AS ticket_severities,
-        (SELECT string_agg(ticket_id, ' ') FROM tickets WHERE conversation_id = c.id) AS ticket_ids,
+        (SELECT string_agg(priority, ' ') FROM tickets WHERE conversation_id = c.id) AS ticket_priorities,
+        (SELECT string_agg(id::text, ' ') FROM tickets WHERE conversation_id = c.id) AS ticket_ids,
         (SELECT string_agg(content, ' ') FROM messages WHERE conversation_id = c.id) AS message_contents
       FROM conversations c
       JOIN identities i ON i.id = c.identity_id
@@ -731,14 +761,17 @@ export class PostgresAdapter implements DatabaseAdapter {
     return res.rows.map((row) => {
       const takeover = this.takeoverManager.getTakeoverState(row.id);
       
-      const severities = (row.ticket_severities || '').split(' ');
-      const highestSeverity = severities.reduce((max: string, sev: string) => {
-        const priorityMap: Record<string, number> = { 'Critical': 4, 'High': 3, 'Medium': 2, 'Low': 1 };
-        if ((priorityMap[sev] || 0) > (priorityMap[max] || 0)) {
-          return sev;
+      const priorities = (row.ticket_priorities || '').split(' ');
+      const highestPriority = priorities.reduce((max: string, pri: string) => {
+        const priorityMap: Record<string, number> = { 'P1': 4, 'P2': 3, 'P3': 2, 'P4': 1 };
+        if ((priorityMap[pri] || 0) > (priorityMap[max] || 0)) {
+          return pri;
         }
         return max;
-      }, 'Low');
+      }, 'P4');
+
+      const priorityToSeverity: Record<string, string> = { P1: "Critical", P2: "High", P3: "Medium", P4: "Low" };
+      const highestSeverity = priorityToSeverity[highestPriority] || "Low";
 
       return {
         id: row.id,
@@ -800,19 +833,19 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void> {
     await pool.query(
-      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE id = $2::integer",
+      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE id = $2",
       [planeIssueId, ticketId]
     );
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
-    const ticketRes = await pool.query("SELECT * FROM tickets WHERE id = $1::integer LIMIT 1", [ticketId]);
+    const ticketRes = await pool.query("SELECT * FROM tickets WHERE id = $1 LIMIT 1", [ticketId]);
     let ticket: any = null;
     if (ticketRes.rows.length > 0) {
       ticket = {
         ...ticketRes.rows[0],
         id1: String(ticketRes.rows[0].id),
-        ticket_id: ticketRes.rows[0].ticket_id,
+        ticket_id: String(ticketRes.rows[0].id),
         conversation_id: String(ticketRes.rows[0].conversation_id),
       };
     }
@@ -824,7 +857,7 @@ export class PostgresAdapter implements DatabaseAdapter {
        JOIN identities i ON i.id = conv.identity_id
        JOIN profiles p ON p.id = i.profile_id
        JOIN companies c ON c.id = p.company_id
-       WHERE t.id = $1::integer`,
+       WHERE t.id = $1`,
       [ticketId]
     );
     if (companyRes.rows.length > 0) {

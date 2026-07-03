@@ -1,4 +1,4 @@
-﻿-- Drop existing tables if they exist to allow clean rebuilds
+-- Drop existing tables if they exist to allow clean rebuilds
 DROP TABLE IF EXISTS tickets CASCADE;
 DROP TABLE IF EXISTS messages CASCADE;
 DROP TABLE IF EXISTS conversations CASCADE;
@@ -11,19 +11,22 @@ DROP TABLE IF EXISTS companies CASCADE;
 -- Create tables with constraints and foreign keys
 CREATE TABLE companies (
     id INT PRIMARY KEY,
-    name VARCHAR(255) NOT NULL
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE profiles (
     id INT PRIMARY KEY,
     company_id INT REFERENCES companies(id) ON DELETE CASCADE,
-    name VARCHAR(255) NOT NULL
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE projects (
     id INT PRIMARY KEY,
     company_id INT REFERENCES companies(id) ON DELETE CASCADE,
-    name VARCHAR(255) NOT NULL
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE profile_projects (
@@ -36,7 +39,8 @@ CREATE TABLE identities (
     id VARCHAR(50) PRIMARY KEY,
     profile_id INT REFERENCES profiles(id) ON DELETE SET NULL,
     channel VARCHAR(50) NOT NULL,
-    channel_ref VARCHAR(255) NOT NULL
+    channel_ref VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE conversations (
@@ -48,7 +52,8 @@ CREATE TABLE conversations (
     channel VARCHAR(50) NOT NULL,
     handled_by VARCHAR(50),
     assigned_pm VARCHAR(50),
-    updated_at TIMESTAMPTZ
+    updated_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE messages (
@@ -72,15 +77,33 @@ CREATE TABLE tickets (
     conversation_id INT REFERENCES conversations(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS traces (
+  id SERIAL PRIMARY KEY,
+  trace_id UUID UNIQUE NOT NULL,
+  session_id VARCHAR(255) NOT NULL,
+  agent_id VARCHAR(255),
+  tool_name VARCHAR(255) NOT NULL,
+  called_at TIMESTAMPTZ NOT NULL,
+  reason TEXT,
+  arguments JSONB DEFAULT '{}',
+  result JSONB,
+  status VARCHAR(50) DEFAULT 'RUNNING',
+  error_message TEXT,
+  completed_at TIMESTAMPTZ,
+  request_id VARCHAR(255),
+  conversation_id VARCHAR(255),
+  parent_trace_id VARCHAR(255)
+);
+
+CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id);
+CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces(trace_id);
+CREATE INDEX IF NOT EXISTS idx_traces_agent ON traces(agent_id);
+
 -- Create indexes for foreign keys to optimize joins
 CREATE INDEX idx_profiles_company_id ON profiles(company_id);
 CREATE INDEX idx_projects_company_id ON projects(company_id);
 CREATE INDEX idx_profile_projects_project_id ON profile_projects(project_id);
 CREATE INDEX idx_identities_profile_id ON identities(profile_id);
-CREATE INDEX idx_conversations_identity_id ON conversations(identity_id);
-CREATE INDEX idx_conversations_project_id ON conversations(project_id);
-CREATE INDEX idx_messages_conversation_id ON messages(conversation_id);
-CREATE INDEX idx_tickets_conversation_id ON tickets(conversation_id);
 
 -- Seed data for companies
 INSERT INTO companies (id, name) VALUES (1, 'Orbit Retail Co., Ltd.');

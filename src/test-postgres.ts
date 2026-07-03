@@ -1,9 +1,12 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 async function runPostgresTests() {
   console.log("=========================================");
   console.log("  AutomationX V2 PostgreSQL Adapter Test  ");
   console.log("=========================================\n");
 
-  const databaseUrl = process.env.DATABASE_URL || "postgresql://automationx:changeme@localhost:5432/automationx";
+  const databaseUrl = process.env.DATABASE_URL || "postgresql://postgres:15969win@localhost:5432/postgres";
   process.env.DATABASE_URL = databaseUrl;
   console.log(`Connecting to: ${databaseUrl}`);
 
@@ -32,15 +35,20 @@ async function runPostgresTests() {
     await pool.query("DELETE FROM projects");
     await pool.query("DELETE FROM companies");
 
-    const companyRes = await pool.query("INSERT INTO companies (name) VALUES ($1) RETURNING id, name", [
+    const maxCompanyRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM companies");
+    const nextCompanyId = maxCompanyRes.rows[0].next_id;
+    const companyRes = await pool.query("INSERT INTO companies (id, name) VALUES ($1, $2) RETURNING id, name", [
+      nextCompanyId,
       "Test Corporate Co",
     ]);
     const companyId = companyRes.rows[0].id.toString();
     console.log(`- Seeded Company ID: ${companyId}`);
 
+    const maxProjectRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM projects");
+    const nextProjectId = maxProjectRes.rows[0].next_id;
     const projectRes = await pool.query(
-      "INSERT INTO projects (company_id, name, project_type) VALUES ($1, $2, $3) RETURNING id, name",
-      [companyRes.rows[0].id, "Orbit Support Project", "IT"]
+      "INSERT INTO projects (id, company_id, name) VALUES ($1, $2, $3) RETURNING id, name",
+      [nextProjectId, companyRes.rows[0].id, "Orbit Support Project"]
     );
     const projectId = projectRes.rows[0].id.toString();
     console.log(`- Seeded Project ID: ${projectId}`);

@@ -7,7 +7,7 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 async function run() {
   console.log("--- Testing GET /api/admin/conversations/:id/profile ---");
   const serverUrl = "http://localhost:3000";
-  const conversationId = "1";
+  const conversationId = "14";
 
   try {
     const res = await axios.get(`${serverUrl}/api/admin/conversations/${conversationId}/profile`);
