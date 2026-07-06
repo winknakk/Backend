@@ -96,7 +96,7 @@ export class InMemoryJobQueue implements IJobQueue {
     });
   }
 
-  getQueueDepth(): number {
+  async getQueueDepth(): Promise<number> {
     return Array.from(this.jobs.values()).filter((j) => j.status === "QUEUED").length;
   }
 

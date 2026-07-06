@@ -457,7 +457,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     const companies = this.readTable<any>("Companies", DbCompanySchema);
     const tickets = this.readTable<any>("Tickets", DbTicketSchema);
 
-    return conversations.map((c) => {
+    return Promise.all(conversations.map(async (c) => {
       const ident = identities.find((i) => String(i.id1) === String(c.identity_id));
       const convMsgs = messages.filter((m) => String(m.conversation_id) === String(c.id1));
       const lastMsg = convMsgs.sort(
@@ -465,7 +465,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       )[0];
 
       const cid = String(c.id1);
-      const takeover = this.takeoverManager.getTakeoverState(cid);
+      const takeover = await this.takeoverManager.getTakeoverState(cid);
 
       let profileName = "Nattapong";
       let avatarUrl: string | null = null;
@@ -517,6 +517,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         ticket_ids: ticketIds,
         message_contents: messageContents,
         handled_by: String(c.handled_by || "ai"),
+        takeover_status: takeover?.status || "ACTIVE_AI",
         human_session_started_at: takeover?.human_session_started_at || null,
         human_session_expire_at: takeover?.human_session_expire_at || null,
         last_human_reply_at: takeover?.last_human_reply_at || null,
@@ -526,7 +527,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         profile_email: profileEmail,
         profile_phone: profilePhone,
       };
-    });
+    }));
   }
 
   async getMessages(conversationId: string): Promise<any[]> {

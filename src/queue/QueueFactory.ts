@@ -1,7 +1,7 @@
 import { config } from "../config/env";
 import { IJobQueue } from "./types";
 import { InMemoryJobQueue } from "./InMemoryJobQueue";
-import { RedisJobQueue } from "./RedisJobQueue";
+import { BullMQJobQueue } from "../infrastructure/queue/BullMQJobQueue";
 
 export class QueueFactory {
   private static instance: IJobQueue;
@@ -10,7 +10,7 @@ export class QueueFactory {
     if (!QueueFactory.instance) {
       const provider = config.QUEUE_PROVIDER || "memory";
       if (provider.toLowerCase() === "redis") {
-        QueueFactory.instance = new RedisJobQueue();
+        QueueFactory.instance = new BullMQJobQueue();
       } else {
         QueueFactory.instance = new InMemoryJobQueue();
       }

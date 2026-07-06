@@ -621,7 +621,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
             this.getRows(this.tableCompanies, { limit: 1000 }, [100, 300]).catch(() => []),
           ]);
 
-          const result = convs.map((c: any) => {
+          const result = await Promise.all(convs.map(async (c: any) => {
             const cid = String(c.Id || c.id || c.id1);
             const identityId = this.extractId(c.identity_id);
             
@@ -680,7 +680,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
             const ticketIds = convTickets.map((t: any) => String(t.ticket_id || t.ticketId || t.Id || t.id || '')).join(' ');
             const messageContents = convMsgs.map((m: any) => String(m.content || '')).join(' ');
 
-            const takeover = this.takeoverManager.getTakeoverState(cid);
+            const takeover = await this.takeoverManager.getTakeoverState(cid);
 
             return {
               id: cid,
@@ -696,6 +696,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
               ticket_ids: ticketIds,
               message_contents: messageContents,
               handled_by: String(c.handled_by || "ai"),
+              takeover_status: takeover?.status || "ACTIVE_AI",
               human_session_started_at: takeover?.human_session_started_at || null,
               human_session_expire_at: takeover?.human_session_expire_at || null,
               last_human_reply_at: takeover?.last_human_reply_at || null,
@@ -705,7 +706,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
               profile_email: profileEmail,
               profile_phone: profilePhone,
             };
-          });
+          }));
 
           this.conversationsCache = {
             data: result,

@@ -14,15 +14,16 @@ export class VectorStoreRetriever implements IRetriever {
     const queryVector = await this.embeddingService.embedQuery(query);
     const searchResults = await this.vectorStore.similaritySearch(queryVector, 5);
 
-    let filtered = searchResults;
-    if (filters?.tenantId) {
-      filtered = filtered.filter(
-        (doc) => doc.metadata?.tenantId === filters.tenantId || doc.metadata?.companyId === filters.tenantId
-      );
-    }
-    if (filters?.projectId) {
-      filtered = filtered.filter((doc) => doc.metadata?.projectId === filters.projectId);
-    }
+    const { getOptionalRequestContext } = require("../kernel/context/RequestContextHolder");
+    const context = getOptionalRequestContext();
+    const activeProjectId = context?.projectId || filters?.projectId || "1";
+    const activeTenantId = context?.tenantId || filters?.tenantId || "1";
+
+    const filtered = searchResults.filter((doc) => {
+      const docTenantId = doc.metadata?.tenantId || doc.metadata?.companyId || "1";
+      const docProjectId = doc.metadata?.projectId || "1";
+      return String(docTenantId) === String(activeTenantId) && String(docProjectId) === String(activeProjectId);
+    });
 
     return filtered.map((doc) => {
       let confidence = doc.score;

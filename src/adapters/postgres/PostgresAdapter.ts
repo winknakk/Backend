@@ -758,8 +758,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       ORDER BY c.updated_at DESC
     `;
     const res = await pool.query(query);
-    return res.rows.map((row) => {
-      const takeover = this.takeoverManager.getTakeoverState(row.id);
+    return await Promise.all(res.rows.map(async (row) => {
+      const takeover = await this.takeoverManager.getTakeoverState(row.id);
       
       const priorities = (row.ticket_priorities || '').split(' ');
       const highestPriority = priorities.reduce((max: string, pri: string) => {
@@ -787,6 +787,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         ticket_ids: row.ticket_ids || "",
         message_contents: row.message_contents || "",
         handled_by: row.handled_by || "ai",
+        takeover_status: takeover?.status || "ACTIVE_AI",
         human_session_started_at: takeover?.human_session_started_at || null,
         human_session_expire_at: takeover?.human_session_expire_at || null,
         last_human_reply_at: takeover?.last_human_reply_at || null,
@@ -796,7 +797,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         profile_email: row.profile_email,
         profile_phone: row.profile_phone,
       };
-    });
+    }));
   }
 
   async getMessages(conversationId: string): Promise<any[]> {

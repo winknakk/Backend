@@ -1,11 +1,14 @@
+import { TakeoverState, RoomStatus } from "../schemas/aiops";
+import { RedisTakeoverManager } from "../infrastructure/cache/RedisTakeoverManager";
+import { config } from "../config/env";
 import * as fs from "fs";
 import * as path from "path";
-import { TakeoverState, RoomStatus } from "../schemas/aiops";
 
 export class TakeoverManager {
-  private states = new Map<string, TakeoverState>();
+  private localStates = new Map<string, TakeoverState>();
   private filePath: string;
   private defaultLeaseDurationMs: number;
+  private redisManager: RedisTakeoverManager | null = null;
 
   constructor(
     filePath = path.resolve(__dirname, "../../../data/takeover_states.json"),
@@ -13,33 +16,92 @@ export class TakeoverManager {
   ) {
     this.filePath = filePath;
     this.defaultLeaseDurationMs = defaultLeaseDurationMs;
-    this.loadState();
+    
+    if (config.CACHE_PROVIDER === "redis") {
+      this.redisManager = new RedisTakeoverManager();
+    } else {
+      this.loadState();
+    }
   }
 
-  getTakeoverState(conversationId: string): TakeoverState {
+  /**
+   * Retrieves the human takeover state for a conversation (Redis or file-backed fallback).
+   */
+  async getTakeoverState(conversationId: string): Promise<TakeoverState> {
+    if (this.redisManager) {
+      const lease = await this.redisManager.checkLeaseStatus(conversationId);
+      if (lease.active) {
+        return {
+          conversationId,
+          status: "ACTIVE_HUMAN",
+          assignedHumanAgentId: lease.agentId,
+          updatedAt: new Date().toISOString(),
+          leaseExpiresAt: new Date(lease.expiresAt!).toISOString(),
+          human_session_started_at: new Date(lease.expiresAt! - 3600 * 1000).toISOString(),
+          human_session_expire_at: new Date(lease.expiresAt!).toISOString(),
+          last_human_reply_at: new Date(lease.expiresAt!).toISOString(),
+        };
+      }
+      return {
+        conversationId,
+        status: "ACTIVE_AI",
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    // Local file fallback
     this.checkLease(conversationId);
-    let state = this.states.get(conversationId);
+    let state = this.localStates.get(conversationId);
     if (!state) {
       state = {
         conversationId,
         status: "ACTIVE_AI",
         updatedAt: new Date().toISOString(),
       };
-      this.states.set(conversationId, state);
+      this.localStates.set(conversationId, state);
     }
     return state;
   }
 
-  setTakeoverState(
+  /**
+   * Sets/acquires/releases the human takeover lease state.
+   */
+  async setTakeoverState(
     conversationId: string,
     status: RoomStatus,
     assignedHumanAgentId?: string,
     leaseDurationMs?: number,
     isReply?: boolean
-  ): TakeoverState {
+  ): Promise<TakeoverState> {
     const now = new Date();
-    const existing = this.states.get(conversationId);
 
+    if (this.redisManager) {
+      if (status !== "ACTIVE_AI") {
+        const duration = leaseDurationMs !== undefined ? leaseDurationMs : this.defaultLeaseDurationMs;
+        await this.redisManager.acquireLease(conversationId, assignedHumanAgentId || "human_agent", duration);
+        const expiresAt = now.getTime() + duration;
+        return {
+          conversationId,
+          status,
+          assignedHumanAgentId,
+          updatedAt: now.toISOString(),
+          leaseExpiresAt: new Date(expiresAt).toISOString(),
+          human_session_started_at: now.toISOString(),
+          human_session_expire_at: new Date(expiresAt).toISOString(),
+          last_human_reply_at: isReply ? now.toISOString() : null,
+        };
+      } else {
+        await this.redisManager.releaseLease(conversationId);
+        return {
+          conversationId,
+          status: "ACTIVE_AI",
+          updatedAt: now.toISOString(),
+        };
+      }
+    }
+
+    // Local file fallback
+    const existing = this.localStates.get(conversationId);
     let leaseExpiresAt: string | undefined;
     let human_session_started_at = existing?.human_session_started_at || null;
     let human_session_expire_at = existing?.human_session_expire_at || null;
@@ -74,19 +136,17 @@ export class TakeoverManager {
       last_human_reply_at,
     };
 
-    this.states.set(conversationId, state);
+    this.localStates.set(conversationId, state);
     this.saveState();
     return state;
   }
 
-  // Check and revert state if lease expired
   private checkLease(conversationId: string): void {
-    const state = this.states.get(conversationId);
+    const state = this.localStates.get(conversationId);
     if (state && state.status !== "ACTIVE_AI" && state.leaseExpiresAt) {
       const expiry = new Date(state.leaseExpiresAt).getTime();
       const now = Date.now();
       if (now > expiry) {
-        // Lease expired, revert to AI
         state.status = "ACTIVE_AI";
         state.leaseExpiresAt = undefined;
         state.assignedHumanAgentId = undefined;
@@ -94,7 +154,7 @@ export class TakeoverManager {
         state.human_session_expire_at = null;
         state.last_human_reply_at = null;
         state.updatedAt = new Date().toISOString();
-        this.states.set(conversationId, state);
+        this.localStates.set(conversationId, state);
         this.saveState();
       }
     }
@@ -111,10 +171,9 @@ export class TakeoverManager {
         try {
           const parsed = JSON.parse(raw);
           for (const key of Object.keys(parsed)) {
-            this.states.set(key, parsed[key]);
+            this.localStates.set(key, parsed[key]);
           }
         } catch (parseError) {
-          console.error("[TakeoverManager] Corrupted takeover state file, backing up and starting fresh:", parseError);
           const backupPath = `${this.filePath}.bak.${Date.now()}`;
           fs.renameSync(this.filePath, backupPath);
         }
@@ -131,7 +190,7 @@ export class TakeoverManager {
         fs.mkdirSync(dir, { recursive: true });
       }
       const data: Record<string, TakeoverState> = {};
-      for (const [k, v] of this.states.entries()) {
+      for (const [k, v] of this.localStates.entries()) {
         data[k] = v;
       }
       const raw = JSON.stringify(data, null, 2);
@@ -140,6 +199,15 @@ export class TakeoverManager {
       fs.renameSync(tempPath, this.filePath);
     } catch (e) {
       console.error("[TakeoverManager] Failed to save takeover states:", e);
+    }
+  }
+
+  /**
+   * Disconnects any active Redis managers.
+   */
+  async disconnect(): Promise<void> {
+    if (this.redisManager) {
+      await this.redisManager.disconnect();
     }
   }
 }

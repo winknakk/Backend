@@ -15,6 +15,14 @@ export class IngestionService {
    * Chunks, embeds, and indexes document payloads to VectorStore enforcing tenantId.
    */
   async ingestDocument(payload: DocumentIngestionPayload): Promise<KnowledgeChunk[]> {
+    const { getOptionalRequestContext } = require("../../kernel/context/RequestContextHolder");
+    const context = getOptionalRequestContext();
+    const activeProjectId = context?.projectId || payload.projectId || "1";
+    const activeTenantId = context?.tenantId || payload.tenantId || "1";
+
+    payload.projectId = activeProjectId;
+    payload.tenantId = activeTenantId;
+
     // 1. Chunk document
     const chunks = DocumentParser.parse(payload);
     if (chunks.length === 0) {

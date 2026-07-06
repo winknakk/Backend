@@ -32,34 +32,41 @@ export class PromptRegistry {
     version?: string,
     tenantId?: string
   ): Promise<PromptRecord> {
-    const tId = tenantId || "global";
-    const ver = version || "default";
-    const cacheKey = `tenant:${tId}:prompt:${name}:${ver}`;
+    const { getProjectId } = require("../kernel/context/RequestContextHolder");
+    const activeProjectId = getProjectId() || tenantId || "1";
 
-    let record = await CacheService.getInstance().get<PromptRecord>(cacheKey);
+    const configLoader = require("../services/ConfigLoaderService").ConfigLoaderService.getInstance();
+    const promptConfig = await configLoader.getPromptConfig(activeProjectId);
 
-    if (!record) {
-      let loaded: CachedPrompt;
-      if (version && version !== "default") {
-        try {
-          loaded = this.loadPrompt(`${version}/${name}`);
-        } catch {
-          loaded = this.loadPrompt(name);
-        }
-      } else {
-        loaded = this.loadPrompt(name);
-      }
-      record = {
-        metadata: loaded.metadata,
-        template: loaded.template,
-      };
-
-      await CacheService.getInstance().set(cacheKey, record, 300);
+    let allowedTools: string[] = [];
+    try {
+      const { pool } = require("../adapters/postgres/PostgresAdapter");
+      const { rows } = await pool.query(
+        "SELECT tool_name FROM project_mcp_permissions WHERE project_id = $1::integer",
+        [parseInt(activeProjectId)]
+      );
+      allowedTools = rows.map((r: any) => r.tool_name);
+    } catch (dbErr: any) {
+      console.warn(`[PromptRegistry] Failed to query permissions for project ${activeProjectId}:`, dbErr.message);
+      allowedTools = ["search_project_docs", "create_ticket"];
     }
 
+    const dynamicDirective = `
+
+[System Project Context Scope]
+Active Project ID: ${activeProjectId}
+You are operating strictly under the scope of Project ${activeProjectId}. You are authorized to run the following MCP tools: ${allowedTools.join(", ")}. Any other tools are strictly unauthorized and blocked by the platform security policy engine.`;
+
+    const rawTemplate = (promptConfig?.systemInstruction || "You are an helpful AI Assistant designed to resolve tickets and support customers.") + dynamicDirective;
+
     return {
-      metadata: record.metadata,
-      template: this.interpolate(record.template, variables),
+      metadata: {
+        name,
+        version: promptConfig?.modelName || "gemini-1.5-pro",
+        filePath: "database:project_prompts",
+        loadedAt: new Date().toISOString(),
+      },
+      template: this.interpolate(rawTemplate, variables),
     };
   }
 

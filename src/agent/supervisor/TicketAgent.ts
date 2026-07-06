@@ -24,6 +24,9 @@ export class TicketAgent implements IAgent {
 
     logger.info({ requestId: reqId, conversationId, component: "TicketAgent" }, "Ticket Agent creating support ticket");
 
+    const { getProjectId } = require("../../kernel/context/RequestContextHolder");
+    const projectId = getProjectId() || sessionContext.projectId || "1";
+
     const timer = startTimer();
     const ticketResult = await this.mcpToolRouter.callTool(
       "create_ticket",
@@ -33,7 +36,7 @@ export class TicketAgent implements IAgent {
         summary: `User reported issue: "${message.text}" on channel ${message.channel}`,
         priority: "P2",
         severity: "High",
-        projectId: "p1",
+        projectId: String(projectId),
       },
       sessionContext
     );

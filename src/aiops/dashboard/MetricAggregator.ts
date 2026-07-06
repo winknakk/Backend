@@ -1,6 +1,9 @@
 import { DatabaseAdapter } from "../../adapters/types";
 import { ConversationTraceSummary, HandoffNode } from "../../schemas/aiops";
 import { AuditLog } from "../../schemas/validation";
+import { createLogger } from "../../observability/logger";
+
+const logger = createLogger("MetricAggregator");
 
 export class MetricAggregator {
   private dbAdapter: DatabaseAdapter;
@@ -112,6 +115,30 @@ export class MetricAggregator {
       }
     }
 
+    // Fetch Cache Metrics
+    const cacheService = require("../../cache/CacheService").CacheService.getInstance();
+    const cacheMetrics = cacheService.getMetrics();
+    let totalHits = 0;
+    let totalMisses = 0;
+    for (const tenantKey of Object.keys(cacheMetrics)) {
+      totalHits += cacheMetrics[tenantKey].hits || 0;
+      totalMisses += cacheMetrics[tenantKey].misses || 0;
+    }
+    const totalCache = totalHits + totalMisses;
+    const cacheHitRatio = totalCache > 0 ? parseFloat((totalHits / totalCache).toFixed(2)) : 0;
+
+    // Fetch Queue Depth
+    let queueDepth = 0;
+    try {
+      const queueFactory = require("../../queue/QueueFactory").QueueFactory;
+      const jobQueue = queueFactory.getQueue();
+      if (jobQueue && typeof jobQueue.getQueueDepth === "function") {
+        queueDepth = await jobQueue.getQueueDepth();
+      }
+    } catch (qErr: any) {
+      logger.warn({ error: qErr.message }, "Failed to resolve live queue depth for dashboard metrics");
+    }
+
     return {
       totalTraces: filteredTraces.length,
       completedTraces: completedCount,
@@ -121,6 +148,11 @@ export class MetricAggregator {
       slaViolations,
       slaViolationRate: filteredTickets.length > 0 ? slaViolations / filteredTickets.length : 0,
       agentRoutingDistribution: agentRoutingDist,
+      queueDepth,
+      cacheHits: totalHits,
+      cacheMisses: totalMisses,
+      cacheHitRatio,
+      cacheMetrics,
     };
   }
 

@@ -59,13 +59,13 @@ async function run() {
   const conversationId = await dbAdapter.ensureConversation(senderId, "1", "LINE");
 
   // 1. Initial State should be ACTIVE_AI
-  const initial = takeoverManager.getTakeoverState(conversationId);
+  const initial = await takeoverManager.getTakeoverState(conversationId);
   console.log("Initial state status:", initial.status);
   assert(initial.status === "ACTIVE_AI", "Initial state must be ACTIVE_AI.");
 
   // 2. Set to ACTIVE_HUMAN with 1.5 second lease
-  takeoverManager.setTakeoverState(conversationId, "ACTIVE_HUMAN", "human_agent_bob", 1500);
-  const activeState = takeoverManager.getTakeoverState(conversationId);
+  await takeoverManager.setTakeoverState(conversationId, "ACTIVE_HUMAN", "human_agent_bob", 1500);
+  const activeState = await takeoverManager.getTakeoverState(conversationId);
   console.log("Activated human takeover:", activeState.status, "| Assigned agent:", activeState.assignedHumanAgentId);
   assert(activeState.status === "ACTIVE_HUMAN", "Status should be ACTIVE_HUMAN.");
   assert(activeState.assignedHumanAgentId === "human_agent_bob", "Assigned agent should match.");
@@ -94,7 +94,7 @@ async function run() {
   await delay(2500);
 
   // Check state again
-  const expiredState = takeoverManager.getTakeoverState(conversationId);
+  const expiredState = await takeoverManager.getTakeoverState(conversationId);
   console.log("State after delay:", expiredState.status);
   assert(expiredState.status === "ACTIVE_AI", "State must revert back to ACTIVE_AI after lease expiration.");
 
@@ -104,7 +104,7 @@ async function run() {
       fs.unlinkSync(takeoverFilePath);
     } catch {}
   }
-
+  await takeoverManager.disconnect();
   console.log("\n✅ All Human Takeover tests PASSED successfully!");
 }
 
