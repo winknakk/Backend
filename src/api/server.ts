@@ -42,6 +42,7 @@ import { CacheService } from "../cache/CacheService";
 import { randomUUID } from "crypto";
 import { MetricsService } from "../observability/MetricsService";
 import { initOpenTelemetry } from "../observability/openTelemetry";
+import { ConfigLoaderService } from "../services/ConfigLoaderService";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any });
@@ -591,15 +592,31 @@ fastify.get("/api/v1/internal/companies/details", async (request, reply) => {
   });
 });
 
+fastify.get("/api/v1/internal/config/prompts", async (request, reply) => {
+  const query = request.query as any;
+  const projectId = query.projectId || request.headers["x-project-id"] || "1";
+  const config = await ConfigLoaderService.getInstance().getPromptConfig(String(projectId));
+  return reply.code(200).send(config);
+});
+
 fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   const query = request.query as any;
   const identityId = query.identityId || query.identity_id;
   const status = query.status || "open";
-  
-  const res = await pool.query(
-    `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
-    [identityId, status]
-  );
+  const projectId = query.projectId || request.headers["x-project-id"];
+
+  let res;
+  if (projectId) {
+    res = await pool.query(
+      `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
+      [identityId, status, parseInt(String(projectId), 10) || null]
+    );
+  } else {
+    res = await pool.query(
+      `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
+      [identityId, status]
+    );
+  }
   
   if (res.rows.length === 0) {
     return reply.code(200).send([]);
@@ -628,12 +645,18 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
   const channel = body.channel;
   const status = body.status || "open";
   const handledBy = body.handledBy || body.handled_by || "ai";
+  const projectId = body.projectId || body.project_id || request.headers["x-project-id"];
+  const parsedProjectId = projectId ? (parseInt(String(projectId), 10) || null) : null;
   
+  // Get next id
+  const nextIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
+  const nextId = nextIdRes.rows[0].next_id;
+
   const res = await pool.query(
-    `INSERT INTO conversations (identity_id, channel, status, handled_by)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO conversations (id, identity_id, channel, status, handled_by, project_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING *`,
-    [identityId, channel, status, handledBy]
+    [nextId, identityId, channel, status, handledBy, parsedProjectId]
   );
   
   const conv = res.rows[0];
