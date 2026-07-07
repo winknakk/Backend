@@ -41,6 +41,7 @@ import { GracefulShutdownService } from "./GracefulShutdownService";
 import { CacheService } from "../cache/CacheService";
 import { randomUUID } from "crypto";
 import { MetricsService } from "../observability/MetricsService";
+import { initOpenTelemetry } from "../observability/openTelemetry";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any });
@@ -107,6 +108,7 @@ fastify.addHook("onRequest", async (request) => {
 });
 
 async function bootstrap() {
+  initOpenTelemetry();
   serverLogger.info("Initializing AutomationX V2 API Server bootstrap...");
 
   // Register graceful shutdown handlers
@@ -297,6 +299,86 @@ fastify.get("/metrics", async (request, reply) => {
     ...mainMetrics,
     cache: cacheMetrics,
   });
+});
+
+fastify.get("/metrics/prometheus", async (request, reply) => {
+  const mainMetrics = MetricsService.getInstance().getMetrics();
+  const cacheMetrics = CacheService.getInstance().getMetrics();
+  
+  let qDepth = 0;
+  try {
+    qDepth = typeof (jobQueue as any).getQueueDepth === "function" ? await (jobQueue as any).getQueueDepth() : 0;
+  } catch (err: any) {
+    serverLogger.warn({ error: err.message }, "Failed to get queue depth for Prometheus metrics");
+  }
+
+  let prometheusText = "";
+
+  // 1. Requests Total
+  prometheusText += `# HELP automationx_requests_total Total number of inbound webhook requests.\n`;
+  prometheusText += `# TYPE automationx_requests_total counter\n`;
+  prometheusText += `automationx_requests_total ${mainMetrics.requestCount}\n\n`;
+
+  // 2. Errors Total
+  prometheusText += `# HELP automationx_errors_total Total number of failed requests.\n`;
+  prometheusText += `# TYPE automationx_errors_total counter\n`;
+  prometheusText += `automationx_errors_total ${mainMetrics.errors}\n\n`;
+
+  // 3. Latency Summary
+  prometheusText += `# HELP automationx_request_latency_seconds_sum Total request duration in seconds.\n`;
+  prometheusText += `# TYPE automationx_request_latency_seconds_sum counter\n`;
+  prometheusText += `automationx_request_latency_seconds_sum ${mainMetrics.latency.sum / 1000}\n\n`;
+
+  prometheusText += `# HELP automationx_request_latency_seconds_count Total number of measured requests.\n`;
+  prometheusText += `# TYPE automationx_request_latency_seconds_count counter\n`;
+  prometheusText += `automationx_request_latency_seconds_count ${mainMetrics.latency.count}\n\n`;
+
+  // 4. Agent Calls
+  prometheusText += `# HELP automationx_agent_calls_total Number of calls to different agents.\n`;
+  prometheusText += `# TYPE automationx_agent_calls_total counter\n`;
+  for (const [agent, count] of Object.entries(mainMetrics.agentCalls)) {
+    prometheusText += `automationx_agent_calls_total{agent="${agent}"} ${count}\n`;
+  }
+  prometheusText += `\n`;
+
+  // 5. Tool Calls
+  prometheusText += `# HELP automationx_tool_calls_total Number of executions of MCP tools.\n`;
+  prometheusText += `# TYPE automationx_tool_calls_total counter\n`;
+  for (const [tool, count] of Object.entries(mainMetrics.toolCalls)) {
+    prometheusText += `automationx_tool_calls_total{tool="${tool}"} ${count}\n`;
+  }
+  prometheusText += `\n`;
+
+  // 6. Routing Decisions
+  prometheusText += `# HELP automationx_routing_decisions_total Number of routing decisions made.\n`;
+  prometheusText += `# TYPE automationx_routing_decisions_total counter\n`;
+  for (const [decision, count] of Object.entries(mainMetrics.routingDecisions)) {
+    prometheusText += `automationx_routing_decisions_total{decision="${decision}"} ${count}\n`;
+  }
+  prometheusText += `\n`;
+
+  // 7. Cache Metrics
+  prometheusText += `# HELP automationx_cache_hits_total Number of cache hits.\n`;
+  prometheusText += `# TYPE automationx_cache_hits_total counter\n`;
+  prometheusText += `# HELP automationx_cache_misses_total Number of cache misses.\n`;
+  prometheusText += `# TYPE automationx_cache_misses_total counter\n`;
+  prometheusText += `# HELP automationx_cache_hit_ratio Cache hit ratio percentage.\n`;
+  prometheusText += `# TYPE automationx_cache_hit_ratio gauge\n`;
+
+  for (const [tenant, data] of Object.entries(cacheMetrics)) {
+    const cacheData = data as { hits: number; misses: number; ratio: number };
+    prometheusText += `automationx_cache_hits_total{tenant="${tenant}"} ${cacheData.hits}\n`;
+    prometheusText += `automationx_cache_misses_total{tenant="${tenant}"} ${cacheData.misses}\n`;
+    prometheusText += `automationx_cache_hit_ratio{tenant="${tenant}"} ${cacheData.ratio}\n`;
+  }
+  prometheusText += `\n`;
+
+  // 8. Queue depth
+  prometheusText += `# HELP automationx_queue_depth Current depth of message queues.\n`;
+  prometheusText += `# TYPE automationx_queue_depth gauge\n`;
+  prometheusText += `automationx_queue_depth ${qDepth}\n`;
+
+  return reply.type("text/plain; version=0.0.4").send(prometheusText);
 });
 
 fastify.get("/traces", async (request, reply) => {

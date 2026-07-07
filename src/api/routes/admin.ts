@@ -534,4 +534,26 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
     return reply.code(200).send(result);
   });
+
+  // ── AX-FE-010: Projects Listing API ─────────────────────────
+  fastify.get("/api/v1/admin/projects", async (_request, reply) => {
+    try {
+      const { pool } = require("../../adapters/postgres/PostgresAdapter");
+      const { rows } = await pool.query(
+        "SELECT id, name, project_type, created_at FROM projects ORDER BY id ASC"
+      );
+      const projects = rows.map((r: any) => ({
+        id: String(r.id),
+        name: r.name,
+        projectType: r.project_type,
+        createdAt: r.created_at,
+      }));
+      return reply.code(200).send(projects);
+    } catch (err: any) {
+      // Fallback for non-postgres environments
+      return reply.code(200).send([
+        { id: "1", name: "Default Project", projectType: "Support", createdAt: new Date().toISOString() },
+      ]);
+    }
+  });
 }

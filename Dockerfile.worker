@@ -1,4 +1,4 @@
-# ── AX-INFRA-001: AutomationX V3 Backend Dockerfile ──
+# ── AX-INFRA-002: AutomationX V3 Worker Dockerfile ──
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
@@ -12,10 +12,7 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/database ./database
-COPY --from=builder /app/prompts ./prompts
 COPY --from=builder /app/data ./data
 ENV NODE_ENV=production
-EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD wget -qO- http://localhost:3000/health || exit 1
+# Worker does not expose HTTP — it connects to Redis and polls BullMQ
 CMD ["node", "dist/api/server.js"]

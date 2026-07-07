@@ -20,6 +20,7 @@ async function runIntegrationTest() {
   console.log("=========================================\n");
 
   process.env.NODE_ENV = "development";
+  process.env.DATABASE_PROVIDER = "local";
   delete process.env.NOCODB_API_TOKEN; // Ensure local mock fallback for NocoDB adapter
 
   // Clean up persistent state for test sender to avoid test pollution

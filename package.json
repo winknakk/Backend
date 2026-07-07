@@ -4,9 +4,15 @@
     "build": "npx tsc",
     "lint": "npx eslint \"src/**/*.ts\"",
     "format": "npx prettier --check \"src/**/*.ts\"",
-    "test": "npx tsx src/test-handoff.ts && npx tsx src/test-tenants.ts && npx tsx src/test-agent-policy.ts && npx tsx src/test-security.ts && npx tsx src/test-vertical-slice.ts && npx tsx src/test-circuit-breaker.ts && npx tsx src/test-distributed-queue.ts && npx tsx src/test-tenant-cache.ts && npx tsx src/test-graceful-shutdown.ts && npx tsx src/test-distributed-tracing.ts && npx tsx src/test-database-failover.ts && npx tsx src/test-hot-reload.ts"
+    "test": "npx tsx src/test-handoff.ts && npx tsx src/test-tenants.ts && npx tsx src/test-agent-policy.ts && npx tsx src/test-security.ts && npx tsx src/test-vertical-slice.ts && npx tsx src/test-circuit-breaker.ts && npx tsx src/test-distributed-queue.ts && npx tsx src/test-tenant-cache.ts && npx tsx src/test-graceful-shutdown.ts && npx tsx src/test-distributed-tracing.ts && npx tsx src/test-database-failover.ts && npx tsx src/test-hot-reload.ts && npx tsx src/test-prometheus-metrics.ts"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/resources": "^2.9.0",
+    "@opentelemetry/sdk-node": "^0.220.0",
+    "@opentelemetry/sdk-trace-base": "^2.9.0",
+    "@opentelemetry/sdk-trace-node": "^2.9.0",
+    "@opentelemetry/semantic-conventions": "^1.42.0",
     "axios": "^1.18.1",
     "bullmq": "^5.79.2",
     "dotenv": "^17.4.2",
