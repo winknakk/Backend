@@ -1,7 +1,3 @@
-import * as fs from "fs";
-import * as path from "path";
-import { CacheService } from "../cache/CacheService";
-
 export interface PromptMetadata {
   name: string;
   version: string;
@@ -14,18 +10,7 @@ export interface PromptRecord {
   template: string;
 }
 
-interface CachedPrompt extends PromptRecord {
-  mtimeMs: number;
-}
-
 export class PromptRegistry {
-  private cache = new Map<string, CachedPrompt>();
-  private promptDir: string;
-
-  constructor(promptDir = path.join(process.cwd(), "prompts")) {
-    this.promptDir = promptDir;
-  }
-
   async getPrompt(
     name: string,
     variables: Record<string, any> = {},
@@ -55,7 +40,7 @@ export class PromptRegistry {
 
 [System Project Context Scope]
 Active Project ID: ${activeProjectId}
-You are operating strictly under the scope of Project ${activeProjectId}. You are authorized to run the following MCP tools: ${allowedTools.join(", ")}. Any other tools are strictly unauthorized and blocked by the platform security policy engine.`;
+You are operating strictly under the scope of Project ${activeProjectId}. You can only view knowledge base documents and create/retrieve tickets that are bound to this active project scope. You are authorized to run the following MCP tools: ${allowedTools.join(", ")}. Any other tools are strictly unauthorized and blocked by the platform security policy engine.`;
 
     const rawTemplate = (promptConfig?.systemInstruction || "You are an helpful AI Assistant designed to resolve tickets and support customers.") + dynamicDirective;
 
@@ -68,57 +53,6 @@ You are operating strictly under the scope of Project ${activeProjectId}. You ar
       },
       template: this.interpolate(rawTemplate, variables),
     };
-  }
-
-  clearCache(): void {
-    this.cache.clear();
-  }
-
-  private loadPrompt(name: string): CachedPrompt {
-    const filePath = this.resolvePromptPath(name);
-    const stat = fs.statSync(filePath);
-    const cached = this.cache.get(name);
-
-    if (cached && cached.mtimeMs === stat.mtimeMs) {
-      return cached;
-    }
-
-    const raw = fs.readFileSync(filePath, "utf-8");
-    let version = "1";
-    let template = raw;
-
-    if (filePath.endsWith(".json")) {
-      const parsed = JSON.parse(raw);
-      version = String(parsed.version || version);
-      template = String(parsed.template || "");
-    }
-
-    const record: CachedPrompt = {
-      metadata: {
-        name,
-        version,
-        filePath,
-        loadedAt: new Date().toISOString(),
-      },
-      template,
-      mtimeMs: stat.mtimeMs,
-    };
-
-    this.cache.set(name, record);
-    return record;
-  }
-
-  private resolvePromptPath(name: string): string {
-    const candidates = [
-      path.join(this.promptDir, `${name}.json`),
-      path.join(this.promptDir, `${name}.prompt`),
-      path.join(this.promptDir, `${name}.txt`),
-    ];
-    const match = candidates.find((candidate) => fs.existsSync(candidate));
-    if (!match) {
-      throw new Error(`Prompt '${name}' was not found in ${this.promptDir}.`);
-    }
-    return match;
   }
 
   private interpolate(template: string, variables: Record<string, any>): string {

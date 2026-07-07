@@ -8,12 +8,12 @@ export class TenantService implements ITenantService {
       companyName: "กสม",
       status: "Active",
       aiPromptTemplate: "คุณคือ Support Agent AI สำหรับช่วยเหลือผู้ใช้ระบบ SSO/AD ของ กสม.",
-      projects: [{ projectId: "p1", projectName: "SSO/AD System", projectType: "SSO / AD" }],
+      projects: [{ projectId: "1", projectName: "SSO/AD System", projectType: "SSO / AD" }],
       slaConfig: [
-        { projectId: "p1", severity: "Critical", responseTimeHours: 1, resolveTimeHours: 4 },
-        { projectId: "p1", severity: "High", responseTimeHours: 4, resolveTimeHours: 12 },
-        { projectId: "p1", severity: "Medium", responseTimeHours: 24, resolveTimeHours: 48 },
-        { projectId: "p1", severity: "Low", responseTimeHours: 72, resolveTimeHours: 120 },
+        { projectId: "1", severity: "Critical", responseTimeHours: 1, resolveTimeHours: 4 },
+        { projectId: "1", severity: "High", responseTimeHours: 4, resolveTimeHours: 12 },
+        { projectId: "1", severity: "Medium", responseTimeHours: 24, resolveTimeHours: 48 },
+        { projectId: "1", severity: "Low", responseTimeHours: 72, resolveTimeHours: 120 },
       ],
     },
     "2": {
@@ -21,10 +21,10 @@ export class TenantService implements ITenantService {
       companyName: "ราชวิ",
       status: "Active",
       aiPromptTemplate: "คุณคือ Support Agent AI สำหรับช่วยเหลือผู้ใช้ระบบ IT โรงพยาบาลราชวิถี",
-      projects: [{ projectId: "p2", projectName: "App Support", projectType: "Application Support" }],
+      projects: [{ projectId: "2", projectName: "App Support", projectType: "Application Support" }],
       slaConfig: [
-        { projectId: "p2", severity: "Critical", responseTimeHours: 2, resolveTimeHours: 4 },
-        { projectId: "p2", severity: "High", responseTimeHours: 8, resolveTimeHours: 24 },
+        { projectId: "2", severity: "Critical", responseTimeHours: 2, resolveTimeHours: 4 },
+        { projectId: "2", severity: "High", responseTimeHours: 8, resolveTimeHours: 24 },
       ],
     },
   };

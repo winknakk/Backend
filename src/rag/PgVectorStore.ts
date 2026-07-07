@@ -26,12 +26,19 @@ export class PgVectorStore implements IVectorStore {
     queryVector: number[],
     k: number = 5
   ): Promise<Array<{ id: string; content: string; score: number; metadata?: any }>> {
+    const { getOptionalRequestContext } = require("../kernel/context/RequestContextHolder");
+    const context = getOptionalRequestContext();
+    const activeProjectId = context?.projectId || "1";
+    const activeTenantId = context?.tenantId || "1";
+
     const { rows } = await pool.query(
       `SELECT doc_id, content, metadata, 1 - (embedding <=> $1::vector) AS score
        FROM document_embeddings
+       WHERE (metadata->>'projectId' = $3 OR metadata->>'project_id' = $3)
+         AND (metadata->>'tenantId' = $4 OR metadata->>'companyId' = $4 OR metadata->>'company_id' = $4)
        ORDER BY embedding <=> $1::vector
        LIMIT $2`,
-      [this.toVectorLiteral(queryVector), k]
+      [this.toVectorLiteral(queryVector), k, activeProjectId, activeTenantId]
     );
 
     return rows.map((row: any) => ({
