@@ -9,17 +9,22 @@ export class TicketService {
   }
 
   async createTicket(input: TicketInput): Promise<ExecutionResult> {
-    // 1. Calculate SLA Due Date
-    const severity = input.severity;
+    // 1. Calculate SLA Due Date dynamically based on project SLA policies
+    let resolveHours = 120; // default fallback
+    try {
+      const { pool } = require("../adapters/postgres/PostgresAdapter");
+      const projectId = parseInt(input.projectId, 10) || 1;
+      const res = await pool.query(
+        "SELECT resolve_hours FROM project_sla_policies WHERE project_id = $1 AND priority = $2 LIMIT 1",
+        [projectId, input.priority]
+      );
+      if (res.rows.length > 0) {
+        resolveHours = res.rows[0].resolve_hours || 120;
+      }
+    } catch (err: any) {
+      console.error("Failed to query resolve_hours dynamically for ticket creation SLA calculation:", err.message);
+    }
 
-    const slaConfig: Record<string, number> = {
-      Critical: 4,
-      High: 12,
-      Medium: 48,
-      Low: 120,
-    };
-
-    const resolveHours = slaConfig[severity] || 120;
     const startDate = new Date();
     const dueDate = new Date(startDate.getTime() + resolveHours * 60 * 60 * 1000);
 

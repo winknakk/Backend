@@ -53,8 +53,8 @@ export class HumanReplyService {
     return JSON.parse(raw) as T[];
   }
 
-  async listConversations(): Promise<any[]> {
-    return await this.dbAdapter.listAllConversations();
+  async listConversations(projectId?: string): Promise<any[]> {
+    return await this.dbAdapter.listAllConversations(projectId);
   }
 
   async getMessages(conversationId: string): Promise<any[]> {

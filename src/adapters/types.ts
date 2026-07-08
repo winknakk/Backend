@@ -70,14 +70,14 @@ export interface DatabaseAdapter {
   listAllTraces(): Promise<AuditLog[]>;
 
   /**
-   * Lists all tickets globally or filtered by conversation.
+   * Lists all tickets globally or filtered by conversation and project.
    */
-  listAllTickets(conversationId?: string): Promise<any[]>;
+  listAllTickets(conversationId?: string, projectId?: string): Promise<any[]>;
 
   /**
-   * Lists all conversations globally.
+   * Lists all conversations globally or filtered by project.
    */
-  listAllConversations(): Promise<any[]>;
+  listAllConversations(projectId?: string): Promise<any[]>;
 
   /**
    * Retrieves messages for a specific conversation.

@@ -691,32 +691,47 @@ export class PostgresAdapter implements DatabaseAdapter {
     return res.rows.map((r: any) => this.mapRowToAuditLog(r));
   }
 
-  async listAllTickets(conversationId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
     const fallback = async () => {
       let bk = await BackupManager.readFromBackup<any>("tickets");
       if (conversationId) {
         bk = bk.filter((t) => String(t.conversation_id) === String(conversationId));
       }
+      if (projectId) {
+        bk = bk.filter((t) => String(t.project_id || 1) === String(projectId));
+      }
       return bk;
     };
 
-    let query = `SELECT * FROM tickets`;
+    let query = `
+      SELECT t.*, p.priority_name, p.resolve_hours 
+      FROM tickets t
+      LEFT JOIN project_sla_policies p ON p.project_id = t.project_id AND p.priority = t.priority
+    `;
     const queryParams: any[] = [];
+    const conditions: string[] = [];
+
     if (conversationId) {
-      query += ` WHERE conversation_id = $1`;
       queryParams.push(conversationId);
+      conditions.push(`t.conversation_id = $${queryParams.length}`);
     }
-    query += ` ORDER BY id DESC`;
+    if (projectId) {
+      queryParams.push(parseInt(projectId, 10) || 1);
+      conditions.push(`t.project_id = $${queryParams.length}`);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ` + conditions.join(" AND ");
+    }
+    query += ` ORDER BY t.id DESC`;
 
     const res = await this.executeReadQuery(query, queryParams, fallback);
 
     return res.rows.map((r: any) => {
-      const priorityMap: Record<string, string> = { P1: "Critical", P2: "High", P3: "Medium", P4: "Low" };
-      const severity = priorityMap[r.priority] || "Low";
+      const severity = r.priority_name || r.priority || "Low";
 
       const baseDate = r.created_at ? new Date(r.created_at) : new Date();
-      const resolveHoursMap: Record<string, number> = { Critical: 4, High: 12, Medium: 48, Low: 120 };
-      const resolveHours = resolveHoursMap[severity] || 120;
+      const resolveHours = r.resolve_hours || 120;
       const dueDate = new Date(baseDate.getTime() + resolveHours * 60 * 60 * 1000).toISOString();
 
       return {
@@ -739,8 +754,8 @@ export class PostgresAdapter implements DatabaseAdapter {
     });
   }
 
-  async listAllConversations(): Promise<any[]> {
-    const query = `
+  async listAllConversations(projectId?: string): Promise<any[]> {
+    let query = `
       SELECT
         c.id::text AS id,
         c.id::text AS id1,
@@ -748,12 +763,12 @@ export class PostgresAdapter implements DatabaseAdapter {
         c.channel,
         c.status,
         c.handled_by,
-        COALESCE(p.name, 'Nattapong') AS profile_name,
+        COALESCE(p.name, 'Customer') AS profile_name,
         NULL::text AS avatar_url,
         COALESCE(p.id::text, 'unknown') AS profile_id,
         NULL::text AS profile_email,
         NULL::text AS profile_phone,
-        COALESCE(co.name, 'Orbit Retail') AS company_name,
+        COALESCE(co.name, 'Unknown Company') AS company_name,
         (SELECT content FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message,
         (SELECT created_at FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message_timestamp,
         (SELECT role FROM messages WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1) AS last_message_role,
@@ -764,9 +779,25 @@ export class PostgresAdapter implements DatabaseAdapter {
       JOIN identities i ON i.id = c.identity_id
       LEFT JOIN profiles p ON p.id = i.profile_id
       LEFT JOIN companies co ON co.id = p.company_id
-      ORDER BY c.updated_at DESC
     `;
-    const res = await pool.query(query);
+    
+    const queryParams: any[] = [];
+    if (projectId) {
+      query += ` WHERE c.project_id = $1 `;
+      queryParams.push(parseInt(projectId, 10) || 1);
+    }
+    
+    query += ` ORDER BY c.updated_at DESC`;
+    
+    const fallback = async () => {
+      const bk = await BackupManager.readFromBackup<any>("conversations");
+      if (projectId) {
+        return bk.filter((c: any) => String(c.project_id || 1) === String(projectId));
+      }
+      return bk;
+    };
+
+    const res = await this.executeReadQuery(query, queryParams, fallback);
     return await Promise.all(res.rows.map(async (row) => {
       const takeover = await this.takeoverManager.getTakeoverState(row.id);
       

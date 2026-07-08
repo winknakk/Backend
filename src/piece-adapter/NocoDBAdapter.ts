@@ -458,10 +458,10 @@ export class NocoDBAdapter implements DatabaseAdapter {
     return field;
   }
 
-  async listAllTickets(conversationId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
     const now = Date.now();
     // Cache for 8 seconds to prevent excessive NocoDB calls when no conversation filter is applied
-    if (!conversationId && this.cachedTicketsList.length > 0 && (now - this.lastTicketsFetch) < 8000) {
+    if (!conversationId && !projectId && this.cachedTicketsList.length > 0 && (now - this.lastTicketsFetch) < 8000) {
       return this.cachedTicketsList;
     }
 
@@ -478,7 +478,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
         throw err;
       });
 
-      const mapped = rows.map((r: any) => {
+      let mapped = rows.map((r: any) => {
         const tid = String(r.Id || r.id || r.id1);
         const convId = this.extractId(r.conversation_id);
         return {
@@ -496,10 +496,15 @@ export class NocoDBAdapter implements DatabaseAdapter {
           planeIssueId: r.plane_issue_id || null,
           dueDate: r.due_date || r.dueDate || null,
           createdAt: r.CreatedAt || r.created_at || r.createdAt || null,
+          projectId: r.project_id || r.projectId || "1",
         };
       });
 
-      if (!conversationId) {
+      if (projectId) {
+        mapped = mapped.filter((t: any) => String(t.projectId || 1) === String(projectId));
+      }
+
+      if (!conversationId && !projectId) {
         this.cachedTicketsList = mapped;
         this.lastTicketsFetch = now;
       }
@@ -531,7 +536,15 @@ export class NocoDBAdapter implements DatabaseAdapter {
     }
   }
 
-  async listAllConversations(): Promise<any[]> {
+  async listAllConversations(projectId?: string): Promise<any[]> {
+    const rawList = await this.listAllConversationsRaw();
+    if (projectId) {
+      return rawList.filter((c: any) => String(c.project_id || c.projectId || 1) === String(projectId));
+    }
+    return rawList;
+  }
+
+  private async listAllConversationsRaw(): Promise<any[]> {
     const now = Date.now();
 
     // 3. Circuit open check without cache

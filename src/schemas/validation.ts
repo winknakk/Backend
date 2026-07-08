@@ -1,11 +1,11 @@
 import { z } from "zod";
 
 // --- Channel payloads ---
-export const SeveritySchema = z.enum(["Critical", "High", "Medium", "Low"]);
-export type Severity = z.infer<typeof SeveritySchema>;
+export const SeveritySchema = z.string().min(1, "Severity is required");
+export type Severity = string;
 
-export const PrioritySchema = z.enum(["P1", "P2", "P3", "P4"]);
-export type Priority = z.infer<typeof PrioritySchema>;
+export const PrioritySchema = z.string().min(1, "Priority is required");
+export type Priority = string;
 
 export const ChannelTypeSchema = z.enum(["LINE", "Email", "WebChat", "Teams"]);
 export type ChannelType = z.infer<typeof ChannelTypeSchema>;

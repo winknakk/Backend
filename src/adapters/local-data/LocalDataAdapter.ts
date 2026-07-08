@@ -437,11 +437,14 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return this.readTable<AuditLog>("Traces", AuditLogSchema);
   }
 
-  async listAllTickets(conversationId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
     try {
       let tickets = this.readTable<any>("Tickets", DbTicketSchema);
       if (conversationId) {
         tickets = tickets.filter((t) => String(t.conversation_id) === String(conversationId));
+      }
+      if (projectId) {
+        tickets = tickets.filter((t) => String(t.project_id || 1) === String(projectId));
       }
       return tickets;
     } catch {
@@ -449,8 +452,11 @@ export class LocalDataAdapter implements DatabaseAdapter {
     }
   }
 
-  async listAllConversations(): Promise<any[]> {
-    const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+  async listAllConversations(projectId?: string): Promise<any[]> {
+    let conversations = this.readTable<any>("Conversations", DbConversationSchema);
+    if (projectId) {
+      conversations = conversations.filter((c) => String(c.project_id || 1) === String(projectId));
+    }
     const identities = this.readTable<any>("Identities", DbIdentitySchema);
     const messages = this.readTable<any>("Messages", DbMessageSchema);
     const profiles = this.readTable<any>("Profiles", DbProfileSchema);

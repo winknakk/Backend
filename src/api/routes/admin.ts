@@ -128,7 +128,9 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
   // 6. GET /api/admin/conversations
   fastify.get("/api/admin/conversations", async (request, reply) => {
-    const list = await humanReplyService.listConversations();
+    const query = request.query as any;
+    const projectId = query?.projectId ? String(query.projectId) : undefined;
+    const list = await humanReplyService.listConversations(projectId);
     return reply.code(200).send(list);
   });
 
@@ -237,10 +239,59 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       };
 
       let project = {
-        name: "Orbit POS System",
-        type: "Support",
-        sla: "High (SLA Response: 4 hrs, Resolve: 12 hrs)"
+        id: null as number | null,
+        name: "",
+        company: "",
+        environment: "",
+        projectType: "",
+        defaultPriority: "",
+        priorities: [] as any[]
       };
+
+      try {
+        const { pool } = require("../../adapters/postgres/PostgresAdapter");
+        const projectId = conv.project_id;
+        if (projectId) {
+          project.id = parseInt(String(projectId), 10);
+          
+          const projRes = await pool.query(
+            `SELECT p.name AS project_name, p.environment, p.project_type, c.name AS company_name 
+             FROM projects p 
+             LEFT JOIN companies c ON c.id = p.company_id 
+             WHERE p.id = $1`,
+            [projectId]
+          );
+          if (projRes.rows.length > 0) {
+            project.name = projRes.rows[0].project_name || "";
+            project.company = projRes.rows[0].company_name || "";
+            project.environment = projRes.rows[0].environment || "";
+            project.projectType = projRes.rows[0].project_type || "";
+          }
+
+          const slaRes = await pool.query(
+            `SELECT priority, priority_name, description, response_hours, resolve_hours, service_window, is_default, display_order 
+             FROM project_sla_policies 
+             WHERE project_id = $1 
+             ORDER BY display_order ASC`,
+            [projectId]
+          );
+          
+          if (slaRes.rows.length > 0) {
+            project.priorities = slaRes.rows.map((r: any) => ({
+              code: r.priority,
+              name: r.priority_name || r.priority,
+              description: r.description || "",
+              responseHours: r.response_hours || r.resolve_hours || 0,
+              resolveHours: r.resolve_hours || 0,
+              serviceWindow: r.service_window || ""
+            }));
+            const defRow = slaRes.rows.find((r: any) => r.is_default);
+            project.defaultPriority = defRow ? defRow.priority : slaRes.rows[0].priority;
+          }
+        }
+      } catch (err: any) {
+        console.error("Failed to dynamically load project details inside profile:", err.message);
+      }
 
       // If we are using NocoDBAdapter, we can query the database directly for actual profile / company!
       if (typeof (deps.dbAdapter as any).getRows === "function") {
@@ -428,21 +479,19 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
             created_at: c.created_at instanceof Date ? c.created_at.toISOString() : c.created_at || new Date().toISOString(),
           }));
 
-          // Fetch tickets
-          const tixRes = await pool.query(
-            `SELECT t.id, t.subject, t.summary, t.status, t.priority
+           const tixRes = await pool.query(
+            `SELECT t.id, t.subject, t.summary, t.status, t.priority, t.project_id, t.created_at, p.priority_name, p.resolve_hours
              FROM tickets t
+             LEFT JOIN project_sla_policies p ON p.project_id = t.project_id AND p.priority = t.priority
              WHERE t.conversation_id IN (
                SELECT id FROM conversations WHERE identity_id = (SELECT identity_id FROM conversations WHERE id = $1::integer)
              )`,
             [conversationId]
           );
           ticketHistory = tixRes.rows.map((t: any) => {
-            const priorityMap: Record<string, string> = { P1: "Critical", P2: "High", P3: "Medium", P4: "Low" };
-            const severity = priorityMap[t.priority] || "Low";
-            const baseDate = new Date();
-            const resolveHoursMap: Record<string, number> = { Critical: 4, High: 12, Medium: 48, Low: 120 };
-            const resolveHours = resolveHoursMap[severity] || 120;
+            const severity = t.priority_name || t.priority || "Low";
+            const baseDate = t.created_at ? new Date(t.created_at) : new Date();
+            const resolveHours = t.resolve_hours || 120;
             const dueDate = new Date(baseDate.getTime() + resolveHours * 60 * 60 * 1000).toISOString();
 
             return {
@@ -506,7 +555,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
   // 11. GET /api/admin/conversations/:id/tickets
   fastify.get("/api/admin/conversations/:id/tickets", async (request, reply) => {
     const params = request.params as any;
-    const tickets = await deps.dbAdapter.listAllTickets(params.id);
+    const query = request.query as any;
+    const projectId = query?.projectId ? String(query.projectId) : undefined;
+    const tickets = await deps.dbAdapter.listAllTickets(params.id, projectId);
+    return reply.code(200).send(tickets);
+  });
+
+  // 11.5. GET /api/admin/tickets
+  fastify.get("/api/admin/tickets", async (request, reply) => {
+    const query = request.query as any;
+    const projectId = query?.projectId ? String(query.projectId) : undefined;
+    const tickets = await deps.dbAdapter.listAllTickets(undefined, projectId);
     return reply.code(200).send(tickets);
   });
 
