@@ -85,9 +85,17 @@ export class PostgresAdapter implements DatabaseAdapter {
   async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult> {
     const executionId = randomUUID();
     try {
+      let parsedProjectId: number | null = null;
+      if (input.projectId) {
+        const parsed = parseInt(input.projectId, 10);
+        if (!isNaN(parsed)) {
+          parsedProjectId = parsed;
+        }
+      }
+
       const { rows } = await pool.query(
-        `INSERT INTO tickets (id, conversation_id, subject, summary, status, priority, created_via)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ai')
+        `INSERT INTO tickets (id, conversation_id, subject, summary, status, priority, created_via, project_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7)
          RETURNING *`,
         [
           ticketNumber,
@@ -96,6 +104,7 @@ export class PostgresAdapter implements DatabaseAdapter {
           input.summary,
           "Open",
           input.priority,
+          parsedProjectId,
         ]
       );
 
@@ -705,7 +714,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       const priorityMap: Record<string, string> = { P1: "Critical", P2: "High", P3: "Medium", P4: "Low" };
       const severity = priorityMap[r.priority] || "Low";
 
-      const baseDate = new Date();
+      const baseDate = r.created_at ? new Date(r.created_at) : new Date();
       const resolveHoursMap: Record<string, number> = { Critical: 4, High: 12, Medium: 48, Low: 120 };
       const resolveHours = resolveHoursMap[severity] || 120;
       const dueDate = new Date(baseDate.getTime() + resolveHours * 60 * 60 * 1000).toISOString();
