@@ -41,7 +41,7 @@ export const EnvSchema = z.object({
   REDIS_URL: z.string().default("redis://127.0.0.1:6379"),
   BACKUP_ENCRYPTION_KEY: z.string().default("super-secret-backup-key-32-chars!"),
   BACKEND_PUBLIC_URL: z.string().url().default("http://localhost:3000"),
-  LINE_CHANNEL_ACCESS_TOKEN: z.string().default("***REMOVED***"),
+  LINE_CHANNEL_ACCESS_TOKEN: z.string().min(1, "LINE_CHANNEL_ACCESS_TOKEN is required"),
   PLANE_API_URL: z.string().url().default("https://api.plane.so"),
   PLANE_API_KEY: z.string().default("plane_mock_key"),
   PLANE_PROJECT_ID: z.string().default("proj_id"),
