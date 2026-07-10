@@ -49,7 +49,19 @@ export async function rateLimitHook(request: FastifyRequest, reply: FastifyReply
   const key = request.ip;
   const now = Date.now();
   const windowMs = config.RATE_LIMIT_WINDOW_MS;
-  const maxRequests = config.RATE_LIMIT_MAX;
+  let maxRequests = config.RATE_LIMIT_MAX;
+
+  // ── แก้ไขบล็อกเงื่อนไขใน rateLimit.ts ให้เป็นแบบนี้ ──
+
+  // Development environment relaxation
+  if (config.NODE_ENV === "development") {
+    if (key === "127.0.0.1" || key === "::1" || key === "localhost") {
+      // ลบ return; ออกไป เพื่อให้ Fastify ไม่หลุดโฟลว์สเตท
+      maxRequests = 10000;
+    } else {
+      maxRequests = 10000; // High clearance สำหรับไอพีอื่นๆ ในโหมดเดฟ
+    }
+  }
 
   // Get existing timestamps and filter to current window
   const timestamps = (requestMap.get(key) || []).filter((t) => now - t < windowMs);

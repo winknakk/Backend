@@ -43,9 +43,14 @@ import { randomUUID } from "crypto";
 import { MetricsService } from "../observability/MetricsService";
 import { initOpenTelemetry } from "../observability/openTelemetry";
 import { ConfigLoaderService } from "../services/ConfigLoaderService";
+import websocketPlugin from "@fastify/websocket";
+import WebChatGateway from "../presentation/http/routes/WebChatGateway";
+import Redis from "ioredis";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any });
+const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
+const adminConnections = new Set<any>();
 
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
@@ -126,7 +131,43 @@ async function bootstrap() {
 
   // Register the job processor callback
   jobQueue.process(async (job) => {
-    return orchestrator.handleIncomingMessage(job.data, job.metadata.requestId);
+    if (job.data.channel === "WebChat") {
+      try {
+        const webhookUrl = `${config.PROMPTX_FLOW_WEBHOOK_URL}/sync`;
+        serverLogger.info(`[BullMQ Worker] Forwarding WebChat message to PromptX Flow: ${webhookUrl}`);
+        
+        const response = await axios.post(webhookUrl, {
+          channel: "WebChat",
+          customer_ref: job.data.senderId,
+          message: job.data.text
+        });
+
+        const replyText = response.data.reply_text || "No reply from Agent.";
+        const convId = response.data.conversation_id;
+        
+        serverLogger.info(`[BullMQ Worker] Received sync reply from PromptX Flow: "${replyText}" (convId: ${convId})`);
+
+        const sessionContext = await memoryService.loadSessionContext(job.data.senderId, "WebChat");
+        await redisPub.publish(
+          "webchat:outbound",
+          JSON.stringify({
+            conversationId: convId || sessionContext.conversationId,
+            recipientId: job.data.senderId,
+            channel: "WebChat",
+            text: replyText,
+            sentAt: new Date().toISOString()
+          })
+        );
+
+        return { text: replyText, recipientId: job.data.senderId, channel: "WebChat" };
+      } catch (err: any) {
+        serverLogger.error({ error: err.message }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
+        throw err;
+      }
+    } else {
+      const result = await orchestrator.handleIncomingMessage(job.data, job.metadata.requestId);
+      return result;
+    }
   });
 
   // Register Piece Adapter Tool
@@ -445,6 +486,92 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
   return reply.code(200).send({ success: true, handled_by: "human" });
 });
 
+fastify.get("/api/admin/socket", { websocket: true }, (socket, req) => {
+  serverLogger.info("Admin WebSocket connection established");
+  adminConnections.add(socket);
+
+  socket.on("close", () => {
+    adminConnections.delete(socket);
+    serverLogger.info("Admin WebSocket connection closed");
+  });
+});
+
+fastify.post("/api/v1/webhooks/human_notify", async (request, reply) => {
+  const body = request.body as any;
+  const { conversationId, role, content } = body;
+
+  serverLogger.info({ conversationId, role, content }, "Received human_notify takeover webhook");
+
+  if (!conversationId) {
+    return reply.code(400).send({ error: "Bad Request", message: "conversationId is required" });
+  }
+
+  // Update handoff state in database
+  await dbAdapter.updateHandoffState(conversationId, "human");
+
+  // Set takeover state to PENDING_HUMAN in TakeoverManager
+  if (takeoverManager) {
+    const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
+    await takeoverManager.setTakeoverState(conversationId, "PENDING_HUMAN", undefined, leaseDurationMs);
+  }
+
+  // Save the notification message if present and not already logged
+  if (content) {
+    const messages = await dbAdapter.getMessages(conversationId);
+    const exists = messages.some((m: any) => m.content === content && m.role === role);
+    if (!exists) {
+      await dbAdapter.saveMessage(conversationId, role || "customer", content);
+    }
+  }
+
+  // Fetch customer/profile name from DB
+  let customerName = `Customer #${conversationId}`;
+  try {
+    const res = await pool.query(
+      `SELECT p.name FROM conversations c 
+       JOIN identities i ON c.identity_id = i.id::varchar 
+       JOIN profiles p ON i.profile_id = p.id 
+       WHERE c.id = $1::integer`,
+      [conversationId]
+    );
+    if (res.rows.length > 0 && res.rows[0].name) {
+      customerName = res.rows[0].name;
+    }
+  } catch (err: any) {
+    serverLogger.error({ error: err.message }, "Failed to fetch customer name for takeover notification");
+  }
+
+  // Broadcast to all connected admin panels
+  const payload = {
+    event: "NEW_HUMAN_REQUEST",
+    data: {
+      conversationId,
+      customerName,
+      lastMessage: content || "Requested human assistance"
+    }
+  };
+  const payloadStr = JSON.stringify(payload);
+  for (const adminSocket of adminConnections) {
+    if (adminSocket.readyState === 1) { // 1 = OPEN
+      adminSocket.send(payloadStr);
+    }
+  }
+
+  // Publish state change to Redis Pub/Sub
+  await redisPub.publish(
+    "webchat:outbound",
+    JSON.stringify({
+      conversationId,
+      recipientId: "admin",
+      channel: "WebChat",
+      event: "takeover_change",
+      status: "PENDING_HUMAN"
+    })
+  );
+
+  return reply.code(200).send({ success: true, status: "PENDING_HUMAN" });
+});
+
 fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
   const body = request.body as any;
   const result = await humanReplyService.sendReply(body.conversationId, body.message);
@@ -692,6 +819,10 @@ registerAdminRoutes(fastify, {
   dbAdapter,
   takeoverManager,
 });
+
+// Register WebChat Gateway and WebSockets
+fastify.register(websocketPlugin);
+fastify.register(WebChatGateway);
 
 const start = async () => {
   try {

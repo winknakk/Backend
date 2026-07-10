@@ -524,6 +524,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
         message_contents: messageContents,
         handled_by: String(c.handled_by || "ai"),
         takeover_status: takeover?.status || "ACTIVE_AI",
+        assigned_pm: takeover?.assignedHumanAgentId || null,
         human_session_started_at: takeover?.human_session_started_at || null,
         human_session_expire_at: takeover?.human_session_expire_at || null,
         last_human_reply_at: takeover?.last_human_reply_at || null,

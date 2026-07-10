@@ -108,29 +108,46 @@ export class HumanReplyService {
       await this.dbAdapter.saveMessage(conversationId, "human", message);
 
       const ident = await this.dbAdapter.getConversationIdent(conversationId);
-      if (ident && ident.channel && ident.channel_ref && (ident.channel.toLowerCase() === "line" || ident.channel.toLowerCase() === "line_group")) {
-        const lineToken = config.LINE_CHANNEL_ACCESS_TOKEN;
-        try {
-          console.log(`[HumanReplyService] Sending LINE Push to ${ident.channel_ref}...`);
-          await axios.post(
-            "https://api.line.me/v2/bot/message/push",
-            {
-              to: ident.channel_ref,
-              messages: [{ type: "text", text: message }],
-            },
-            {
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${lineToken}`,
+      if (ident && ident.channel && ident.channel_ref) {
+        const channelLower = ident.channel.toLowerCase();
+        if (channelLower === "line" || channelLower === "line_group") {
+          const lineToken = config.LINE_CHANNEL_ACCESS_TOKEN;
+          try {
+            console.log(`[HumanReplyService] Sending LINE Push to ${ident.channel_ref}...`);
+            await axios.post(
+              "https://api.line.me/v2/bot/message/push",
+              {
+                to: ident.channel_ref,
+                messages: [{ type: "text", text: message }],
               },
-              timeout: 5000,
-            }
+              {
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${lineToken}`,
+                },
+                timeout: 5000,
+              }
+            );
+            console.log(`[HumanReplyService] LINE Push sent successfully.`);
+            linePushed = true;
+          } catch (e: any) {
+            const errorMsg = e.response?.data?.message || e.message;
+            console.error(`[HumanReplyService] Failed to send LINE push:`, errorMsg);
+          }
+        } else if (channelLower === "webchat") {
+          const Redis = require("ioredis");
+          const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
+          await redisPub.publish(
+            "webchat:outbound",
+            JSON.stringify({
+              conversationId,
+              recipientId: ident.channel_ref,
+              channel: "WebChat",
+              text: message,
+              sentAt: new Date().toISOString()
+            })
           );
-          console.log(`[HumanReplyService] LINE Push sent successfully.`);
-          linePushed = true;
-        } catch (e: any) {
-          const errorMsg = e.response?.data?.message || e.message;
-          console.error(`[HumanReplyService] Failed to send LINE push:`, errorMsg);
+          await redisPub.quit();
         }
       }
     }

@@ -16,7 +16,12 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply): Pr
   }
 
   // Skip auth for health check and webhook endpoints
-  if (request.url === "/health" || request.url === "/webhook/message") {
+  if (
+    request.url === "/health" ||
+    request.url === "/webhook/message" ||
+    request.url.startsWith("/api/v1/webchat") ||
+    request.url.startsWith("/api/v1/webhooks")
+  ) {
     return;
   }
 

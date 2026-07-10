@@ -4,6 +4,7 @@ export interface ConversationProps {
   identityId: string;
   status: string;
   handledBy: string;
+  channel?: string;
   assignedPm?: string;
   takeoverExpiresAt?: Date | null;
   createdAt?: Date;
@@ -14,6 +15,7 @@ export class Conversation {
   public readonly id: string;
   public readonly projectId: string;
   public readonly identityId: string;
+  public readonly channel: string;
   private _status: string;
   private _handledBy: string;
   private _assignedPm?: string;
@@ -29,6 +31,7 @@ export class Conversation {
     this.id = props.id;
     this.projectId = props.projectId;
     this.identityId = props.identityId;
+    this.channel = props.channel || "WebChat";
     this._status = props.status || "open";
     this._handledBy = props.handledBy || "ai";
     this._assignedPm = props.assignedPm;

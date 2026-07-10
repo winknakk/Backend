@@ -26,6 +26,7 @@ export const EnvSchema = z.object({
   ACTIVEPIECES_PROMOTE_TICKET_WEBHOOK_URL_V2: z.string().url().default("https://wf.promptxai.com/api/v1/webhooks/v2-promote-ticket"),
   PROMPTX_MCP_URL: z.string().url(),
   PROMPTX_MCP_TOKEN: z.string().min(1, "PROMPTX_MCP_TOKEN is required"),
+  PROMPTX_FLOW_WEBHOOK_URL: z.string().url().default("https://wf.promptxai.com/api/v1/webhooks/Tj4kqSult1bbWIx2I2w4H"),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   API_KEY: z.string().optional(),
   WEBHOOK_SECRET: z.string().optional(),

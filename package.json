@@ -8,6 +8,7 @@
     "test": "npx tsx src/test-handoff.ts && npx tsx src/test-tenants.ts && npx tsx src/test-agent-policy.ts && npx tsx src/test-security.ts && npx tsx src/test-vertical-slice.ts && npx tsx src/test-circuit-breaker.ts && npx tsx src/test-distributed-queue.ts && npx tsx src/test-tenant-cache.ts && npx tsx src/test-graceful-shutdown.ts && npx tsx src/test-distributed-tracing.ts && npx tsx src/test-database-failover.ts && npx tsx src/test-hot-reload.ts && npx tsx src/test-prometheus-metrics.ts"
   },
   "dependencies": {
+    "@fastify/websocket": "^11.3.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/resources": "^2.9.0",
     "@opentelemetry/sdk-node": "^0.220.0",

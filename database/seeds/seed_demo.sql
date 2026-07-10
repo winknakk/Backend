@@ -48,7 +48,7 @@ INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES
   ('2', 2, 'whatsapp', 'W987654'),
   ('7', 5, 'line', 'Uad28c1eabbcbe1608e038d4d162f4944'),
   ('11', 11, 'line', 'U4be68575767f6b4a56e7d079f4c6d442'),
-  ('12', 12, 'line', 'U_cra_test_user_ref')
+  ('12', 12, 'line', 'U60cacc31b2bb8a8ea8fb1779265edbc9')
 ON CONFLICT (id) DO UPDATE SET profile_id = EXCLUDED.profile_id, channel = EXCLUDED.channel, channel_ref = EXCLUDED.channel_ref;
 
 -- 4. Conversations (various states)
