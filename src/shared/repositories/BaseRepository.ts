@@ -5,7 +5,7 @@ import { TransactionManager } from "./TransactionManager";
  * BaseRepository defines the standard interface and database handle
  * for all PostgreSQL repository classes.
  */
-export abstract class BaseRepository<TEntity extends BaseEntity, TId = string> {
+export abstract class BaseRepository<TEntity extends BaseEntity<TId>, TId = string> {
   constructor(protected readonly transactionManager: TransactionManager) {}
 
   /**

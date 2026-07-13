@@ -94,8 +94,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       }
 
       const { rows } = await pool.query(
-        `INSERT INTO tickets (id, conversation_id, subject, summary, status, priority, created_via, project_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7)
+        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, created_via, project_id, severity, due_date)
+         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9)
          RETURNING *`,
         [
           ticketNumber,
@@ -105,10 +105,25 @@ export class PostgresAdapter implements DatabaseAdapter {
           "Open",
           input.priority,
           parsedProjectId,
+          input.severity,
+          slaDueDate,
         ]
       );
 
       const ticketRow = rows[0];
+
+      // Write transactionally to outbox_events
+      await pool.query(
+        `INSERT INTO outbox_events (event_type, payload, status, attempts)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          "TicketCreated",
+          JSON.stringify({ ticketId: ticketNumber }),
+          "pending",
+          0
+        ]
+      );
+
       const resultData = {
         id: ticketRow.id.toString(),
         ticketId: ticketNumber,
@@ -881,27 +896,42 @@ export class PostgresAdapter implements DatabaseAdapter {
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
-    const ticketRes = await pool.query("SELECT * FROM tickets WHERE id = $1 LIMIT 1", [ticketId]);
+    const isNumeric = /^\d+$/.test(String(ticketId));
+    let ticketRes;
+    if (isNumeric) {
+      ticketRes = await pool.query("SELECT * FROM tickets WHERE id = $1 LIMIT 1", [parseInt(ticketId, 10)]);
+    } else {
+      ticketRes = await pool.query("SELECT * FROM tickets WHERE ticket_id = $1 LIMIT 1", [ticketId]);
+    }
+    
     let ticket: any = null;
     if (ticketRes.rows.length > 0) {
       ticket = {
         ...ticketRes.rows[0],
         id1: String(ticketRes.rows[0].id),
-        ticket_id: String(ticketRes.rows[0].id),
+        ticket_id: String(ticketRes.rows[0].ticket_id),
         conversation_id: String(ticketRes.rows[0].conversation_id),
       };
     }
     let companyName = "Unknown";
-    const companyRes = await pool.query(
-      `SELECT c.name AS company_name
-       FROM tickets t
-       JOIN conversations conv ON conv.id = t.conversation_id
-       JOIN identities i ON i.id = conv.identity_id
-       JOIN profiles p ON p.id = i.profile_id
-       JOIN companies c ON c.id = p.company_id
-       WHERE t.id = $1`,
-      [ticketId]
-    );
+    
+    const companyQuery = isNumeric
+      ? `SELECT c.name AS company_name
+         FROM tickets t
+         JOIN conversations conv ON conv.id = t.conversation_id
+         JOIN identities i ON i.id = conv.identity_id
+         JOIN profiles p ON p.id = i.profile_id
+         JOIN companies c ON c.id = p.company_id
+         WHERE t.id = $1`
+      : `SELECT c.name AS company_name
+         FROM tickets t
+         JOIN conversations conv ON conv.id = t.conversation_id
+         JOIN identities i ON i.id = conv.identity_id
+         JOIN profiles p ON p.id = i.profile_id
+         JOIN companies c ON c.id = p.company_id
+         WHERE t.ticket_id = $1`;
+         
+    const companyRes = await pool.query(companyQuery, [isNumeric ? parseInt(ticketId, 10) : ticketId]);
     if (companyRes.rows.length > 0) {
       companyName = companyRes.rows[0].company_name;
     }

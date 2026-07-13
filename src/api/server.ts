@@ -190,6 +190,12 @@ async function bootstrap() {
     }
   });
 
+  // Boot background Ticket Intelligence workers
+  if (typeof (jobQueue as any).startTicketWorkers === "function") {
+    serverLogger.info("Starting background Ticket Intelligence Workers...");
+    (jobQueue as any).startTicketWorkers();
+  }
+
   // Register Piece Adapter Tool
   try {
     const pieceAdapter = new PieceAdapter();

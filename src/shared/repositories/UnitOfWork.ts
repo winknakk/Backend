@@ -5,14 +5,14 @@ import { BaseAggregate } from "../domain/BaseAggregate";
  * UnitOfWork orchestrates business transactions and manages aggregate events.
  */
 export class UnitOfWork {
-  private aggregatesToPublish: BaseAggregate[] = [];
+  private aggregatesToPublish: BaseAggregate<unknown>[] = [];
 
   constructor(private readonly transactionManager: TransactionManager) {}
 
   /**
    * Registers an aggregate whose domain events should be published after a successful transaction commit.
    */
-  public registerAggregate(aggregate: BaseAggregate): void {
+  public registerAggregate(aggregate: BaseAggregate<unknown>): void {
     if (!this.aggregatesToPublish.includes(aggregate)) {
       this.aggregatesToPublish.push(aggregate);
     }

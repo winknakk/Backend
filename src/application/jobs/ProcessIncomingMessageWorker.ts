@@ -80,7 +80,50 @@ export class ProcessIncomingMessageWorker {
               channelRef: payload.data?.senderId || "unknown",
             },
             async () => {
-              return await handler(v2Job);
+              const res = await handler(v2Job);
+              
+              // Trigger summary update job asynchronously if there is an active ticket for the conversation
+              try {
+                const { pool } = require("../../adapters/postgres/PostgresAdapter");
+                const { QueueFactory } = require("../../queue/QueueFactory");
+                
+                // First resolve conversation ID for the sender
+                const convRes = await pool.query(
+                  `SELECT c.id FROM conversations c
+                   JOIN identities i ON i.id = c.identity_id
+                   WHERE i.channel_ref = $1 AND LOWER(c.channel) = LOWER($2) AND c.status = 'open'
+                   LIMIT 1`,
+                  [payload.data?.senderId, channel]
+                );
+                
+                if (convRes.rows.length > 0) {
+                  const conversationId = convRes.rows[0].id;
+                  const ticketRes = await pool.query(
+                    "SELECT id FROM tickets WHERE conversation_id = $1 AND LOWER(status) NOT IN ('closed', 'merged') LIMIT 1",
+                    [conversationId]
+                  );
+                  
+                  if (ticketRes.rows.length > 0) {
+                    const ticketDbId = ticketRes.rows[0].id;
+                    const queue = QueueFactory.getQueue();
+                    await queue.enqueue({
+                      type: "ticket.summary.update",
+                      data: {
+                        ticketId: ticketDbId,
+                        conversationId,
+                        messageText: payload.data?.text || ""
+                      },
+                      metadata: {
+                        requestId: jobId
+                      }
+                    });
+                  }
+                }
+              } catch (sumErr: any) {
+                logger.warn({ error: sumErr.message }, "Could not trigger ticket summary update job");
+              }
+
+              return res;
             }
           );
 

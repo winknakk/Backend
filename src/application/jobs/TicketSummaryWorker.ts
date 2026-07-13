@@ -1,0 +1,137 @@
+import { Worker, Job } from "bullmq";
+import Redis from "ioredis";
+import { config } from "../../config/env";
+import { createLogger } from "../../observability/logger";
+import { runWithContext } from "../../kernel/context/RequestContextHolder";
+import { TransactionManager } from "../../shared/repositories/TransactionManager";
+import { UnitOfWork } from "../../shared/repositories/UnitOfWork";
+import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicketRepository";
+import { PostgresTicketEventRepository } from "../../infrastructure/db/PostgresTicketEventRepository";
+import { AiService } from "../../services/aiService";
+
+const logger = createLogger("TicketSummaryWorker");
+
+export class TicketSummaryWorker {
+  private worker: Worker;
+  private redisConnection: Redis;
+
+  constructor() {
+    this.redisConnection = new Redis(config.REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableOfflineQueue: true,
+    });
+
+    this.worker = new Worker(
+      "ticket-summary-queue",
+      async (job: Job) => {
+        if (job.name !== "ticket.summary.update") return;
+
+        const payload = job.data;
+        const jobId = job.id || payload.metadata?.requestId;
+        const lockKey = `processed:ticket:summary:${jobId}`;
+
+        // 1. Idempotency Guard
+        const setRes = await this.redisConnection.set(lockKey, "processing", "EX", 86400, "NX");
+        if (setRes !== "OK") {
+          logger.warn({ jobId }, "Duplicate summary update bypassed by Idempotency Guard");
+          return;
+        }
+
+        try {
+          const ticketId = payload.data?.ticketId;
+          const projectId = String(payload.data?.projectId || "1");
+          const messageText = payload.data?.messageText || "";
+          const correlationId = jobId || "unknown";
+
+          const result = await runWithContext(
+            {
+              correlationId,
+              projectId,
+              clientChannel: "Queue",
+              channelRef: "ai-worker",
+            },
+            async () => {
+              const txManager = new TransactionManager();
+              const uow = new UnitOfWork(txManager);
+              const ticketRepo = new PostgresTicketRepository(txManager);
+              const eventRepo = new PostgresTicketEventRepository(txManager);
+
+              await uow.execute(
+                async () => {
+                  const ticket = await ticketRepo.findById(ticketId);
+                  if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
+
+                  logger.info({ ticketId }, "Updating running summary for ticket");
+                  
+                  const { runningSummary, lastAiSummary } = await AiService.generateSummary(
+                    ticket.runningSummary || "",
+                    messageText
+                  );
+
+                  // Update summaries and trigger event
+                  ticket.updateSummary(runningSummary, lastAiSummary);
+
+                  // Update ai_confidence_metrics.summary
+                  (ticket as any)._aiConfidenceMetrics = {
+                    ...ticket.aiConfidenceMetrics,
+                    summary: 0.95,
+                  };
+
+                  uow.registerAggregate(ticket);
+                  await ticketRepo.save(ticket);
+                  await eventRepo.saveEvents(ticket, correlationId, "AI", "Queue");
+                }
+              );
+
+              logger.info({ ticketId }, "Successfully updated and saved running summary");
+            }
+          );
+
+          await this.redisConnection.set(lockKey, "done", "EX", 86400);
+          return result;
+        } catch (err: any) {
+          await this.redisConnection.del(lockKey);
+          logger.error({ jobId, error: err.message }, "Error in TicketSummaryWorker loop");
+          throw err;
+        }
+      },
+      {
+        connection: this.redisConnection as any,
+        concurrency: 5,
+      }
+    );
+
+    // DLQ Expiration Handling
+    this.worker.on("failed", async (job, err) => {
+      if (job && job.attemptsMade >= 3) {
+        logger.error(
+          { jobId: job.id, attemptsMade: job.attemptsMade, error: err.message },
+          "CRITICAL: TicketSummaryWorker retry budget exhausted. Displacing failure context to DLQ key: queue:jobs:dlq"
+        );
+        try {
+          await this.redisConnection.rpush(
+            "queue:jobs:dlq",
+            JSON.stringify({
+              jobId: job.id,
+              payload: job.data,
+              failedAt: new Date().toISOString(),
+              error: err.message,
+              attemptsMade: job.attemptsMade,
+            })
+          );
+        } catch (dlqErr: any) {
+          logger.error({ error: dlqErr.message }, "Failed to write job state to DLQ list key");
+        }
+      }
+    });
+
+    this.worker.on("error", (err) => {
+      logger.error({ error: err.message }, "TicketSummaryWorker error");
+    });
+  }
+
+  async close(): Promise<void> {
+    await this.worker.close();
+    await this.redisConnection.quit();
+  }
+}

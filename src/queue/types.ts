@@ -6,11 +6,11 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 
 export const JobPayloadSchema = z.object({
   jobId: z.string().uuid(),
-  type: z.literal("webhook_message"),
+  type: z.string(),
   data: z.any(),
   metadata: z.object({
     requestId: z.string(),
-    receivedAt: z.string().datetime(),
+    receivedAt: z.string().datetime().optional(),
   }),
   status: JobStatusSchema.default("QUEUED"),
   retryCount: z.number().default(0),

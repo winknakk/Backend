@@ -26,7 +26,7 @@ INSERT INTO messages (id, conversation_id, role, content) VALUES
 ON CONFLICT DO NOTHING;
 
 -- 5. Open Ticket
-INSERT INTO tickets (id, conversation_id, project_id, subject, summary, status, priority, created_via)
+INSERT INTO tickets (ticket_id, conversation_id, project_id, subject, summary, status, priority, created_via)
 VALUES ('TCK-2026-00001', 1, 1, 'Orbit App Session Expired', 'Customer reported login loop on Orbit App.', 'Open', 'P2', 'ai') ON CONFLICT DO NOTHING;
 
 -- 6. Project Configuration Tables

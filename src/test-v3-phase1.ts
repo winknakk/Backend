@@ -46,9 +46,9 @@ function runUnitTests(): void {
   // Test Ticket constructor validation
   try {
     new Ticket({
-      id: "tck-1",
+      id: 991,
       ticketId: "TCK-1",
-      conversationId: "conv-1",
+      conversationId: 1,
       subject: "abc", // too short, subject must be >= 5 chars
       status: "open"
     });
@@ -59,9 +59,9 @@ function runUnitTests(): void {
 
   // Test Ticket priority updates
   const ticket = new Ticket({
-    id: "tck-1",
+    id: 991,
     ticketId: "TCK-1",
-    conversationId: "conv-1",
+    conversationId: 1,
     subject: "Valid Subject Line",
     status: "open",
     priority: "P4"
