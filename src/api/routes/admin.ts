@@ -14,6 +14,7 @@ import { TicketService } from "../../tools/TicketService";
 import { TicketInputSchema } from "../../schemas/validation";
 import { TakeoverManager } from "../../human-takeover/TakeoverManager";
 import { ConversationMemoryService } from "../../memory/ConversationMemoryService";
+import { pool } from "../../adapters/postgres/PostgresAdapter";
 
 export interface AdminRouteDependencies {
   metricAggregator: MetricAggregator;
@@ -206,6 +207,54 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       return reply.code(200).send({ success: true, handled_by: "ai" });
     } catch (e: any) {
       return reply.code(500).send({ error: "Failed to release conversation", message: e.message });
+    }
+  });
+
+  // GET /api/admin/conversations/:id/timeline
+  fastify.get("/api/admin/conversations/:id/timeline", async (request, reply) => {
+    const params = request.params as any;
+    const conversationId = params.id;
+    try {
+      const conv = await deps.dbAdapter.getConversation(conversationId);
+      if (!conv) {
+        return reply.code(404).send({ error: "Conversation not found" });
+      }
+
+      // Query messages
+      const { rows: dbMessages } = await pool.query(
+        `SELECT id, role, content, created_at FROM messages WHERE conversation_id = $1`,
+        [parseInt(conversationId, 10)]
+      );
+
+      // Query event logs
+      const { rows: dbEvents } = await pool.query(
+        `SELECT id, event_type, payload, created_at FROM conversation_events WHERE conversation_id = $1`,
+        [parseInt(conversationId, 10)]
+      );
+
+      const timelineItems = [
+        ...dbMessages.map((m: any) => ({
+          id: `msg-${m.id}`,
+          type: "message",
+          role: m.role,
+          content: m.content,
+          timestamp: m.created_at,
+        })),
+        ...dbEvents.map((e: any) => ({
+          id: `evt-${e.id}`,
+          type: "event",
+          eventType: e.event_type,
+          payload: JSON.parse(e.payload),
+          timestamp: e.created_at,
+        })),
+      ];
+
+      // Sort chronologically
+      timelineItems.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      return reply.code(200).send({ rows: timelineItems });
+    } catch (e: any) {
+      return reply.code(500).send({ error: "Failed to retrieve timeline", message: e.message });
     }
   });
 

@@ -43,6 +43,7 @@ import { randomUUID } from "crypto";
 import { MetricsService } from "../observability/MetricsService";
 import { initOpenTelemetry } from "../observability/openTelemetry";
 import { ConfigLoaderService } from "../services/ConfigLoaderService";
+import { requestContextStorage } from "../shared/context/RequestContextHolder";
 import websocketPlugin from "@fastify/websocket";
 import WebChatGateway from "../presentation/http/routes/WebChatGateway";
 import Redis from "ioredis";
@@ -95,6 +96,25 @@ policyEngine.registerRule({
 });
 
 // Register Middleware Hooks
+fastify.addHook("onRequest", (request, reply, done) => {
+  const correlationId = (request.headers["x-correlation-id"] as string) || (request.headers["x-request-id"] as string) || randomUUID();
+  const requestId = (request.headers["x-request-id"] as string) || randomUUID();
+  const projectId = (request.headers["x-project-id"] as string) || (request.query as any)?.projectId || "1";
+  
+  const context = {
+    correlationId,
+    requestId,
+    projectId,
+    clientChannel: (request.headers["x-client-channel"] as string) || "WebAdmin",
+    channelRef: (request.headers["x-channel-ref"] as string) || "admin",
+  };
+
+  requestContextStorage.run(context, () => {
+    reply.header("x-correlation-id", correlationId);
+    done();
+  });
+});
+
 fastify.addHook("onRequest", async (request, reply) => {
   reply.header("Access-Control-Allow-Origin", "*");
   reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");

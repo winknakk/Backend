@@ -1,3 +1,10 @@
+import { BaseAggregate } from "../../shared/domain/BaseAggregate";
+import {
+  TakeoverStartedEvent,
+  TakeoverEndedEvent,
+  ConversationClosedEvent
+} from "./ConversationEvent";
+
 export interface ConversationProps {
   id: string;
   projectId: string;
@@ -11,8 +18,7 @@ export interface ConversationProps {
   updatedAt?: Date;
 }
 
-export class Conversation {
-  public readonly id: string;
+export class Conversation extends BaseAggregate<string> {
   public readonly projectId: string;
   public readonly identityId: string;
   public readonly channel: string;
@@ -24,11 +30,11 @@ export class Conversation {
   public readonly updatedAt: Date;
 
   constructor(props: ConversationProps) {
-    if (!props.id) throw new Error("Conversation ID is required");
+    super(props.id);
+
     if (!props.projectId) throw new Error("Project ID is required");
     if (!props.identityId) throw new Error("Identity ID is required");
 
-    this.id = props.id;
     this.projectId = props.projectId;
     this.identityId = props.identityId;
     this.channel = props.channel || "WebChat";
@@ -69,6 +75,8 @@ export class Conversation {
     this._handledBy = "human";
     this._assignedPm = agentId;
     this._takeoverExpiresAt = new Date(Date.now() + finalDuration);
+
+    this.addDomainEvent(new TakeoverStartedEvent(this.id, agentId, finalDuration));
   }
 
   /**
@@ -78,6 +86,8 @@ export class Conversation {
     this._handledBy = "ai";
     this._takeoverExpiresAt = null;
     this._assignedPm = undefined;
+
+    this.addDomainEvent(new TakeoverEndedEvent(this.id));
   }
 
   /**
@@ -86,5 +96,7 @@ export class Conversation {
   public close(): void {
     this._status = "closed";
     this.releaseTakeover();
+
+    this.addDomainEvent(new ConversationClosedEvent(this.id));
   }
 }

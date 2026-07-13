@@ -14,6 +14,7 @@ async function runSecurityTests() {
   process.env.WEBHOOK_SECRET = "super-secret-webhook-key";
   process.env.RATE_LIMIT_MAX = "20";
   process.env.RATE_LIMIT_WINDOW_MS = "10000"; // 10 seconds
+  process.env.NODE_ENV = "test";
 
   // Import after setting env vars
   const { fastify, bootstrap } = await import("./api/server");
@@ -26,6 +27,12 @@ async function runSecurityTests() {
   });
 
   await bootstrap();
+
+  const { pool } = await import("./adapters/postgres/PostgresAdapter");
+  await pool.query("INSERT INTO companies (id, name) VALUES (10, 'Test Company') ON CONFLICT (id) DO NOTHING");
+  await pool.query("INSERT INTO profiles (id, company_id, name) VALUES (10, 10, 'Test Profile') ON CONFLICT (id) DO NOTHING");
+  await pool.query("INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('12', 10, 'LINE', 'U6256f0c4dbb64edacf9eea92904e49b1') ON CONFLICT (id) DO NOTHING");
+
   await fastify.listen({ port, host: "0.0.0.0" });
   console.log(`[Test Server] Running at ${baseUrl}`);
 

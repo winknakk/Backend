@@ -31,7 +31,8 @@ INSERT INTO profiles (id, company_id, name) VALUES
   (2, 2, 'Jane Smith'),
   (5, 5, 'Akkharin Laksana'),
   (11, 5, 'SSO Test Customer'),
-  (12, 5, 'CRA Test Customer')
+  (12, 5, 'CRA Test Customer'),
+  (10, 5, 'LINE Test User')
 ON CONFLICT (id) DO UPDATE SET company_id = EXCLUDED.company_id, name = EXCLUDED.name;
 
 INSERT INTO profile_projects (profile_id, project_id) VALUES 
@@ -39,7 +40,8 @@ INSERT INTO profile_projects (profile_id, project_id) VALUES
   (2, 2),
   (5, 8),
   (11, 11),
-  (12, 12)
+  (12, 12),
+  (10, 1)
 ON CONFLICT (profile_id, project_id) DO NOTHING;
 
 -- 3. Identities (LINE and WhatsApp references)
@@ -48,7 +50,8 @@ INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES
   ('2', 2, 'whatsapp', 'W987654'),
   ('7', 5, 'line', 'Uad28c1eabbcbe1608e038d4d162f4944'),
   ('11', 11, 'line', 'U4be68575767f6b4a56e7d079f4c6d442'),
-  ('12', 12, 'line', 'U60cacc31b2bb8a8ea8fb1779265edbc9')
+  ('12', 12, 'line', 'U60cacc31b2bb8a8ea8fb1779265edbc9'),
+  ('13', 10, 'LINE', 'U6256f0c4dbb64edacf9eea92904e49b1')
 ON CONFLICT (id) DO UPDATE SET profile_id = EXCLUDED.profile_id, channel = EXCLUDED.channel, channel_ref = EXCLUDED.channel_ref;
 
 -- 4. Conversations (various states)
