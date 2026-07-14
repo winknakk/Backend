@@ -5,7 +5,29 @@ export class TicketCreatedEvent extends BaseDomainEvent {
     public readonly ticketId: number,
     public readonly readableId: string,
     public readonly conversationId: number,
-    public readonly subject: string
+    public readonly subject: string,
+    public readonly projectId?: number,
+    public readonly summary?: string
+  ) {
+    super();
+  }
+
+  getAggregateId(): string {
+    return this.ticketId.toString();
+  }
+}
+
+export class TicketEnrichedEvent extends BaseDomainEvent {
+  constructor(
+    public readonly ticketId: number,
+    public readonly readableId: string,
+    public readonly conversationId: number,
+    public readonly projectId: number,
+    public readonly aiConfidenceMetrics: {
+      title: number;
+      summary: number;
+      duplicate: number;
+    }
   ) {
     super();
   }

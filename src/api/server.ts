@@ -8,7 +8,18 @@ import { EmbeddingService } from "../rag/EmbeddingService";
 import { PgVectorStore } from "../rag/PgVectorStore";
 import { InMemoryVectorStore } from "../rag/InMemoryVectorStore";
 import { VectorStoreRetriever } from "../rag/VectorStoreRetriever";
-import { ToolRegistry, CreateTicketTool } from "../tools/ToolRegistry";
+import {
+  ToolRegistry,
+  CreateTicketTool,
+  GetTicketTool,
+  GetTicketStatusTool,
+  UpdateSummaryTool,
+  FindTicketTool,
+  MergeTicketTool,
+  CloseTicketTool,
+  AssignTicketTool,
+  EscalateToPmTool,
+} from "../tools/ToolRegistry";
 import { SearchProjectDocsTool } from "../tools/search-project-docs/SearchProjectDocsTool";
 import { PieceAdapter } from "../piece-adapter/PieceAdapter";
 import { PieceMcpTool } from "../piece-adapter/PieceMcpTool";
@@ -43,6 +54,7 @@ import { randomUUID } from "crypto";
 import { MetricsService } from "../observability/MetricsService";
 import { initOpenTelemetry } from "../observability/openTelemetry";
 import { ConfigLoaderService } from "../services/ConfigLoaderService";
+import { OutboxProcessor } from "../infrastructure/db/OutboxProcessor";
 import { requestContextStorage } from "../shared/context/RequestContextHolder";
 import websocketPlugin from "@fastify/websocket";
 import WebChatGateway from "../presentation/http/routes/WebChatGateway";
@@ -92,7 +104,19 @@ policyEngine.registerRule({
   name: "Allow Core Tool Commands",
   type: "permission",
   action: "allow",
-  mcpToolNames: ["create_ticket", "search_project_docs", "activepieces.nocodb_create_record"],
+  mcpToolNames: [
+    "create_ticket",
+    "get_ticket",
+    "get_ticket_status",
+    "update_summary",
+    "find_ticket",
+    "merge_ticket",
+    "close_ticket",
+    "assign_ticket",
+    "escalate_to_pm",
+    "search_project_docs",
+    "activepieces.nocodb_create_record"
+  ],
 });
 
 // Register Middleware Hooks
@@ -148,6 +172,14 @@ async function bootstrap() {
   const searchDocsTool = new SearchProjectDocsTool(knowledgeService);
   toolRegistry.registerTool(createTicketTool);
   toolRegistry.registerTool(searchDocsTool);
+  toolRegistry.registerTool(new GetTicketTool());
+  toolRegistry.registerTool(new GetTicketStatusTool());
+  toolRegistry.registerTool(new UpdateSummaryTool());
+  toolRegistry.registerTool(new FindTicketTool());
+  toolRegistry.registerTool(new MergeTicketTool());
+  toolRegistry.registerTool(new CloseTicketTool());
+  toolRegistry.registerTool(new AssignTicketTool());
+  toolRegistry.registerTool(new EscalateToPmTool());
 
   // Register the job processor callback
   jobQueue.process(async (job) => {
@@ -252,6 +284,15 @@ async function bootstrap() {
   } catch (err: any) {
     serverLogger.warn({ error: err.message }, "Dynamic MCP Tool Discovery failed or was skipped");
   }
+
+  // 5. Start background outbox polling loop
+  const outboxProcessor = new OutboxProcessor();
+  outboxProcessor.start(10000);
+
+  fastify.addHook("onClose", async () => {
+    serverLogger.info("Stopping background outbox processor...");
+    outboxProcessor.stop();
+  });
 }
 
 // Routes
@@ -492,7 +533,47 @@ fastify.post("/api/v1/internal/tickets", async (request, reply) => {
   return reply.code(200).send({
     success: true,
     ticketId,
-    dueDate
+    dueDate,
+    data: {
+      ticketId,
+      status: ticket.status || "Open",
+      enrichmentState: ticket.enrichmentState || "PENDING",
+      aiConfidenceMetrics: ticket.aiConfidenceMetrics || {
+        title: 0.00,
+        summary: 0.00,
+        duplicate: 0.00
+      }
+    }
+  });
+});
+
+fastify.post("/api/v1/tickets", async (request, reply) => {
+  const body = request.body as any;
+  const result = await ticketService.createTicket({
+    conversationId: body.conversationId,
+    subject: body.subject,
+    summary: body.summary,
+    severity: body.severity,
+    priority: body.priority,
+    projectId: body.projectId || "1",
+  });
+  if (!result.success || !result.data) {
+    return reply.code(result.success ? 200 : 500).send(result);
+  }
+  const ticket = result.data;
+  const ticketId = ticket.ticket_id || ticket.ticketId;
+  return reply.code(200).send({
+    success: true,
+    data: {
+      ticketId,
+      status: ticket.status || "Open",
+      enrichmentState: ticket.enrichmentState || "PENDING",
+      aiConfidenceMetrics: ticket.aiConfidenceMetrics || {
+        title: 0.00,
+        summary: 0.00,
+        duplicate: 0.00
+      }
+    }
   });
 });
 

@@ -7,6 +7,7 @@ import { TransactionManager } from "../../shared/repositories/TransactionManager
 import { UnitOfWork } from "../../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicketRepository";
 import { PostgresTicketEventRepository } from "../../infrastructure/db/PostgresTicketEventRepository";
+import { BullMQEventPublisher } from "../../infrastructure/queue/BullMQEventPublisher";
 import { AiService } from "../../services/aiService";
 
 const logger = createLogger("TicketTitleGeneratorWorker");
@@ -54,6 +55,7 @@ export class TicketTitleGeneratorWorker {
               const uow = new UnitOfWork(txManager);
               const ticketRepo = new PostgresTicketRepository(txManager);
               const eventRepo = new PostgresTicketEventRepository(txManager);
+              const eventPublisher = new BullMQEventPublisher();
 
               await uow.execute(
                 async () => {
@@ -63,15 +65,14 @@ export class TicketTitleGeneratorWorker {
                   logger.info({ ticketId }, "Generating AI title for ticket");
                   const aiTitle = await AiService.generateTitle(ticket.subject, ticket.summary || "");
 
-                  // Bypass private aggregate boundary cleanly using TypeScript cast
-                  (ticket as any)._title = aiTitle;
-
-                  // Trigger timeline event emission on aggregate root
-                  ticket.updateSummary(ticket.runningSummary || "", ticket.lastAiSummary || "");
+                  ticket.updateAiTitle(aiTitle, 0.95);
 
                   uow.registerAggregate(ticket);
                   await ticketRepo.save(ticket);
                   await eventRepo.saveEvents(ticket, correlationId, "AI", "Queue");
+                },
+                async (events) => {
+                  await eventPublisher.publish(events);
                 }
               );
 

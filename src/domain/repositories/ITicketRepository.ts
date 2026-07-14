@@ -24,4 +24,9 @@ export interface ITicketRepository {
     limit: number,
     cursor?: string
   ): Promise<{ rows: Ticket[]; nextCursor?: string }>;
+
+  /**
+   * Retrieves active (non-closed, non-merged) tickets in a specific project.
+   */
+  findActiveByProject(projectId: number): Promise<Ticket[]>;
 }

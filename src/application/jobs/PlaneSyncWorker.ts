@@ -3,12 +3,14 @@ import Redis from "ioredis";
 import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
 import { runWithContext } from "../../kernel/context/RequestContextHolder";
-import { pool } from "../../adapters/postgres/PostgresAdapter";
 import { PlaneService } from "../../services/planeService";
 import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
 
 const logger = createLogger("PlaneSyncWorker");
 
+/**
+ * PlaneSyncWorker consumes integration job payloads to push new tickets to Plane.io.
+ */
 export class PlaneSyncWorker {
   private worker: Worker;
   private redisConnection: Redis;
@@ -40,8 +42,13 @@ export class PlaneSyncWorker {
         }
 
         try {
+          const ticketId = payload.data?.ticketId;
           const projectId = String(payload.data?.projectId || "1");
           const correlationId = jobId || "unknown";
+
+          if (!ticketId) {
+            throw new Error("Ticket ID is missing in queue payload");
+          }
 
           const result = await runWithContext(
             {
@@ -51,57 +58,8 @@ export class PlaneSyncWorker {
               channelRef: "plane-sync",
             },
             async () => {
-              // Fetch pending outbox events
-              const { rows } = await pool.query(
-                `SELECT id, event_type, payload, attempts FROM outbox_events
-                 WHERE status = 'pending'
-                 ORDER BY id ASC
-                 LIMIT 10`
-              );
-
-              if (rows.length === 0) {
-                logger.info("No pending outbox events found for Plane sync");
-                return;
-              }
-
-              logger.info({ count: rows.length }, "Processing outbox events inside PlaneSyncWorker");
-
-              for (const row of rows) {
-                const { id, event_type, payload: eventPayload, attempts } = row;
-                const data = typeof eventPayload === "string" ? JSON.parse(eventPayload) : eventPayload;
-
-                try {
-                  if (event_type === "TicketCreated") {
-                    const ticketId = data.ticketId;
-                    if (!ticketId) throw new Error("Ticket ID is missing in outbox payload");
-
-                    logger.info({ ticketId }, "Syncing ticket to Plane.io");
-                    await this.planeService.promoteTicketToPlane(ticketId);
-                  } else {
-                    logger.warn({ event_type }, "Unsupported outbox event type, skipping");
-                  }
-
-                  // Mark as processed
-                  await pool.query(
-                    `UPDATE outbox_events SET status = 'processed', updated_at = NOW() WHERE id = $1`,
-                    [id]
-                  );
-                } catch (err: any) {
-                  const nextAttempts = attempts + 1;
-                  const status = nextAttempts >= 5 ? "failed" : "pending";
-
-                  logger.error(
-                    { id, event_type, attempts: nextAttempts, error: err.message, status },
-                    "Failed to process outbox event in PlaneSyncWorker"
-                  );
-
-                  await pool.query(
-                    `UPDATE outbox_events SET status = $1, attempts = $2, error_message = $3, updated_at = NOW()
-                     WHERE id = $4`,
-                    [status, nextAttempts, err.message, id]
-                  );
-                }
-              }
+              logger.info({ ticketId }, "Syncing ticket to Plane.io from queue payload");
+              await this.planeService.promoteTicketToPlane(ticketId);
             }
           );
 

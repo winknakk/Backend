@@ -1,6 +1,7 @@
 import { BaseAggregate } from "../../shared/domain/BaseAggregate";
 import {
   TicketCreatedEvent,
+  TicketEnrichedEvent,
   TicketSummaryUpdatedEvent,
   TicketMarkedDuplicateEvent,
   TicketMergedEvent,
@@ -8,6 +9,9 @@ import {
   TicketClosedEvent,
   TicketStatusChangedEvent,
 } from "./TicketEvents";
+
+export const EnrichmentStates = ["PENDING", "RUNNING", "PARTIAL", "COMPLETED", "FAILED"] as const;
+export type EnrichmentState = (typeof EnrichmentStates)[number];
 
 export interface TicketProps {
   id: number;
@@ -39,6 +43,7 @@ export interface TicketProps {
     duplicate: number;
   };
   searchableText?: string;
+  enrichmentState?: EnrichmentState;
 }
 
 export class Ticket extends BaseAggregate<number> {
@@ -70,6 +75,7 @@ export class Ticket extends BaseAggregate<number> {
     duplicate: number;
   };
   private _searchableText?: string;
+  private _enrichmentState: EnrichmentState;
 
   constructor(props: TicketProps) {
     super(props.id);
@@ -106,6 +112,7 @@ export class Ticket extends BaseAggregate<number> {
       duplicate: 0.00,
     };
     this._searchableText = props.searchableText;
+    this._enrichmentState = this.normalizeEnrichmentState(props.enrichmentState);
   }
 
   // Getters
@@ -129,6 +136,7 @@ export class Ticket extends BaseAggregate<number> {
   get duplicateReason(): string | undefined { return this._duplicateReason; }
   get aiConfidenceMetrics() { return this._aiConfidenceMetrics; }
   get searchableText(): string | undefined { return this._searchableText; }
+  get enrichmentState(): EnrichmentState { return this._enrichmentState; }
 
   // Static Factory Method
   public static create(props: Omit<TicketProps, "id"> & { id?: number }): Ticket {
@@ -141,13 +149,76 @@ export class Ticket extends BaseAggregate<number> {
         ticket.id!,
         ticket.ticketId,
         ticket.conversationId,
-        ticket.subject
+        ticket.subject,
+        ticket.projectId ?? undefined,
+        ticket.summary ?? undefined
       )
     );
     return ticket;
   }
 
   // Domain Actions
+
+  private normalizeEnrichmentState(state?: string): EnrichmentState {
+    return EnrichmentStates.includes(state as EnrichmentState) ? (state as EnrichmentState) : "PENDING";
+  }
+
+  private recalculateEnrichmentState(): void {
+    const hasTitle = this._aiConfidenceMetrics.title > 0.0;
+    const hasSummary = this._aiConfidenceMetrics.summary > 0.0;
+    const hasDuplicate = this._aiConfidenceMetrics.duplicate > 0.0;
+
+    const completedCount = (hasTitle ? 1 : 0) + (hasSummary ? 1 : 0) + (hasDuplicate ? 1 : 0);
+
+    if (completedCount === 3) {
+      if (this._enrichmentState !== "COMPLETED") {
+        this._enrichmentState = "COMPLETED";
+        this.addDomainEvent(
+          new TicketEnrichedEvent(
+            this.id!,
+            this.ticketId,
+            this.conversationId,
+            this._projectId || 1,
+            this._aiConfidenceMetrics
+          )
+        );
+      }
+    } else if (completedCount > 0) {
+      this._enrichmentState = "PARTIAL";
+    } else {
+      this._enrichmentState = "PENDING";
+    }
+  }
+
+  public updateAiTitle(title: string, confidence: number): void {
+    if (this._status.toLowerCase() === "closed") {
+      throw new Error("Cannot update title on a closed ticket");
+    }
+    this._title = title;
+    this._aiConfidenceMetrics = {
+      ...this._aiConfidenceMetrics,
+      title: confidence,
+    };
+    this.recalculateEnrichmentState();
+  }
+
+  public updateAiSummaryWithConfidence(
+    runningSummary: string,
+    lastAiSummary: string,
+    confidence: number
+  ): void {
+    if (this._status.toLowerCase() === "closed") {
+      throw new Error("Cannot update summary on a closed ticket");
+    }
+    this._runningSummary = runningSummary;
+    this._lastAiSummary = lastAiSummary;
+    this._aiConfidenceMetrics = {
+      ...this._aiConfidenceMetrics,
+      summary: confidence,
+    };
+    this.addDomainEvent(new TicketSummaryUpdatedEvent(this.id, runningSummary, lastAiSummary));
+    this.recalculateEnrichmentState();
+  }
 
   public updateSummary(runningSummary: string, lastAiSummary: string): void {
     if (this._status.toLowerCase() === "closed") {
@@ -169,7 +240,23 @@ export class Ticket extends BaseAggregate<number> {
     this._duplicateScore = score;
     this._duplicateReason = reason;
     this._status = "merged"; // Transition status to merged automatically
+    this._aiConfidenceMetrics = {
+      ...this._aiConfidenceMetrics,
+      duplicate: score,
+    };
     this.addDomainEvent(new TicketMarkedDuplicateEvent(this.id, duplicateOfTicketId, score, reason));
+    this.recalculateEnrichmentState();
+  }
+
+  public recordDuplicateCheckCompleted(confidence: number): void {
+    if (this._status.toLowerCase() === "closed") {
+      throw new Error("Cannot update duplicate check on a closed ticket");
+    }
+    this._aiConfidenceMetrics = {
+      ...this._aiConfidenceMetrics,
+      duplicate: confidence,
+    };
+    this.recalculateEnrichmentState();
   }
 
   public merge(primaryTicketId: number): void {
@@ -243,5 +330,21 @@ export class Ticket extends BaseAggregate<number> {
       throw new Error("Cannot re-assign database ID to an already persisted aggregate");
     }
     (this as any).id = id;
+
+    // Recreate any TicketCreatedEvent in the events array to carry the correct database ID
+    const events = (this as any)._domainEvents || [];
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      if (ev instanceof TicketCreatedEvent && ev.ticketId === 0) {
+        events[i] = new TicketCreatedEvent(
+          id,
+          ev.readableId,
+          ev.conversationId,
+          ev.subject,
+          ev.projectId,
+          ev.summary
+        );
+      }
+    }
   }
 }

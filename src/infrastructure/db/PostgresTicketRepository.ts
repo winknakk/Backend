@@ -21,6 +21,17 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
     return TicketMapper.toDomain(rows[0]);
   }
 
+  async findActiveByProject(projectId: number): Promise<Ticket[]> {
+    const { rows } = await this.db.query(
+      `SELECT * FROM tickets 
+       WHERE project_id = $1 
+         AND conversation_id IS NOT NULL
+         AND LOWER(status) NOT IN ('closed', 'merged')`,
+      [projectId]
+    );
+    return rows.map((r: any) => TicketMapper.toDomain(r));
+  }
+
   async save(ticket: Ticket): Promise<Ticket> {
     const data = TicketMapper.toPersistence(ticket);
 
@@ -31,12 +42,14 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           ticket_id, conversation_id, project_id, subject, summary, status, priority, severity, 
           assigned_pm, created_via, plane_issue_id, due_date, created_at,
           title, original_problem_statement, running_summary, last_ai_summary, 
-          duplicate_of_ticket_id, duplicate_score, duplicate_reason, ai_confidence_metrics, searchable_text
+          duplicate_of_ticket_id, duplicate_score, duplicate_reason, ai_confidence_metrics, searchable_text,
+          enrichment_state
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, 
           $9, $10, $11, $12, COALESCE($13, NOW()),
           $14, $15, $16, $17, 
-          $18, $19, $20, $21, $22
+          $18, $19, $20, $21, $22,
+          $23
         ) RETURNING id`,
         [
           data.ticket_id,
@@ -60,7 +73,8 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           data.duplicate_score,
           data.duplicate_reason,
           data.ai_confidence_metrics,
-          data.searchable_text
+          data.searchable_text,
+          data.enrichment_state
         ]
       );
       ticket.assignDatabaseId(rows[0].id);
@@ -88,8 +102,9 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           duplicate_score = $18,
           duplicate_reason = $19,
           ai_confidence_metrics = $20,
-          searchable_text = $21
-        WHERE id = $22`,
+          searchable_text = $21,
+          enrichment_state = $22
+        WHERE id = $23`,
         [
           data.ticket_id,
           data.conversation_id,
@@ -112,6 +127,7 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           data.duplicate_reason,
           data.ai_confidence_metrics,
           data.searchable_text,
+          data.enrichment_state,
           ticket.id
         ]
       );

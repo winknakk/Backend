@@ -8,6 +8,7 @@ import { PostgresTicketRepository } from "./infrastructure/db/PostgresTicketRepo
 import { PostgresTicketEventRepository } from "./infrastructure/db/PostgresTicketEventRepository";
 import { BullMQJobQueue } from "./infrastructure/queue/BullMQJobQueue";
 import { SubjectMatchingDuplicateStrategy } from "./domain/strategies/DuplicateDetectionStrategy";
+import { OutboxProcessor } from "./infrastructure/db/OutboxProcessor";
 import { config } from "./config/env";
 
 function assert(condition: boolean, message: string): void {
@@ -245,17 +246,9 @@ async function runTests() {
   );
   const outboxEventId = outboxRows[0].id;
 
-  // Enqueue outbox plane sync job
-  const syncRequestId = `req-sync-${Date.now()}`;
-  await jobQueue.enqueue({
-    type: "ticket.sync.plane",
-    data: {
-      projectId: 1,
-    },
-    metadata: {
-      requestId: syncRequestId,
-    },
-  });
+  // Run the OutboxProcessor manually to poll and dispatch the event to the queue
+  const outboxProcessor = new OutboxProcessor();
+  await outboxProcessor.processPendingEvents();
 
   // Poll database until outbox status transitions to processed
   console.log("Waiting for PlaneSyncWorker...");
@@ -269,7 +262,7 @@ async function runTests() {
     }
   }
 
-  assert(outboxStatus === "processed", "Outbox event was not marked as processed by PlaneSyncWorker");
+  assert(outboxStatus === "processed", "Outbox event was not marked as processed by OutboxProcessor");
   console.log("✔ Test 5 Passed.\n");
 
   // 6. Dead Letter Queue (DLQ) Exhaustion Test

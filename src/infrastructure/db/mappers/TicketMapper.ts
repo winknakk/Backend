@@ -29,6 +29,7 @@ export class TicketMapper {
         ? JSON.parse(raw.ai_confidence_metrics)
         : raw.ai_confidence_metrics,
       searchableText: raw.searchable_text || undefined,
+      enrichmentState: raw.enrichment_state || "PENDING",
     });
   }
 
@@ -58,6 +59,7 @@ export class TicketMapper {
       duplicate_reason: domain.duplicateReason || null,
       ai_confidence_metrics: JSON.stringify(domain.aiConfidenceMetrics),
       searchable_text: domain.searchableText || null,
+      enrichment_state: domain.enrichmentState,
     };
   }
 }

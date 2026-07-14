@@ -7,7 +7,7 @@ import { TransactionManager } from "../../shared/repositories/TransactionManager
 import { UnitOfWork } from "../../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicketRepository";
 import { PostgresTicketEventRepository } from "../../infrastructure/db/PostgresTicketEventRepository";
-import { TicketMapper } from "../../infrastructure/db/mappers/TicketMapper";
+import { BullMQEventPublisher } from "../../infrastructure/queue/BullMQEventPublisher";
 import { SubjectMatchingDuplicateStrategy } from "../../domain/strategies/DuplicateDetectionStrategy";
 
 const logger = createLogger("DuplicateDetectorWorker");
@@ -55,6 +55,7 @@ export class DuplicateDetectorWorker {
               const uow = new UnitOfWork(txManager);
               const ticketRepo = new PostgresTicketRepository(txManager);
               const eventRepo = new PostgresTicketEventRepository(txManager);
+              const eventPublisher = new BullMQEventPublisher();
 
               await uow.execute(
                 async () => {
@@ -63,17 +64,9 @@ export class DuplicateDetectorWorker {
 
                   logger.info({ ticketId }, "Checking for duplicate tickets");
 
-                  // Fetch other active tickets in the project directly from database using active transaction client
-                  const client = (txManager as any).activeClient || require("../../adapters/postgres/PostgresAdapter").pool;
-                  const { rows } = await client.query(
-                    `SELECT * FROM tickets 
-                     WHERE project_id = $1 
-                       AND LOWER(status) NOT IN ('closed', 'merged') 
-                       AND id != $2`,
-                    [ticket.projectId || 1, ticket.id]
-                  );
-
-                  const activeTickets = rows.map((r: any) => TicketMapper.toDomain(r));
+                  // Query database via PostgresTicketRepository instead of raw SQL
+                  const allActive = await ticketRepo.findActiveByProject(ticket.projectId || 1);
+                  const activeTickets = allActive.filter(t => t.id !== ticket.id);
 
                   // Pluggable strategy
                   const strategy = new SubjectMatchingDuplicateStrategy();
@@ -85,25 +78,26 @@ export class DuplicateDetectorWorker {
                       `Duplicate detected: marking ticket as duplicate of ${dupResult.duplicateOfTicketId}`
                     );
 
-                    // Mark duplicate and transition status to merged
+                    // Mark duplicate and transition status/confidence inside domain aggregate
                     ticket.markDuplicate(
                       dupResult.duplicateOfTicketId,
                       dupResult.score,
                       dupResult.reason
                     );
 
-                    // Update AI confidence duplicate metrics
-                    (ticket as any)._aiConfidenceMetrics = {
-                      ...ticket.aiConfidenceMetrics,
-                      duplicate: dupResult.score,
-                    };
-
                     uow.registerAggregate(ticket);
                     await ticketRepo.save(ticket);
                     await eventRepo.saveEvents(ticket, correlationId, "AI", "Queue");
                   } else {
                     logger.info({ ticketId }, "No duplicate ticket detected");
+                    ticket.recordDuplicateCheckCompleted(1.0);
+                    uow.registerAggregate(ticket);
+                    await ticketRepo.save(ticket);
+                    await eventRepo.saveEvents(ticket, correlationId, "AI", "Queue");
                   }
+                },
+                async (events) => {
+                  await eventPublisher.publish(events);
                 }
               );
             }

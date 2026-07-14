@@ -13,6 +13,7 @@ export class BullMQJobQueue implements IJobQueue {
   private summaryQueue: Queue;
   private duplicateQueue: Queue;
   private planeSyncQueue: Queue;
+  private platformEventQueue: Queue;
   private redisConnection: Redis;
   private worker: ProcessIncomingMessageWorker | null = null;
 
@@ -40,6 +41,7 @@ export class BullMQJobQueue implements IJobQueue {
     this.summaryQueue = new Queue("ticket-summary-queue", queueOptions);
     this.duplicateQueue = new Queue("ticket-duplicate-queue", queueOptions);
     this.planeSyncQueue = new Queue("ticket-plane-sync-queue", queueOptions);
+    this.platformEventQueue = new Queue("automationx-platform-events-queue", queueOptions);
 
     this.redisConnection.on("error", (err) => {
       logger.error({ error: err.message }, "BullMQJobQueue Redis connection error");
@@ -66,6 +68,9 @@ export class BullMQJobQueue implements IJobQueue {
     } else if (payload.type === "ticket.sync.plane") {
       logger.info({ jobId, type: payload.type }, "Enqueueing ticket sync plane job");
       await this.planeSyncQueue.add(payload.type, payload, { jobId });
+    } else if (payload.type === "TicketEnrichedEvent") {
+      logger.info({ jobId, type: payload.type }, "Publishing platform event to AutomationX event queue");
+      await this.platformEventQueue.add(payload.type, payload, { jobId });
     } else {
       logger.info({ jobId, type: payload.type }, "Enqueueing message job to BullMQ queue");
       await this.queue.add("incoming-message", payload, { jobId });
@@ -103,6 +108,7 @@ export class BullMQJobQueue implements IJobQueue {
     if (!job) job = await this.summaryQueue.getJob(jobId);
     if (!job) job = await this.duplicateQueue.getJob(jobId);
     if (!job) job = await this.planeSyncQueue.getJob(jobId);
+    if (!job) job = await this.platformEventQueue.getJob(jobId);
     if (!job) return null;
 
     const state = await job.getState();
@@ -137,13 +143,15 @@ export class BullMQJobQueue implements IJobQueue {
     const qSummary = await this.summaryQueue.getJobCounts("wait", "active", "delayed");
     const qDuplicate = await this.duplicateQueue.getJobCounts("wait", "active", "delayed");
     const qPlane = await this.planeSyncQueue.getJobCounts("wait", "active", "delayed");
+    const qPlatformEvents = await this.platformEventQueue.getJobCounts("wait", "active", "delayed");
     
     return (
       (qMsg.wait || 0) + (qMsg.active || 0) + (qMsg.delayed || 0) +
       (qTitle.wait || 0) + (qTitle.active || 0) + (qTitle.delayed || 0) +
       (qSummary.wait || 0) + (qSummary.active || 0) + (qSummary.delayed || 0) +
       (qDuplicate.wait || 0) + (qDuplicate.active || 0) + (qDuplicate.delayed || 0) +
-      (qPlane.wait || 0) + (qPlane.active || 0) + (qPlane.delayed || 0)
+      (qPlane.wait || 0) + (qPlane.active || 0) + (qPlane.delayed || 0) +
+      (qPlatformEvents.wait || 0) + (qPlatformEvents.active || 0) + (qPlatformEvents.delayed || 0)
     );
   }
 
@@ -167,6 +175,7 @@ export class BullMQJobQueue implements IJobQueue {
     await this.summaryQueue.close();
     await this.duplicateQueue.close();
     await this.planeSyncQueue.close();
+    await this.platformEventQueue.close();
     await this.redisConnection.quit();
   }
 }

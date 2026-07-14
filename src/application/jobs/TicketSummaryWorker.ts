@@ -7,6 +7,7 @@ import { TransactionManager } from "../../shared/repositories/TransactionManager
 import { UnitOfWork } from "../../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicketRepository";
 import { PostgresTicketEventRepository } from "../../infrastructure/db/PostgresTicketEventRepository";
+import { BullMQEventPublisher } from "../../infrastructure/queue/BullMQEventPublisher";
 import { AiService } from "../../services/aiService";
 
 const logger = createLogger("TicketSummaryWorker");
@@ -55,6 +56,7 @@ export class TicketSummaryWorker {
               const uow = new UnitOfWork(txManager);
               const ticketRepo = new PostgresTicketRepository(txManager);
               const eventRepo = new PostgresTicketEventRepository(txManager);
+              const eventPublisher = new BullMQEventPublisher();
 
               await uow.execute(
                 async () => {
@@ -68,18 +70,15 @@ export class TicketSummaryWorker {
                     messageText
                   );
 
-                  // Update summaries and trigger event
-                  ticket.updateSummary(runningSummary, lastAiSummary);
-
-                  // Update ai_confidence_metrics.summary
-                  (ticket as any)._aiConfidenceMetrics = {
-                    ...ticket.aiConfidenceMetrics,
-                    summary: 0.95,
-                  };
+                  // Update summaries and confidence via encapsulated aggregate method
+                  ticket.updateAiSummaryWithConfidence(runningSummary, lastAiSummary, 0.95);
 
                   uow.registerAggregate(ticket);
                   await ticketRepo.save(ticket);
                   await eventRepo.saveEvents(ticket, correlationId, "AI", "Queue");
+                },
+                async (events) => {
+                  await eventPublisher.publish(events);
                 }
               );
 

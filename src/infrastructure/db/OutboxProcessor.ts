@@ -1,6 +1,5 @@
-import { pool } from "../../adapters/postgres/PostgresAdapter";
-import { PlaneService } from "../../services/planeService";
-import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
+import { PostgresOutboxRepository } from "./PostgresOutboxRepository";
+import { BullMQJobQueue } from "../queue/BullMQJobQueue";
 import { createLogger } from "../../observability/logger";
 
 const logger = createLogger("OutboxProcessor");
@@ -10,13 +9,14 @@ const logger = createLogger("OutboxProcessor");
  * outbox events from the database and publish them to external systems.
  */
 export class OutboxProcessor {
-  private planeService: PlaneService;
+  private outboxRepo: PostgresOutboxRepository;
+  private jobQueue: BullMQJobQueue;
   private intervalId: NodeJS.Timeout | null = null;
   private isProcessing = false;
 
   constructor() {
-    const adapter = new PostgresAdapter();
-    this.planeService = new PlaneService(adapter);
+    this.outboxRepo = new PostgresOutboxRepository();
+    this.jobQueue = new BullMQJobQueue();
   }
 
   /**
@@ -47,39 +47,41 @@ export class OutboxProcessor {
     this.isProcessing = true;
 
     try {
-      const { rows } = await pool.query(
-        `SELECT id, event_type, payload, attempts FROM outbox_events
-         WHERE status = 'pending'
-         ORDER BY id ASC
-         LIMIT 10`
-      );
+      const pendingEvents = await this.outboxRepo.fetchPending(10);
 
-      if (rows.length === 0) {
+      if (pendingEvents.length === 0) {
         this.isProcessing = false;
         return;
       }
 
-      logger.info({ count: rows.length }, "Processing outbox events");
+      logger.info({ count: pendingEvents.length }, "Processing outbox events");
 
-      for (const row of rows) {
-        const { id, event_type, payload, attempts } = row;
-        const data = typeof payload === "string" ? JSON.parse(payload) : payload;
+      for (const event of pendingEvents) {
+        const { id, event_type, payload, attempts } = event;
 
         try {
           // Process event based on type
           if (event_type === "TicketCreated") {
-            const ticketId = data.ticketId;
+            const ticketId = payload.ticketId;
             if (!ticketId) throw new Error("Ticket ID is missing in outbox payload");
-            await this.planeService.promoteTicketToPlane(ticketId);
+
+            logger.info({ ticketId, outboxId: id }, "Dispatching ticket.sync.plane job from Outbox");
+            await this.jobQueue.enqueue({
+              type: "ticket.sync.plane",
+              data: {
+                ticketId,
+                projectId: "1",
+              },
+              metadata: {
+                requestId: String(id),
+              },
+            });
           } else {
             logger.warn({ event_type }, "Unsupported outbox event type, skipping");
           }
 
           // Mark as processed
-          await pool.query(
-            `UPDATE outbox_events SET status = 'processed', updated_at = NOW() WHERE id = $1`,
-            [id]
-          );
+          await this.outboxRepo.markProcessed(id);
         } catch (err: any) {
           const nextAttempts = attempts + 1;
           const status = nextAttempts >= 5 ? "failed" : "pending";
@@ -89,11 +91,7 @@ export class OutboxProcessor {
             "Failed to process outbox event"
           );
 
-          await pool.query(
-            `UPDATE outbox_events SET status = $1, attempts = $2, error_message = $3, updated_at = NOW()
-             WHERE id = $4`,
-            [status, nextAttempts, err.message, id]
-          );
+          await this.outboxRepo.updateAttempts(id, nextAttempts, err.message, status);
         }
       }
     } catch (err: any) {
