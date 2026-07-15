@@ -16,7 +16,7 @@ ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
 INSERT INTO projects (id, company_id, name, environment, project_type) VALUES 
   (1, 1, 'AutomationX Demo', 'AutomationX Demo Environment', 'Demo Project'),
   (2, 2, 'Customer Success Service', 'Customer Success Production', 'Support Project'),
-  (8, 5, '24/7', 'Avalant 24/7 Production', 'Support Project'),
+  (999, 999, '24/7', 'Avalant 24/7 Production', 'Support Project'),
   (11, 5, 'SSO Project', 'SSO Production', 'Support Project'),
   (12, 5, 'CRA Project', 'CRA Production', 'Support Project')
 ON CONFLICT (id) DO UPDATE SET 
@@ -29,7 +29,7 @@ ON CONFLICT (id) DO UPDATE SET
 INSERT INTO profiles (id, company_id, name) VALUES 
   (1, 1, 'John Doe'),
   (2, 2, 'Jane Smith'),
-  (5, 5, 'Akkharin Laksana'),
+  (999, 999, 'Akkharin Laksana'),
   (11, 5, 'SSO Test Customer'),
   (12, 5, 'CRA Test Customer'),
   (10, 5, 'LINE Test User'),
@@ -39,18 +39,18 @@ ON CONFLICT (id) DO UPDATE SET company_id = EXCLUDED.company_id, name = EXCLUDED
 INSERT INTO profile_projects (profile_id, project_id) VALUES 
   (1, 1),
   (2, 2),
-  (5, 8),
+  (999, 999),
   (11, 11),
   (12, 12),
   (10, 1),
-  (67, 8)
+  (67, 999)
 ON CONFLICT (profile_id, project_id) DO NOTHING;
 
 -- 3. Identities (LINE and WhatsApp references)
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES 
   ('1', 1, 'line', 'U123456'),
   ('2', 2, 'whatsapp', 'W987654'),
-  ('7', 5, 'line', 'Uad28c1eabbcbe1608e038d4d162f4944'),
+  ('999', 999, 'line', 'Uad28c1eabbcbe1608e038d4d162f4944'),
   ('11', 11, 'line', 'U4be68575767f6b4a56e7d079f4c6d442'),
   ('12', 12, 'line', 'U60cacc31b2bb8a8ea8fb1779265edbc9'),
   ('13', 10, 'line', 'U6256f0c4dbb64edacf9eea92904e49b1'),
@@ -62,10 +62,10 @@ INSERT INTO conversations (id, identity_id, project_id, channel, status, handled
   (1, 1, 1, 'line', 'open', 'ai', NULL),
   (2, 2, 2, 'whatsapp', 'open', 'human', 'agent_alice'),
   (3, 1, 1, 'line', 'closed', 'ai', NULL),
-  (5, 7, 8, 'line', 'open', 'ai', NULL),
+  (999, 999, 999, 'line', 'open', 'ai', NULL),
   (11, 11, 11, 'line', 'open', 'ai', NULL),
   (12, 12, 12, 'line', 'open', 'ai', NULL),
-  (67, 67, 8, 'line', 'open', 'ai', NULL)
+  (67, 67, 999, 'line', 'open', 'ai', NULL)
 ON CONFLICT (id) DO UPDATE SET identity_id = EXCLUDED.identity_id, project_id = EXCLUDED.project_id, channel = EXCLUDED.channel, status = EXCLUDED.status, handled_by = EXCLUDED.handled_by;
 
 -- 5. Message History
@@ -77,7 +77,7 @@ INSERT INTO messages (id, conversation_id, role, content) VALUES
   (5, 2, 'human', 'Hi Jane, this is Alice from billing. How can I help?'),
   (6, 3, 'customer', 'Hi there, how does the system work?'),
   (7, 3, 'ai', 'Our system automatically tracks issues and resolves tickets.'),
-  (8, 5, 'customer', 'ระบบล่ม ขึ้น Error 404 Server เข้าไม่ได้เลย รีบด่วน'),
+  (8, 999, 'customer', 'ระบบล่ม ขึ้น Error 404 Server เข้าไม่ได้เลย รีบด่วน'),
   (9, 11, 'customer', 'ขอความช่วยเหลือ เข้าใช้งานระบบ SSO ไม่ได้ครับ'),
   (10, 12, 'customer', 'สอบถามเรื่องสิทธิ์ใช้งานระบบ CRA หน่อยครับ')
 ON CONFLICT (id) DO NOTHING;
