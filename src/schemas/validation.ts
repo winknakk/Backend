@@ -79,9 +79,22 @@ export type AuditLog = z.infer<typeof AuditLogSchema>;
 export const ExecutionResultSchema = z.object({
   success: z.boolean(),
   data: z.any().nullable(),
-  error: z.string().nullable(),
+  error: z
+    .union([
+      z.string(),
+      z.object({
+        errorCode: z.string(),
+        message: z.string(),
+        retryable: z.boolean(),
+        correlationId: z.string(),
+      }),
+    ])
+    .nullable(),
   source: z.string(), // e.g. "nocodb_mock", "nocodb_live"
   executionId: z.string().uuid(),
+  errorCode: z.string().optional(),
+  retryable: z.boolean().optional(),
+  correlationId: z.string().optional(),
 });
 export type ExecutionResult = z.infer<typeof ExecutionResultSchema>;
 

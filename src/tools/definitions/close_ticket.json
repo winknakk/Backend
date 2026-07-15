@@ -1,0 +1,63 @@
+{
+  "name": "close_ticket",
+  "version": "2.0",
+  "description": "Close a resolved ticket.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["close_ticket"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/internal/tickets/close"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID to close" }
+    },
+    "required": ["ticketId"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "status": { "type": "string" },
+          "alreadyClosed": { "type": "boolean" }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": ["TicketClosed"],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-close",
+    "waitForEvents": [],
+    "nextEvents": ["TicketClosed"]
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool to officially close a ticket once the issue has been verified as resolved by the customer or operator."],
+    "memoryUsage": "none",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": true,
+    "key": "ticketId"
+  },
+  "observability": {
+    "metrics": ["close_ticket_total", "close_ticket_latency"],
+    "logs": ["Closing ticket {ticketId}"],
+    "trace": true
+  }
+}

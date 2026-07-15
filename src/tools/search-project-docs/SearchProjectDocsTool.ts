@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ITool } from "../types";
 import { McpToolDefinition } from "../../mcp/types";
-import { KnowledgeResultSchema } from "../../schemas/validation";
+import { KnowledgeResultSchema, ExecutionResultSchema } from "../../schemas/validation";
 import { KnowledgeService } from "./KnowledgeService";
 
 export const SearchInputSchema = z.object({
@@ -16,22 +16,11 @@ export const SearchOutputSchema = z.object({
 export type SearchOutput = z.infer<typeof SearchOutputSchema>;
 
 export class SearchProjectDocsTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "search_project_docs",
-    description:
-      "Search historical troubleshooting documents, past conversations, and resolved issues for standard solutions.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query text (e.g. error message, app crash)" },
-        projectId: { type: "string", description: "Optional project ID to filter searches" },
-      },
-      required: ["query"],
-    },
-  };
+  definition!: McpToolDefinition;
+  readonly name = "search_project_docs";
 
   readonly inputSchema = SearchInputSchema;
-  readonly outputSchema = SearchOutputSchema;
+  readonly outputSchema = ExecutionResultSchema;
 
   private knowledgeService: KnowledgeService;
 
@@ -39,9 +28,17 @@ export class SearchProjectDocsTool implements ITool {
     this.knowledgeService = knowledgeService;
   }
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const input = SearchInputSchema.parse(params);
     const results = await this.knowledgeService.searchKnowledgeBase(input.query, input.projectId);
-    return SearchOutputSchema.parse({ results });
+    
+    // Normalize to standardized execution wrapper
+    return {
+      success: true,
+      data: { results },
+      error: null,
+      source: "postgres",
+      executionId: require("crypto").randomUUID(),
+    };
   }
 }

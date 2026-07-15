@@ -1,0 +1,65 @@
+{
+  "name": "merge_ticket",
+  "version": "2.0",
+  "description": "Merge a duplicate ticket into a primary ticket.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["merge_ticket"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/internal/tickets/merge"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "Duplicate ticket readable ID (e.g. TCK-2026-12345) to merge" },
+      "primaryTicketId": { "type": "string", "description": "Target primary ticket readable ID" },
+      "reason": { "type": "string", "description": "Reason for merging these tickets" }
+    },
+    "required": ["ticketId", "primaryTicketId", "reason"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "merged": { "type": "boolean" },
+          "alreadyMerged": { "type": "boolean" }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": ["TicketMerged"],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-merge",
+    "waitForEvents": [],
+    "nextEvents": ["TicketMerged"]
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool when you detect that the current reported issue is identical to a previously created ticket. This marks the duplicate as merged and links it to the primary ticket."],
+    "memoryUsage": "conversational",
+    "requiresEnrichedTicket": true
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": true,
+    "key": "ticketId + primaryTicketId"
+  },
+  "observability": {
+    "metrics": ["merge_ticket_total", "merge_ticket_latency"],
+    "logs": ["Merging duplicate ticket {ticketId} into primary {primaryTicketId}"],
+    "trace": true
+  }
+}

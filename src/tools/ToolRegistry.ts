@@ -1,4 +1,6 @@
 import { z } from "zod";
+import * as fs from "fs";
+import * as path from "path";
 import { ITool, IToolRegistry } from "./types";
 import { McpToolDefinition } from "../mcp/types";
 import { TicketInputSchema, ExecutionResultSchema } from "../schemas/validation";
@@ -8,24 +10,54 @@ import { UnitOfWork } from "../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../infrastructure/db/PostgresTicketRepository";
 import { AdapterFactory } from "../adapters/AdapterFactory";
 
-export class CreateTicketTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "create_ticket",
-    description: "Create a support ticket in NocoDB database for human operator resolution.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        conversationId: { type: "string", description: "The active conversation ID" },
-        subject: { type: "string", description: "Short summary of the issue (at least 5 chars)" },
-        summary: { type: "string", description: "Full detailed description of the problem (at least 10 chars)" },
-        severity: { type: "string", description: "Severity: Critical, High, Medium, Low" },
-        priority: { type: "string", description: "Priority: P1, P2, P3, P4" },
-        projectId: { type: "string", description: "The relevant project ID" },
-      },
-      required: ["conversationId", "subject", "summary", "severity", "priority", "projectId"],
-    },
-  };
+// V2 Tool Contract Schema
+export const McpToolRegistryV2Schema = z.object({
+  name: z.string(),
+  version: z.string(),
+  description: z.string(),
+  category: z.string(),
+  owner: z.string(),
+  executionMode: z.enum(["sync", "async"]),
+  requiredPermissions: z.array(z.string()),
+  backend: z.object({
+    method: z.string(),
+    endpoint: z.string(),
+  }),
+  inputSchema: z.record(z.string(), z.any()),
+  outputSchema: z.record(z.string(), z.any()),
+  events: z.object({
+    publish: z.array(z.string()),
+    subscribe: z.array(z.string()),
+  }),
+  automationX: z.object({
+    flow: z.string(),
+    waitForEvents: z.array(z.string()),
+    nextEvents: z.array(z.string()),
+  }),
+  agentX: z.object({
+    reasoningHints: z.array(z.string()),
+    memoryUsage: z.string(),
+    requiresEnrichedTicket: z.boolean(),
+  }),
+  retryPolicy: z.object({
+    enabled: z.boolean(),
+    maxAttempts: z.number(),
+    backoff: z.string(),
+  }),
+  idempotency: z.object({
+    enabled: z.boolean(),
+    key: z.string().optional(),
+  }),
+  observability: z.object({
+    metrics: z.array(z.string()),
+    logs: z.array(z.string()),
+    trace: z.boolean(),
+  }),
+});
 
+export class CreateTicketTool implements ITool {
+  definition!: McpToolDefinition;
+  readonly name = "create_ticket";
   readonly inputSchema = TicketInputSchema;
   readonly outputSchema = ExecutionResultSchema;
 
@@ -35,7 +67,7 @@ export class CreateTicketTool implements ITool {
     this.ticketService = ticketService;
   }
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const input = TicketInputSchema.parse(params);
     const result = await this.ticketService.createTicket(input);
     return ExecutionResultSchema.parse(result);
@@ -43,24 +75,14 @@ export class CreateTicketTool implements ITool {
 }
 
 export class GetTicketTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "get_ticket",
-    description: "Retrieve complete details of a support ticket by its readable ID (e.g. TCK-YYYY-XXXXX) or database serial ID.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "The ticket readable ID or database serial ID" }
-      },
-      required: ["ticketId"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "get_ticket";
   readonly inputSchema = z.object({
-    ticketId: z.string().min(1)
+    ticketId: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
     const ticketRepo = new PostgresTicketRepository(txManager);
@@ -69,7 +91,13 @@ export class GetTicketTool implements ITool {
       ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
     }
     if (!ticket) {
-      return { success: false, data: null, error: `Ticket not found: ${ticketIdStr}`, source: "local", executionId: require("crypto").randomUUID() };
+      return {
+        success: false,
+        data: null,
+        error: `Ticket not found: ${ticketIdStr}`,
+        source: "local",
+        executionId: require("crypto").randomUUID(),
+      };
     }
     return {
       success: true,
@@ -95,34 +123,24 @@ export class GetTicketTool implements ITool {
         duplicateOfTicketId: ticket.duplicateOfTicketId,
         duplicateScore: ticket.duplicateScore,
         duplicateReason: ticket.duplicateReason,
-        aiConfidenceMetrics: ticket.aiConfidenceMetrics
+        aiConfidenceMetrics: ticket.aiConfidenceMetrics,
       },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class GetTicketStatusTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "get_ticket_status",
-    description: "Retrieve lightweight status details of a support ticket including enrichment progress.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "The ticket readable ID or database serial ID" }
-      },
-      required: ["ticketId"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "get_ticket_status";
   readonly inputSchema = z.object({
-    ticketId: z.string().min(1)
+    ticketId: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
     const ticketRepo = new PostgresTicketRepository(txManager);
@@ -131,7 +149,13 @@ export class GetTicketStatusTool implements ITool {
       ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
     }
     if (!ticket) {
-      return { success: false, data: null, error: `Ticket not found: ${ticketIdStr}`, source: "local", executionId: require("crypto").randomUUID() };
+      return {
+        success: false,
+        data: null,
+        error: `Ticket not found: ${ticketIdStr}`,
+        source: "local",
+        executionId: require("crypto").randomUUID(),
+      };
     }
     return {
       success: true,
@@ -139,131 +163,109 @@ export class GetTicketStatusTool implements ITool {
         ticketId: ticket.ticketId,
         status: ticket.status,
         enrichmentState: ticket.enrichmentState,
-        aiConfidenceMetrics: ticket.aiConfidenceMetrics
+        aiConfidenceMetrics: ticket.aiConfidenceMetrics,
+        duplicateOfTicketId: ticket.duplicateOfTicketId,
+        duplicateScore: ticket.duplicateScore,
+        duplicateReason: ticket.duplicateReason,
+        processingMetadata: {
+          createdVia: ticket.createdVia,
+          createdAt: ticket.createdAt.toISOString(),
+          dueDate: ticket.dueDate?.toISOString() || null,
+          assignedPm: ticket.assignedPm,
+        },
       },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class UpdateSummaryTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "update_summary",
-    description: "Manually update the ticket AI summary override (agent manual corrections).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "The ticket ID" },
-        runningSummary: { type: "string", description: "New running summary content" },
-        lastAiSummary: { type: "string", description: "New AI summary content" }
-      },
-      required: ["ticketId", "runningSummary", "lastAiSummary"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "update_summary";
   readonly inputSchema = z.object({
     ticketId: z.string().min(1),
     runningSummary: z.string().min(1),
-    lastAiSummary: z.string().min(1)
+    lastAiSummary: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
     const uow = new UnitOfWork(txManager);
     const ticketRepo = new PostgresTicketRepository(txManager);
-    
+
     await uow.execute(async () => {
       let ticket = await ticketRepo.findByTicketId(ticketIdStr);
       if (!ticket && /^\d+$/.test(ticketIdStr)) {
         ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
       }
       if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
-      
+
       ticket.updateSummary(params.runningSummary, params.lastAiSummary);
       uow.registerAggregate(ticket);
       await ticketRepo.save(ticket);
     });
-    
+
     return {
       success: true,
       data: { ticketId: ticketIdStr, updated: true },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class FindTicketTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "find_ticket",
-    description: "Search and filter tickets by project, status, or conversation.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" },
-        status: { type: "string" },
-        conversationId: { type: "string" }
-      }
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "find_ticket";
   readonly inputSchema = z.object({
     projectId: z.string().optional(),
     status: z.string().optional(),
-    conversationId: z.string().optional()
+    conversationId: z.string().optional(),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const dbAdapter = AdapterFactory.getAdapter();
     const tickets = await dbAdapter.listAllTickets(params.conversationId, params.projectId);
     let filtered = tickets;
     if (params.status) {
-      filtered = tickets.filter(t => String(t.status || t.fields?.status || "").toLowerCase() === String(params.status).toLowerCase());
+      filtered = tickets.filter(
+        (t) => String(t.status || t.fields?.status || "").toLowerCase() === String(params.status).toLowerCase()
+      );
     }
     return {
       success: true,
       data: filtered,
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class MergeTicketTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "merge_ticket",
-    description: "Merge a duplicate ticket into a primary ticket.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "Duplicate ticket to merge" },
-        primaryTicketId: { type: "string", description: "Target primary ticket ID" },
-        reason: { type: "string", description: "Reason for merge" }
-      },
-      required: ["ticketId", "primaryTicketId", "reason"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "merge_ticket";
   readonly inputSchema = z.object({
     ticketId: z.string().min(1),
     primaryTicketId: z.string().min(1),
-    reason: z.string().min(1)
+    reason: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const primaryIdStr = String(params.primaryTicketId);
     const txManager = new TransactionManager();
     const uow = new UnitOfWork(txManager);
     const ticketRepo = new PostgresTicketRepository(txManager);
+
+    let alreadyMerged = false;
 
     await uow.execute(async () => {
       let ticket = await ticketRepo.findByTicketId(ticketIdStr);
@@ -274,6 +276,12 @@ export class MergeTicketTool implements ITool {
       if (!primary && /^\d+$/.test(primaryIdStr)) primary = await ticketRepo.findById(parseInt(primaryIdStr, 10));
       if (!primary) throw new Error(`Primary ticket not found: ${primaryIdStr}`);
 
+      // Idempotency check
+      if (ticket.duplicateOfTicketId === primary.id && ticket.status === "merged") {
+        alreadyMerged = true;
+        return;
+      }
+
       ticket.markDuplicate(primary.id, 1.0, params.reason);
       uow.registerAggregate(ticket);
       await ticketRepo.save(ticket);
@@ -281,42 +289,40 @@ export class MergeTicketTool implements ITool {
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, merged: true },
+      data: { ticketId: ticketIdStr, merged: true, alreadyMerged },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class CloseTicketTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "close_ticket",
-    description: "Close a resolved ticket.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "The ticket ID to close" }
-      },
-      required: ["ticketId"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "close_ticket";
   readonly inputSchema = z.object({
-    ticketId: z.string().min(1)
+    ticketId: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
     const uow = new UnitOfWork(txManager);
     const ticketRepo = new PostgresTicketRepository(txManager);
 
+    let alreadyClosed = false;
+
     await uow.execute(async () => {
       let ticket = await ticketRepo.findByTicketId(ticketIdStr);
       if (!ticket && /^\d+$/.test(ticketIdStr)) ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
       if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
+
+      // Idempotency check
+      if (ticket.status === "closed") {
+        alreadyClosed = true;
+        return;
+      }
 
       ticket.close();
       uow.registerAggregate(ticket);
@@ -325,44 +331,41 @@ export class CloseTicketTool implements ITool {
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, status: "closed" },
+      data: { ticketId: ticketIdStr, status: "closed", alreadyClosed },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class AssignTicketTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "assign_ticket",
-    description: "Assign a ticket to a human agent.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "The ticket ID" },
-        agentId: { type: "string", description: "Agent ID or name to assign" }
-      },
-      required: ["ticketId", "agentId"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "assign_ticket";
   readonly inputSchema = z.object({
     ticketId: z.string().min(1),
-    agentId: z.string().min(1)
+    agentId: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
     const uow = new UnitOfWork(txManager);
     const ticketRepo = new PostgresTicketRepository(txManager);
 
+    let alreadyAssigned = false;
+
     await uow.execute(async () => {
       let ticket = await ticketRepo.findByTicketId(ticketIdStr);
       if (!ticket && /^\d+$/.test(ticketIdStr)) ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
       if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
+
+      // Idempotency check
+      if (ticket.assignedPm === params.agentId) {
+        alreadyAssigned = true;
+        return;
+      }
 
       ticket.assign(params.agentId);
       uow.registerAggregate(ticket);
@@ -371,35 +374,24 @@ export class AssignTicketTool implements ITool {
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, assignedPm: params.agentId },
+      data: { ticketId: ticketIdStr, assignedPm: params.agentId, alreadyAssigned },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class EscalateToPmTool implements ITool {
-  readonly definition: McpToolDefinition = {
-    name: "escalate_to_pm",
-    description: "Escalate support ticket to the Project Manager.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        ticketId: { type: "string", description: "The ticket ID" },
-        reason: { type: "string", description: "Reason for escalation" }
-      },
-      required: ["ticketId", "reason"]
-    }
-  };
-
+  definition!: McpToolDefinition;
+  readonly name = "escalate_to_pm";
   readonly inputSchema = z.object({
     ticketId: z.string().min(1),
-    reason: z.string().min(1)
+    reason: z.string().min(1),
   });
   readonly outputSchema = ExecutionResultSchema;
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
     const ticketRepo = new PostgresTicketRepository(txManager);
@@ -410,11 +402,32 @@ export class EscalateToPmTool implements ITool {
     try {
       const axios = require("axios");
       const { config } = require("../config/env");
-      await axios.post(`${config.PROMPTX_FLOW_WEBHOOK_URL || "http://localhost:3000"}/api/v1/webhooks/human_notify`, {
-        conversationId: ticket.conversationId,
-        role: "system",
-        content: `Ticket ${ticket.ticketId} escalated to PM: ${params.reason}. AI Title: ${ticket.title || "Pending"}. Running Summary: ${ticket.runningSummary || "Pending"}`
-      });
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+
+      if (context?.correlationId) {
+        headers["x-correlation-id"] = context.correlationId;
+      }
+      if (context?.traceId) {
+        headers["x-trace-id"] = context.traceId;
+      }
+
+      await axios.post(
+        `${config.PROMPTX_FLOW_WEBHOOK_URL || "http://localhost:3000"}/api/v1/webhooks/human_notify`,
+        {
+          conversationId: ticket.conversationId,
+          role: "system",
+          content: `Ticket ${ticket.ticketId} escalated to PM: ${params.reason}. AI Title: ${
+            ticket.title || "Pending"
+          }. Running Summary: ${ticket.runningSummary || "Pending"}`,
+        },
+        {
+          headers,
+          timeout: 5000,
+        }
+      );
     } catch (err: any) {
       console.error("Failed to post human notification for escalation:", err.message);
     }
@@ -424,20 +437,91 @@ export class EscalateToPmTool implements ITool {
       data: { ticketId: ticketIdStr, escalated: true },
       error: null,
       source: "local",
-      executionId: require("crypto").randomUUID()
+      executionId: require("crypto").randomUUID(),
     };
   }
 }
 
 export class ToolRegistry implements IToolRegistry {
   private tools: Map<string, ITool> = new Map();
+  private jsonDefinitions: Map<string, any> = new Map();
 
-  registerTool(tool: ITool): void {
-    if (this.tools.has(tool.definition.name)) {
-      console.warn(`[ToolRegistry] Tool '${tool.definition.name}' is already registered. Skipping duplicate.`);
+  constructor() {
+    this.loadJsonDefinitions();
+  }
+
+  private loadJsonDefinitions() {
+    let dir = path.resolve(__dirname, "./definitions");
+    if (!fs.existsSync(dir)) {
+      dir = path.resolve(__dirname, "../../src/tools/definitions");
+    }
+    if (!fs.existsSync(dir)) {
+      console.warn(`[ToolRegistry] Definitions directory not found.`);
       return;
     }
-    this.tools.set(tool.definition.name, tool);
+    try {
+      const files = fs.readdirSync(dir);
+      for (const file of files) {
+        if (file.endsWith(".json")) {
+          const raw = fs.readFileSync(path.join(dir, file), "utf-8");
+          const parsed = JSON.parse(raw);
+          const validated = McpToolRegistryV2Schema.parse(parsed);
+          this.jsonDefinitions.set(validated.name, validated);
+        }
+      }
+    } catch (e: any) {
+      console.error(`[ToolRegistry] Error loading JSON definitions:`, e.message);
+    }
+  }
+
+  registerTool(tool: ITool): void {
+    const name = tool.name || tool.definition?.name;
+    if (!name) {
+      throw new Error(`Tool lacks a name property.`);
+    }
+
+    // Dynamic schema metadata binding from loaded JSON contracts
+    const config = this.jsonDefinitions.get(name);
+    if (config) {
+      Object.assign(tool, {
+        name: config.name,
+        version: config.version,
+        description: config.description,
+        owner: config.owner,
+        asyncSyncCapability: config.executionMode,
+        requiredPermissions: config.requiredPermissions,
+        definition: {
+          name: config.name,
+          description: config.description,
+          inputSchema: config.inputSchema,
+          version: config.version,
+          owner: config.owner,
+          asyncSyncCapability: config.executionMode,
+          requiredPermissions: config.requiredPermissions,
+        },
+      });
+    } else {
+      // Create a fallback definition if JSON doesn't exist
+      if (!tool.definition) {
+        Object.assign(tool, {
+          definition: {
+            name,
+            description: tool.description || "Fallback definition",
+            inputSchema: { type: "object", properties: {} },
+            version: "1.0.0",
+            owner: "unknown",
+            asyncSyncCapability: "sync",
+            requiredPermissions: [name],
+          },
+        });
+      }
+    }
+
+    if (this.tools.has(name)) {
+      console.warn(`[ToolRegistry] Tool '${name}' is already registered. Skipping duplicate.`);
+      return;
+    }
+    this.tools.set(name, tool);
   }
 
   getTool(name: string): ITool | undefined {
@@ -452,4 +536,5 @@ export class ToolRegistry implements IToolRegistry {
     return this.listTools().map((t) => t.definition);
   }
 }
+
 export default ToolRegistry;
