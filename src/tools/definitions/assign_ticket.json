@@ -1,0 +1,64 @@
+{
+  "name": "assign_ticket",
+  "version": "2.0",
+  "description": "Assign a ticket to a human agent.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["assign_ticket"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/internal/tickets/assign"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID" },
+      "agentId": { "type": "string", "description": "Agent ID or name to assign" }
+    },
+    "required": ["ticketId", "agentId"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "assignedPm": { "type": "string" },
+          "alreadyAssigned": { "type": "boolean" }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": ["TicketAssigned"],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-assignment",
+    "waitForEvents": [],
+    "nextEvents": ["TicketAssigned"]
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool when a specific operator needs to be assigned to take ownership of a ticket."],
+    "memoryUsage": "none",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": true,
+    "key": "ticketId + agentId"
+  },
+  "observability": {
+    "metrics": ["assign_ticket_total", "assign_ticket_latency"],
+    "logs": ["Assigning ticket {ticketId} to agent {agentId}"],
+    "trace": true
+  }
+}

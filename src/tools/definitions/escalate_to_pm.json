@@ -1,0 +1,63 @@
+{
+  "name": "escalate_to_pm",
+  "version": "2.0",
+  "description": "Escalate support ticket to the Project Manager.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["escalate_to_pm"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/webhooks/human_notify"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "The ticket ID" },
+      "reason": { "type": "string", "description": "Reason for escalation" }
+    },
+    "required": ["ticketId", "reason"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "escalated": { "type": "boolean" }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": ["TicketEscalated"],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-escalation",
+    "waitForEvents": [],
+    "nextEvents": ["TicketEscalated"]
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool when a ticket has urgent or unresolved SLAs, requires manual manager intervention, or when customer requests to speak to a manager."],
+    "memoryUsage": "none",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": false,
+    "key": ""
+  },
+  "observability": {
+    "metrics": ["escalate_to_pm_total", "escalate_to_pm_latency"],
+    "logs": ["Escalating ticket {ticketId} to PM. Reason: {reason}"],
+    "trace": true
+  }
+}

@@ -11,17 +11,25 @@ export interface ITool {
   /**
    * The validation schema representing the inputs.
    */
-  readonly inputSchema: z.ZodObject<any>;
+  readonly inputSchema: z.ZodObject<any> | z.ZodType<any>;
 
   /**
    * The validation schema representing the outputs.
    */
-  readonly outputSchema: z.ZodObject<any>;
+  readonly outputSchema: z.ZodObject<any> | z.ZodType<any>;
+
+  // V2 properties for Tool Registry (optional for backward compatibility)
+  readonly name?: string;
+  readonly version?: string;
+  readonly description?: string;
+  readonly owner?: string;
+  readonly asyncSyncCapability?: "sync" | "async";
+  readonly requiredPermissions?: string[];
 
   /**
    * Executes the tool's core logic with validated parameters.
    */
-  execute(params: Record<string, any>): Promise<Record<string, any>>;
+  execute(params: Record<string, any>, context?: any): Promise<Record<string, any>>;
 }
 
 export interface IToolRegistry {

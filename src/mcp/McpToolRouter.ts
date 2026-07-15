@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { IMcpToolRouter } from "../agent/AgentRuntime";
 import { IPolicyEngine } from "../policy/types";
 import { IExecutionTraceService } from "../execution/types";
@@ -86,36 +87,99 @@ export class McpToolRouter implements IMcpToolRouter {
       parentTraceId: sessionContext.parentTraceId,
     });
 
-    try {
-      // 3. Execute Tool
-      const tool = this.toolRegistry.getTool(toolName);
-      if (!tool) {
-        throw new Error(`Tool '${toolName}' not found in registry.`);
+    const tool = this.toolRegistry.getTool(toolName);
+    if (!tool) {
+      const errorMsg = `Tool '${toolName}' not found in registry.`;
+      await this.executionTraceService.failTrace(actualTraceId, errorMsg);
+      const mappedError = this.mapError(new Error(errorMsg), sessionContext);
+      return {
+        success: false,
+        data: null,
+        error: mappedError,
+        source: "execution_engine",
+        executionId: actualTraceId,
+        errorCode: mappedError.errorCode,
+        retryable: mappedError.retryable,
+        correlationId: mappedError.correlationId
+      };
+    }
+
+    const toolContext = {
+      requestId: sessionContext.requestId,
+      correlationId: sessionContext.correlationId || sessionContext.requestId || "unknown",
+      traceId: actualTraceId,
+      sessionId: sessionContext.sessionId,
+      conversationId: sessionContext.conversationId
+    };
+
+    let result: any;
+    let success = false;
+    let attempts = 0;
+    const maxAttempts = 3;
+    let lastError: any = null;
+
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        logger.info(
+          {
+            requestId: sessionContext.requestId,
+            conversationId: sessionContext.conversationId,
+            traceId: actualTraceId,
+            component: "McpToolRouter",
+            attempt: attempts,
+          },
+          `Running tool '${toolName}' (attempt ${attempts}/${maxAttempts})`
+        );
+
+        result = await tool.execute(authResponse.sanitizedParams || params, toolContext);
+        success = true;
+        break;
+      } catch (e: any) {
+        lastError = e;
+        const mapped = this.mapError(e, sessionContext);
+        if (!mapped.retryable || attempts >= maxAttempts) {
+          break;
+        }
+        const delay = Math.pow(2, attempts) * 100;
+        logger.warn(
+          {
+            requestId: sessionContext.requestId,
+            conversationId: sessionContext.conversationId,
+            traceId: actualTraceId,
+            component: "McpToolRouter",
+            attempt: attempts,
+            error: e.message,
+          },
+          `Tool '${toolName}' failed with retryable error. Retrying in ${delay}ms...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
+    }
 
-      logger.info(
-        {
-          requestId: sessionContext.requestId,
-          conversationId: sessionContext.conversationId,
-          traceId: actualTraceId,
-          component: "McpToolRouter",
-        },
-        `Running tool '${toolName}'`
-      );
-
-      const result = await tool.execute(authResponse.sanitizedParams || params);
-
+    if (success) {
       // 4. Complete Execution Trace
       await this.executionTraceService.completeTrace(actualTraceId, result);
 
       const isExecutionResult = result && typeof result === "object" && "success" in result && "data" in result;
-      const finalResult = {
+      let finalError = isExecutionResult ? result.error : null;
+      if (isExecutionResult && result.success === false && typeof finalError === "string") {
+        finalError = this.mapError(new Error(finalError), sessionContext);
+      }
+
+      const finalResult: any = {
         success: isExecutionResult ? result.success : true,
         data: isExecutionResult ? result.data : result,
-        error: isExecutionResult ? result.error : null,
+        error: finalError,
         source: isExecutionResult ? result.source : "local",
         executionId: isExecutionResult && result.executionId ? result.executionId : actualTraceId,
       };
+
+      if (finalResult.success === false && finalResult.error && typeof finalResult.error === "object") {
+        finalResult.errorCode = finalResult.error.errorCode;
+        finalResult.retryable = finalResult.error.retryable;
+        finalResult.correlationId = finalResult.error.correlationId;
+      }
 
       const durationMs = timer();
       logger.info(
@@ -131,8 +195,9 @@ export class McpToolRouter implements IMcpToolRouter {
       );
 
       return finalResult;
-    } catch (e: any) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
+    } else {
+      const errorMsg = lastError instanceof Error ? lastError.message : String(lastError);
+      const mappedError = this.mapError(lastError, sessionContext);
       const durationMs = timer();
 
       logger.error(
@@ -144,7 +209,7 @@ export class McpToolRouter implements IMcpToolRouter {
           component: "McpToolRouter",
           error: errorMsg,
         },
-        `Tool '${toolName}' execution failed`
+        `Tool '${toolName}' execution failed after ${attempts} attempts`
       );
 
       // 5. Fail Execution Trace
@@ -153,10 +218,66 @@ export class McpToolRouter implements IMcpToolRouter {
       return {
         success: false,
         data: null,
-        error: errorMsg,
+        error: mappedError,
         source: "execution_engine",
         executionId: actualTraceId,
+        errorCode: mappedError.errorCode,
+        retryable: mappedError.retryable,
+        correlationId: mappedError.correlationId
       };
     }
+  }
+
+  private mapError(e: any, sessionContext: any): { errorCode: string; message: string; retryable: boolean; correlationId: string } {
+    const correlationId = sessionContext?.requestId || sessionContext?.correlationId || "unknown";
+    const message = e instanceof Error ? e.message : String(e);
+
+    if (e instanceof z.ZodError || e.name === "ValidationError" || message.includes("validation") || message.includes("must be at least")) {
+      return {
+        errorCode: "ValidationError",
+        message,
+        retryable: false,
+        correlationId
+      };
+    }
+    if (message.includes("not found") || message.includes("NotFound")) {
+      return {
+        errorCode: "NotFound",
+        message,
+        retryable: false,
+        correlationId
+      };
+    }
+    if (message.includes("conflict") || message.includes("Conflict") || message.includes("deadlock") || message.includes("duplicate")) {
+      return {
+        errorCode: "Conflict",
+        message,
+        retryable: true,
+        correlationId
+      };
+    }
+    if (message.includes("timeout") || message.includes("Timeout")) {
+      return {
+        errorCode: "Timeout",
+        message,
+        retryable: true,
+        correlationId
+      };
+    }
+    if (message.includes("DependencyUnavailable") || message.includes("network") || message.includes("axios") || message.includes("refused")) {
+      return {
+        errorCode: "DependencyUnavailable",
+        message,
+        retryable: true,
+        correlationId
+      };
+    }
+    
+    return {
+      errorCode: "InternalError",
+      message,
+      retryable: false,
+      correlationId
+    };
   }
 }

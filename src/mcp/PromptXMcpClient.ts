@@ -70,7 +70,7 @@ export class PromptXMcpClient {
     throw new Error("No valid JSON-RPC response found in HTTP POST response.");
   }
 
-  private async executeJsonRpc(method: string, params: Record<string, any>, timeoutMs: number = 20000): Promise<any> {
+  private async executeJsonRpc(method: string, params: Record<string, any>, timeoutMs: number = 20000, context?: any): Promise<any> {
     return PromptXMcpClient.circuitBreaker.execute(async () => {
       if (!this.url || !this.token) {
         throw new Error("PROMPTX_MCP_URL or PROMPTX_MCP_TOKEN environment variable is not defined.");
@@ -87,12 +87,21 @@ export class PromptXMcpClient {
       console.log(`[PromptXMcpClient] Sending JSON-RPC POST to '${this.url}' for method '${method}' (RequestId: ${requestId})`);
       console.log(`[PromptXMcpClient] Token length: ${this.token?.length}`);
 
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      };
+
+      if (context?.correlationId) {
+        headers["x-correlation-id"] = context.correlationId;
+      }
+      if (context?.traceId) {
+        headers["x-trace-id"] = context.traceId;
+      }
+
       const res = await axios.post(this.url, payload, {
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-        },
+        headers,
         timeout: timeoutMs,
         responseType: "text",
       });
@@ -157,11 +166,16 @@ export class PromptXMcpClient {
   /**
    * Calls a remote tool on the PromptX MCP Server.
    */
-  async callTool(name: string, args: Record<string, any>): Promise<any> {
-    const response = await this.executeJsonRpc("tools/call", {
-      name,
-      arguments: args,
-    });
+  async callTool(name: string, args: Record<string, any>, context?: any): Promise<any> {
+    const response = await this.executeJsonRpc(
+      "tools/call",
+      {
+        name,
+        arguments: args,
+      },
+      20000,
+      context
+    );
     return response;
   }
 }

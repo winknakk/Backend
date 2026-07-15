@@ -11,6 +11,9 @@ export const McpToolDefinitionSchema = z.object({
   }),
   source: z.string().optional(),
   version: z.string().optional(),
+  owner: z.string().optional(),
+  asyncSyncCapability: z.enum(["sync", "async"]).optional(),
+  requiredPermissions: z.array(z.string()).optional(),
 });
 export type McpToolDefinition = z.infer<typeof McpToolDefinitionSchema>;
 
