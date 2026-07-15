@@ -1,0 +1,87 @@
+{
+  "name": "create_ticket",
+  "version": "2.0",
+  "description": "Create a support ticket in NocoDB database for human operator resolution.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "async",
+  "requiredPermissions": ["create_ticket"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/tickets"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "conversationId": { "type": "string", "description": "The active conversation ID" },
+      "subject": { "type": "string", "description": "Short summary of the issue (at least 5 chars)" },
+      "summary": { "type": "string", "description": "Full detailed description of the problem (at least 10 chars)" },
+      "severity": { "type": "string", "description": "Severity: Critical, High, Medium, Low" },
+      "priority": { "type": "string", "description": "Priority: P1, P2, P3, P4" },
+      "projectId": { "type": "string", "description": "The relevant project ID" }
+    },
+    "required": ["conversationId", "subject", "summary", "severity", "priority", "projectId"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "ticketId": { "type": "string" },
+          "conversationId": { "type": "string" },
+          "subject": { "type": "string" },
+          "summary": { "type": "string" },
+          "severity": { "type": "string" },
+          "priority": { "type": "string" },
+          "projectId": { "type": "string" },
+          "status": { "type": "string" },
+          "processingStatus": { "type": "string" },
+          "startDate": { "type": "string", "format": "date-time" },
+          "dueDate": { "type": "string", "format": "date-time" },
+          "createdBy": { "type": "string" },
+          "enrichmentState": { "type": "string" },
+          "aiConfidenceMetrics": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "number" },
+              "summary": { "type": "number" },
+              "duplicate": { "type": "number" }
+            }
+          }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": ["TicketCreated"],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-creation",
+    "waitForEvents": [],
+    "nextEvents": ["TicketCreated"]
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool when a customer reports an issue that requires human engineer attention or operator support."],
+    "memoryUsage": "conversational",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": true,
+    "key": "conversationId + subject"
+  },
+  "observability": {
+    "metrics": ["create_ticket_total", "create_ticket_latency"],
+    "logs": ["Creating support ticket for conversation {conversationId}"],
+    "trace": true
+  }
+}

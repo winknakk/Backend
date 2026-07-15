@@ -5,8 +5,15 @@ import { z } from "zod";
 
 export class PieceMcpTool implements ITool {
   readonly definition: McpToolDefinition;
-  readonly inputSchema: z.ZodObject<any>;
-  readonly outputSchema: z.ZodObject<any>;
+  readonly inputSchema: z.ZodObject<any> | z.ZodType<any>;
+  readonly outputSchema: z.ZodObject<any> | z.ZodType<any>;
+
+  readonly name: string;
+  readonly version: string;
+  readonly description: string;
+  readonly owner: string;
+  readonly asyncSyncCapability: "sync" | "async";
+  readonly requiredPermissions: string[];
 
   private pieceAdapter: IPieceAdapter;
   private pieceName: string;
@@ -19,9 +26,16 @@ export class PieceMcpTool implements ITool {
     this.definition = definition;
     this.inputSchema = z.object({}).passthrough() as any;
     this.outputSchema = z.object({}).passthrough() as any;
+
+    this.name = definition.name;
+    this.version = definition.version || "1.0.0";
+    this.description = definition.description || `Piece action ${actionName}`;
+    this.owner = definition.owner || "activepieces";
+    this.asyncSyncCapability = (definition.asyncSyncCapability as any) || "sync";
+    this.requiredPermissions = definition.requiredPermissions || [definition.name];
   }
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     console.log(`[PieceMcpTool] Executing piece action ${this.pieceName}::${this.actionName}`);
 
     const authConnection = {
@@ -29,7 +43,7 @@ export class PieceMcpTool implements ITool {
       baseUrl: process.env.NOCODB_BASE_URL || "https://app.nocodb.com",
     };
 
-    const result = await this.pieceAdapter.executeAction(this.pieceName, this.actionName, authConnection, params);
+    const result = await this.pieceAdapter.executeAction(this.pieceName, this.actionName, authConnection, params, context);
 
     return result;
   }

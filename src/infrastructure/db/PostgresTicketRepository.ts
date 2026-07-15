@@ -21,6 +21,15 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
     return TicketMapper.toDomain(rows[0]);
   }
 
+  async findByConversationAndSubject(conversationId: number, subject: string): Promise<Ticket | null> {
+    const { rows } = await this.db.query(
+      "SELECT * FROM tickets WHERE conversation_id = $1 AND subject = $2 LIMIT 1",
+      [conversationId, subject]
+    );
+    if (rows.length === 0) return null;
+    return TicketMapper.toDomain(rows[0]);
+  }
+
   async findActiveByProject(projectId: number): Promise<Ticket[]> {
     const { rows } = await this.db.query(
       `SELECT * FROM tickets 

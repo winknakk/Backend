@@ -1,0 +1,64 @@
+{
+  "name": "update_summary",
+  "version": "2.0",
+  "description": "Manually update the ticket AI summary override (agent manual corrections).",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["update_summary"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/internal/tickets/update-summary"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID" },
+      "runningSummary": { "type": "string", "description": "New running summary content" },
+      "lastAiSummary": { "type": "string", "description": "New AI summary content" }
+    },
+    "required": ["ticketId", "runningSummary", "lastAiSummary"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "updated": { "type": "boolean" }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": ["TicketSummaryUpdated"],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-update-summary",
+    "waitForEvents": [],
+    "nextEvents": ["TicketSummaryUpdated"]
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool when you have manual adjustments or corrections to the ticket's running summary or AI generated summary."],
+    "memoryUsage": "conversational",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": false,
+    "key": ""
+  },
+  "observability": {
+    "metrics": ["update_summary_total", "update_summary_latency"],
+    "logs": ["Updating summary for ticket {ticketId}"],
+    "trace": true
+  }
+}
