@@ -458,7 +458,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
     return field;
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
     const now = Date.now();
     // Cache for 8 seconds to prevent excessive NocoDB calls when no conversation filter is applied
     if (!conversationId && !projectId && this.cachedTicketsList.length > 0 && (now - this.lastTicketsFetch) < 8000) {

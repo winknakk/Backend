@@ -39,6 +39,7 @@ export class ConfigLoaderService {
       `SELECT system_instruction, model_name, temperature, max_tokens 
        FROM project_prompts 
        WHERE project_id = $1 
+       ORDER BY id DESC 
        LIMIT 1`,
       [projectId]
     );

@@ -706,7 +706,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     return res.rows.map((r: any) => this.mapRowToAuditLog(r));
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
     const fallback = async () => {
       let bk = await BackupManager.readFromBackup<any>("tickets");
       if (conversationId) {
@@ -733,6 +733,14 @@ export class PostgresAdapter implements DatabaseAdapter {
     if (projectId) {
       queryParams.push(parseInt(projectId, 10) || 1);
       conditions.push(`t.project_id = $${queryParams.length}`);
+    }
+    if (identityId) {
+      queryParams.push(parseInt(identityId, 10));
+      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length})`);
+    }
+    if (profileId) {
+      queryParams.push(parseInt(profileId, 10));
+      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id IN (SELECT id FROM identities WHERE profile_id = $${queryParams.length}))`);
     }
 
     if (conditions.length > 0) {

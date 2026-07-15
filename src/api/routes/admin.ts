@@ -664,4 +664,554 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       ]);
     }
   });
+
+  // ── AX-BE-060: Admin Settings Controller ────────────────────
+
+  // Helper validation functions
+  function validateSla(body: any) {
+    const { priority, resolve_hours, response_hours, service_window } = body;
+    if (!priority || !/^P[1-5]$/.test(priority)) {
+      throw new Error("Invalid priority: must be P1, P2, P3, P4, or P5");
+    }
+    if (resolve_hours === undefined || isNaN(parseInt(resolve_hours, 10)) || parseInt(resolve_hours, 10) <= 0 || parseInt(resolve_hours, 10) > 720) {
+      throw new Error("Invalid resolve_hours: must be an integer between 1 and 720");
+    }
+    if (response_hours !== undefined && response_hours !== null) {
+      const rh = parseInt(response_hours, 10);
+      if (isNaN(rh) || rh <= 0 || rh > parseInt(resolve_hours, 10)) {
+        throw new Error("Invalid response_hours: must be an integer between 1 and resolve_hours");
+      }
+    }
+    if (service_window && service_window !== "24x7" && service_window !== "Business Hours") {
+      throw new Error("Invalid service_window: must be '24x7' or 'Business Hours'");
+    }
+  }
+
+  function validateBusinessHours(body: any) {
+    const { day_of_week, start_time, end_time, timezone } = body;
+    const day = parseInt(day_of_week, 10);
+    if (day_of_week === undefined || isNaN(day) || day < 0 || day > 6) {
+      throw new Error("Invalid day_of_week: must be an integer between 0 and 6");
+    }
+    const timeRegex = /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/;
+    if (!start_time || !timeRegex.test(start_time)) {
+      throw new Error("Invalid start_time format (HH:MM or HH:MM:SS required)");
+    }
+    if (!end_time || !timeRegex.test(end_time)) {
+      throw new Error("Invalid end_time format (HH:MM or HH:MM:SS required)");
+    }
+    // Chronological check
+    const startSec = start_time.split(':').reduce((acc: number, val: string) => acc * 60 + parseInt(val, 10), 0);
+    const endSec = end_time.split(':').reduce((acc: number, val: string) => acc * 60 + parseInt(val, 10), 0);
+    if (startSec >= endSec) {
+      throw new Error("start_time must be chronologically before end_time");
+    }
+    if (timezone) {
+      try {
+        Intl.DateTimeFormat(undefined, { timeZone: timezone });
+      } catch (e) {
+        throw new Error(`Invalid timezone ID: '${timezone}'`);
+      }
+    }
+  }
+
+  function validateSettings(body: any) {
+    const { aiSettings, prompt, featureFlags } = body;
+    if (aiSettings) {
+      const ct = aiSettings.confidence_threshold !== undefined ? aiSettings.confidence_threshold : aiSettings.confidenceThreshold;
+      const mhd = aiSettings.max_handoff_depth !== undefined ? aiSettings.max_handoff_depth : aiSettings.maxHandoffDepth;
+      const vmt = aiSettings.vector_match_threshold !== undefined ? aiSettings.vector_match_threshold : aiSettings.vectorMatchThreshold;
+
+      if (ct !== undefined) {
+        const val = parseFloat(ct);
+        if (isNaN(val) || val < 0.0 || val > 1.0) {
+          throw new Error("Invalid confidence_threshold: must be a float between 0.0 and 1.0");
+        }
+      }
+      if (vmt !== undefined) {
+        const val = parseFloat(vmt);
+        if (isNaN(val) || val < 0.0 || val > 1.0) {
+          throw new Error("Invalid vector_match_threshold: must be a float between 0.0 and 1.0");
+        }
+      }
+      if (mhd !== undefined) {
+        const val = parseInt(mhd, 10);
+        if (isNaN(val) || val < 1 || val > 20) {
+          throw new Error("Invalid max_handoff_depth: must be an integer between 1 and 20");
+        }
+      }
+    }
+    if (prompt) {
+      const si = prompt.system_instruction !== undefined ? prompt.system_instruction : prompt.systemInstruction;
+      const temp = prompt.temperature !== undefined ? prompt.temperature : prompt.temperature;
+      const mt = prompt.max_tokens !== undefined ? prompt.max_tokens : prompt.maxTokens;
+
+      if (si !== undefined && (typeof si !== "string" || si.trim() === "")) {
+        throw new Error("Invalid system_instruction: must be a non-empty string");
+      }
+      if (temp !== undefined) {
+        const val = parseFloat(temp);
+        if (isNaN(val) || val < 0.0 || val > 2.0) {
+          throw new Error("Invalid temperature: must be a float between 0.0 and 2.0");
+        }
+      }
+      if (mt !== undefined) {
+        const val = parseInt(mt, 10);
+        if (isNaN(val) || val < 1 || val > 8192) {
+          throw new Error("Invalid max_tokens: must be an integer between 1 and 8192");
+        }
+      }
+    }
+    if (featureFlags) {
+      if (typeof featureFlags !== "object") {
+        throw new Error("Invalid featureFlags format: must be an object");
+      }
+      for (const [key, val] of Object.entries(featureFlags)) {
+        if (typeof val !== "boolean") {
+          throw new Error(`Invalid feature flag value for flag '${key}': must be boolean`);
+        }
+      }
+    }
+  }
+
+  // 1. SLA Policies CRUD
+  fastify.get("/api/v1/admin/projects/:id/sla", async (request, reply) => {
+    const { id } = request.params as any;
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { rows } = await pool.query(
+      "SELECT * FROM project_sla_policies WHERE project_id = $1 ORDER BY display_order ASC, id ASC",
+      [parseInt(id, 10)]
+    );
+    return reply.code(200).send(rows);
+  });
+
+  fastify.post("/api/v1/admin/projects/:id/sla", async (request, reply) => {
+    const { id } = request.params as any;
+    const body = request.body as any;
+    const actor = (request.headers["x-actor"] as string) || "admin";
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { ConfigLoaderService } = require("../../services/ConfigLoaderService");
+
+    try {
+      validateSla(body);
+    } catch (validationErr: any) {
+      return reply.code(400).send({ error: "Validation Error", message: validationErr.message });
+    }
+
+    const {
+      priority,
+      resolve_hours,
+      priority_name,
+      description,
+      response_hours,
+      service_window,
+      display_order,
+      is_default,
+      is_active
+    } = body;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Fetch old value for audit logging
+      const oldSla = await client.query(
+        "SELECT * FROM project_sla_policies WHERE project_id = $1 AND priority = $2",
+        [parseInt(id, 10), priority]
+      );
+      const oldValue = oldSla.rows[0] || null;
+
+      // Upsert SLA policy
+      await client.query(
+        `INSERT INTO project_sla_policies (
+          project_id, priority, resolve_hours, priority_name, description, 
+          response_hours, service_window, display_order, is_default, is_active
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (project_id, priority) DO UPDATE SET
+          resolve_hours = EXCLUDED.resolve_hours,
+          priority_name = COALESCE(EXCLUDED.priority_name, project_sla_policies.priority_name),
+          description = COALESCE(EXCLUDED.description, project_sla_policies.description),
+          response_hours = COALESCE(EXCLUDED.response_hours, project_sla_policies.response_hours),
+          service_window = COALESCE(EXCLUDED.service_window, project_sla_policies.service_window),
+          display_order = COALESCE(EXCLUDED.display_order, project_sla_policies.display_order),
+          is_default = COALESCE(EXCLUDED.is_default, project_sla_policies.is_default),
+          is_active = COALESCE(EXCLUDED.is_active, project_sla_policies.is_active)`,
+        [
+          parseInt(id, 10),
+          priority,
+          parseInt(resolve_hours, 10),
+          priority_name || null,
+          description || null,
+          response_hours !== undefined ? parseInt(response_hours, 10) : null,
+          service_window || 'Business Hours',
+          display_order !== undefined ? parseInt(display_order, 10) : 1,
+          is_default === true,
+          is_active !== false
+        ]
+      );
+
+      // Audit Log
+      await client.query(
+        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          parseInt(id, 10),
+          "UPSERT_SLA_POLICY",
+          JSON.stringify(oldValue || {}),
+          JSON.stringify(body),
+          actor
+        ]
+      );
+
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK");
+      return reply.code(500).send({ error: "Database Error", message: err.message });
+    } finally {
+      client.release();
+    }
+
+    // Evict settings cache
+    await ConfigLoaderService.getInstance().invalidateProjectCache(String(id));
+
+    return reply.code(200).send({ success: true });
+  });
+
+  fastify.delete("/api/v1/admin/projects/:id/sla/:priority", async (request, reply) => {
+    const { id, priority } = request.params as any;
+    const actor = (request.headers["x-actor"] as string) || "admin";
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { ConfigLoaderService } = require("../../services/ConfigLoaderService");
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Fetch old value for audit logging
+      const oldSla = await client.query(
+        "SELECT * FROM project_sla_policies WHERE project_id = $1 AND priority = $2",
+        [parseInt(id, 10), priority]
+      );
+      const oldValue = oldSla.rows[0] || null;
+
+      if (!oldValue) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Not Found", message: "SLA Policy not found" });
+      }
+
+      await client.query(
+        "DELETE FROM project_sla_policies WHERE project_id = $1 AND priority = $2",
+        [parseInt(id, 10), priority]
+      );
+
+      // Audit Log
+      await client.query(
+        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          parseInt(id, 10),
+          "DELETE_SLA_POLICY",
+          JSON.stringify(oldValue),
+          JSON.stringify({}),
+          actor
+        ]
+      );
+
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK");
+      return reply.code(500).send({ error: "Database Error", message: err.message });
+    } finally {
+      client.release();
+    }
+
+    await ConfigLoaderService.getInstance().invalidateProjectCache(String(id));
+
+    return reply.code(200).send({ success: true });
+  });
+
+  // 2. Business Hours CRUD
+  fastify.get("/api/v1/admin/projects/:id/business-hours", async (request, reply) => {
+    const { id } = request.params as any;
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { rows } = await pool.query(
+      "SELECT * FROM project_business_hours WHERE project_id = $1 ORDER BY day_of_week ASC",
+      [parseInt(id, 10)]
+    );
+    return reply.code(200).send(rows);
+  });
+
+  fastify.post("/api/v1/admin/projects/:id/business-hours", async (request, reply) => {
+    const { id } = request.params as any;
+    const body = request.body as any;
+    const actor = (request.headers["x-actor"] as string) || "admin";
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { ConfigLoaderService } = require("../../services/ConfigLoaderService");
+
+    try {
+      validateBusinessHours(body);
+    } catch (validationErr: any) {
+      return reply.code(400).send({ error: "Validation Error", message: validationErr.message });
+    }
+
+    const { day_of_week, start_time, end_time, timezone } = body;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Fetch old value for audit logging
+      const oldBH = await client.query(
+        "SELECT * FROM project_business_hours WHERE project_id = $1 AND day_of_week = $2",
+        [parseInt(id, 10), parseInt(day_of_week, 10)]
+      );
+      const oldValue = oldBH.rows[0] || null;
+
+      // Clean existing business hours for that day
+      await client.query(
+        "DELETE FROM project_business_hours WHERE project_id = $1 AND day_of_week = $2",
+        [parseInt(id, 10), parseInt(day_of_week, 10)]
+      );
+
+      // Insert new business hours
+      await client.query(
+        `INSERT INTO project_business_hours (project_id, day_of_week, start_time, end_time, timezone)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          parseInt(id, 10),
+          parseInt(day_of_week, 10),
+          start_time,
+          end_time,
+          timezone || 'UTC'
+        ]
+      );
+
+      // Audit Log
+      await client.query(
+        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          parseInt(id, 10),
+          "UPSERT_BUSINESS_HOURS",
+          JSON.stringify(oldValue || {}),
+          JSON.stringify(body),
+          actor
+        ]
+      );
+
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK");
+      return reply.code(500).send({ error: "Database Error", message: err.message });
+    } finally {
+      client.release();
+    }
+
+    await ConfigLoaderService.getInstance().invalidateProjectCache(String(id));
+
+    return reply.code(200).send({ success: true });
+  });
+
+  fastify.delete("/api/v1/admin/projects/:id/business-hours/:day", async (request, reply) => {
+    const { id, day } = request.params as any;
+    const actor = (request.headers["x-actor"] as string) || "admin";
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { ConfigLoaderService } = require("../../services/ConfigLoaderService");
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Fetch old value for audit logging
+      const oldBH = await client.query(
+        "SELECT * FROM project_business_hours WHERE project_id = $1 AND day_of_week = $2",
+        [parseInt(id, 10), parseInt(day, 10)]
+      );
+      const oldValue = oldBH.rows[0] || null;
+
+      if (!oldValue) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Not Found", message: "Business hours not found" });
+      }
+
+      await client.query(
+        "DELETE FROM project_business_hours WHERE project_id = $1 AND day_of_week = $2",
+        [parseInt(id, 10), parseInt(day, 10)]
+      );
+
+      // Audit Log
+      await client.query(
+        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          parseInt(id, 10),
+          "DELETE_BUSINESS_HOURS",
+          JSON.stringify(oldValue),
+          JSON.stringify({}),
+          actor
+        ]
+      );
+
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK");
+      return reply.code(500).send({ error: "Database Error", message: err.message });
+    } finally {
+      client.release();
+    }
+
+    await ConfigLoaderService.getInstance().invalidateProjectCache(String(id));
+
+    return reply.code(200).send({ success: true });
+  });
+
+  // 3. Project Settings (Prompt, AI Settings, Feature Flags)
+  fastify.get("/api/v1/admin/projects/:id/settings", async (request, reply) => {
+    const { id } = request.params as any;
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+
+    const aiRes = await pool.query(
+      "SELECT * FROM project_ai_settings WHERE project_id = $1 LIMIT 1",
+      [parseInt(id, 10)]
+    );
+    const promptRes = await pool.query(
+      "SELECT * FROM project_prompts WHERE project_id = $1 ORDER BY id DESC LIMIT 1",
+      [parseInt(id, 10)]
+    );
+    const flagsRes = await pool.query(
+      "SELECT * FROM project_feature_flags WHERE project_id = $1",
+      [parseInt(id, 10)]
+    );
+
+    const featureFlags = flagsRes.rows.reduce((acc: any, curr: any) => {
+      acc[curr.flag_name] = curr.is_enabled;
+      return acc;
+    }, {});
+
+    return reply.code(200).send({
+      aiSettings: aiRes.rows[0] || null,
+      prompt: promptRes.rows[0] || null,
+      featureFlags
+    });
+  });
+
+  fastify.post("/api/v1/admin/projects/:id/settings", async (request, reply) => {
+    const { id } = request.params as any;
+    const body = request.body as any;
+    const actor = (request.headers["x-actor"] as string) || "admin";
+    const { pool } = require("../../adapters/postgres/PostgresAdapter");
+    const { ConfigLoaderService } = require("../../services/ConfigLoaderService");
+
+    try {
+      validateSettings(body);
+    } catch (validationErr: any) {
+      return reply.code(400).send({ error: "Validation Error", message: validationErr.message });
+    }
+
+    const { aiSettings, prompt, featureFlags } = body;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Fetch old values for audit log
+      const oldAi = await client.query("SELECT * FROM project_ai_settings WHERE project_id = $1 LIMIT 1", [parseInt(id, 10)]);
+      const oldPrompt = await client.query("SELECT * FROM project_prompts WHERE project_id = $1 ORDER BY id DESC LIMIT 1", [parseInt(id, 10)]);
+      const oldFlags = await client.query("SELECT * FROM project_feature_flags WHERE project_id = $1", [parseInt(id, 10)]);
+      
+      const oldFeatureFlags = oldFlags.rows.reduce((acc: any, curr: any) => {
+        acc[curr.flag_name] = curr.is_enabled;
+        return acc;
+      }, {});
+
+      const oldValue = {
+        aiSettings: oldAi.rows[0] || null,
+        prompt: oldPrompt.rows[0] || null,
+        featureFlags: oldFeatureFlags
+      };
+
+      // Save AI Settings
+      if (aiSettings) {
+        const ct = aiSettings.confidence_threshold !== undefined ? aiSettings.confidence_threshold : aiSettings.confidenceThreshold;
+        const mhd = aiSettings.max_handoff_depth !== undefined ? aiSettings.max_handoff_depth : aiSettings.maxHandoffDepth;
+        const vmt = aiSettings.vector_match_threshold !== undefined ? aiSettings.vector_match_threshold : aiSettings.vectorMatchThreshold;
+
+        await client.query(
+          `INSERT INTO project_ai_settings (project_id, confidence_threshold, max_handoff_depth, vector_match_threshold)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (project_id) DO UPDATE SET
+             confidence_threshold = EXCLUDED.confidence_threshold,
+             max_handoff_depth = EXCLUDED.max_handoff_depth,
+             vector_match_threshold = EXCLUDED.vector_match_threshold`,
+          [
+            parseInt(id, 10),
+            ct !== undefined ? parseFloat(ct) : 0.70,
+            mhd !== undefined ? parseInt(mhd, 10) : 5,
+            vmt !== undefined ? parseFloat(vmt) : 0.60
+          ]
+        );
+      }
+
+      // Save Prompts
+      if (prompt) {
+        const si = prompt.system_instruction !== undefined ? prompt.system_instruction : prompt.systemInstruction;
+        const mn = prompt.model_name !== undefined ? prompt.model_name : prompt.modelName;
+        const temp = prompt.temperature !== undefined ? prompt.temperature : prompt.temperature;
+        const mt = prompt.max_tokens !== undefined ? prompt.max_tokens : prompt.maxTokens;
+
+        if (si) {
+          await client.query(
+            `INSERT INTO project_prompts (project_id, system_instruction, model_name, temperature, max_tokens)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [
+              parseInt(id, 10),
+              si,
+              mn || 'gemini-1.5-pro',
+              temp !== undefined ? parseFloat(temp) : 0.00,
+              mt !== undefined ? parseInt(mt, 10) : 2048
+            ]
+          );
+        }
+      }
+
+      // Save Feature Flags
+      if (featureFlags) {
+        for (const [flagName, isEnabled] of Object.entries(featureFlags)) {
+          await client.query(
+            `INSERT INTO project_feature_flags (project_id, flag_name, is_enabled)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (project_id, flag_name) DO UPDATE SET
+               is_enabled = EXCLUDED.is_enabled`,
+            [parseInt(id, 10), flagName, isEnabled === true]
+          );
+        }
+      }
+
+      // Audit Log
+      await client.query(
+        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          parseInt(id, 10),
+          "UPDATE_PROJECT_SETTINGS",
+          JSON.stringify(oldValue),
+          JSON.stringify(body),
+          actor
+        ]
+      );
+
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK");
+      return reply.code(500).send({ error: "Database Error", message: err.message });
+    } finally {
+      client.release();
+    }
+
+    // Invalidate project settings cache
+    await ConfigLoaderService.getInstance().invalidateProjectCache(String(id));
+
+    return reply.code(200).send({ success: true });
+  });
 }
+

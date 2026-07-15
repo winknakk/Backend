@@ -519,13 +519,14 @@ fastify.get("/agents", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const result = await ticketService.createTicket({
-    conversationId: body.conversationId,
-    subject: body.subject,
-    summary: body.summary,
-    severity: body.severity,
-    priority: body.priority,
-    projectId: body.projectId || "1",
+    conversationId: payload.conversationId,
+    subject: payload.subject,
+    summary: payload.summary,
+    severity: payload.severity,
+    priority: payload.priority,
+    projectId: payload.projectId || "1",
   });
   if (!result.success || !result.data) {
     return reply.code(200).send(result);
@@ -582,16 +583,23 @@ fastify.post("/api/v1/tickets", async (request, reply) => {
 
 fastify.get("/api/v1/internal/tickets/status", async (request, reply) => {
   const query = request.query as any;
-  const tickets = await dbAdapter.listAllTickets(query.conversationId);
+  const tickets = await dbAdapter.listAllTickets(
+    query.conversationId,
+    query.projectId,
+    query.profileId,
+    query.identityId
+  );
   return reply.code(200).send(tickets);
 });
 
 fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) => {
   const body = request.body as any;
-  await dbAdapter.updateHandoffState(body.conversationId, "human");
+  const payload = body.data ? { ...body.data } : body;
+  const conversationId = payload.conversationId;
+  await dbAdapter.updateHandoffState(conversationId, "human");
   if (takeoverManager) {
     const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-    takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
+    takeoverManager.setTakeoverState(conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
   }
   return reply.code(200).send({ success: true, handled_by: "human" });
 });
@@ -733,17 +741,19 @@ fastify.get("/api/v1/internal/tickets/details", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/update-plane", async (request, reply) => {
   const body = request.body as any;
-  await dbAdapter.updateTicketPlaneIssue(body.ticketId, body.planeIssueId);
+  const payload = body.data ? { ...body.data } : body;
+  await dbAdapter.updateTicketPlaneIssue(payload.ticketId, payload.planeIssueId);
   return reply.code(200).send({ success: true });
 });
 
 fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -752,11 +762,12 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("assign_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool assign_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -765,11 +776,12 @@ fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("merge_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool merge_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -778,11 +790,12 @@ fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/update-summary", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("update_summary");
   if (!tool) return reply.code(500).send({ error: "Tool update_summary not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });

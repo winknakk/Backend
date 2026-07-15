@@ -15,7 +15,9 @@
     "properties": {
       "projectId": { "type": "string", "description": "The relevant project ID" },
       "status": { "type": "string", "description": "Filter by ticket status (e.g. Open, In Progress, Closed, Merged)" },
-      "conversationId": { "type": "string", "description": "Filter by active conversation ID" }
+      "conversationId": { "type": "string", "description": "Filter by active conversation ID" },
+      "profileId": { "type": "string", "description": "Filter by customer profile ID" },
+      "identityId": { "type": "string", "description": "Filter by customer identity ID" }
     }
   },
   "outputSchema": {

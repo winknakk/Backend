@@ -72,7 +72,7 @@ export interface DatabaseAdapter {
   /**
    * Lists all tickets globally or filtered by conversation and project.
    */
-  listAllTickets(conversationId?: string, projectId?: string): Promise<any[]>;
+  listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]>;
 
   /**
    * Lists all conversations globally or filtered by project.
