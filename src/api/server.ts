@@ -853,20 +853,36 @@ fastify.get("/api/v1/internal/profiles/details", async (request, reply) => {
   const query = request.query as any;
   const profileId = query.profileId || query.profile_id;
   
+  if (!profileId || profileId === "null" || profileId === "undefined") {
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        company_id: { id: null },
+        name: null
+      }
+    });
+  }
+  
   const res = await pool.query(
     `SELECT * FROM profiles WHERE id = $1 LIMIT 1`,
     [profileId]
   );
   
   if (res.rows.length === 0) {
-    return reply.code(404).send({ error: "Profile not found" });
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        company_id: { id: null },
+        name: null
+      }
+    });
   }
   
   const prof = res.rows[0];
   return reply.code(200).send({
     id: prof.id,
     fields: {
-      company_id: prof.company_id ? { id: prof.company_id } : null,
+      company_id: prof.company_id ? { id: prof.company_id } : { id: null },
       name: prof.name
     }
   });
@@ -876,21 +892,61 @@ fastify.get("/api/v1/internal/companies/details", async (request, reply) => {
   const query = request.query as any;
   const companyId = query.companyId || query.company_id;
   
+  if (!companyId || companyId === "null" || companyId === "undefined") {
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        name: null,
+        ai_profile_context: "ผู้ใช้นี้ยังไม่มีข้อมูลบัญชีที่เชื่อมโยงในระบบ กรุณาขอข้อมูลชื่อและชื่อบริษัทของลูกค้าก่อนให้บริการ"
+      }
+    });
+  }
+
   const res = await pool.query(
     `SELECT * FROM companies WHERE id = $1 LIMIT 1`,
     [companyId]
   );
   
   if (res.rows.length === 0) {
-    return reply.code(404).send({ error: "Company not found" });
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        name: null,
+        ai_profile_context: "ผู้ใช้นี้ยังไม่มีข้อมูลบัญชีที่เชื่อมโยงในระบบ กรุณาขอข้อมูลชื่อและชื่อบริษัทของลูกค้าก่อนให้บริการ"
+      }
+    });
   }
   
   const comp = res.rows[0];
   return reply.code(200).send({
     id: comp.id,
     fields: {
-      name: comp.name
+      name: comp.name,
+      ai_profile_context: comp.ai_profile_context
     }
+  });
+});
+
+fastify.all("/api/v1/internal/rag", async (request, reply) => {
+  const method = request.method;
+  let query: string;
+  let projectId: string;
+  
+  if (method === "GET" || method === "DELETE") {
+    const q = request.query as any;
+    query = q.query;
+    projectId = q.projectId || q.project_id || "1";
+  } else {
+    const body = (request.body || {}) as any;
+    const payload = body.data ? { ...body.data } : body;
+    query = payload.query;
+    projectId = payload.projectId || payload.project_id || "1";
+  }
+
+  const results = await knowledgeService.searchKnowledgeBase(query || "", String(projectId));
+  return reply.code(200).send({
+    success: true,
+    data: { results }
   });
 });
 
@@ -947,9 +1003,19 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
   const channel = body.channel;
   const status = body.status || "open";
   const handledBy = body.handledBy || body.handled_by || "ai";
-  const projectId = body.projectId || body.project_id || request.headers["x-project-id"];
-  const parsedProjectId = projectId ? (parseInt(String(projectId), 10) || null) : null;
+  let projectId = body.projectId || body.project_id || request.headers["x-project-id"];
+  let parsedProjectId = projectId ? (parseInt(String(projectId), 10) || null) : null;
   
+  if (!parsedProjectId && body.destination) {
+    const channelRes = await pool.query(
+      "SELECT project_id FROM project_channels WHERE channel_id = $1 LIMIT 1",
+      [body.destination]
+    );
+    if (channelRes.rows.length > 0) {
+      parsedProjectId = channelRes.rows[0].project_id;
+    }
+  }
+
   // Get next id
   const nextIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
   const nextId = nextIdRes.rows[0].next_id;

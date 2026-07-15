@@ -164,13 +164,47 @@ INSERT INTO project_routing_rules (project_id, rule_type, conditions, target_han
 ON CONFLICT DO NOTHING;
 
 INSERT INTO project_mcp_permissions (project_id, tool_name, allowed_roles, policy_rules) VALUES
+  -- Project 1 (Demo)
   (1, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
   (1, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (1, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (1, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (1, 'merge_ticket', ARRAY['agent'], '{}'),
+  (1, 'close_ticket', ARRAY['agent'], '{}'),
+  (1, 'assign_ticket', ARRAY['agent'], '{}'),
+  (1, 'update_summary', ARRAY['agent'], '{}'),
+  (1, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 2
   (2, 'create_ticket', ARRAY['agent'], '{}'),
+  (2, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (2, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (2, 'close_ticket', ARRAY['agent'], '{}'),
+  (2, 'assign_ticket', ARRAY['agent'], '{}'),
+  (2, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 8 (Avalant 24/7)
   (8, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
   (8, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (8, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (8, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (8, 'merge_ticket', ARRAY['agent'], '{}'),
+  (8, 'close_ticket', ARRAY['agent'], '{}'),
+  (8, 'assign_ticket', ARRAY['agent'], '{}'),
+  (8, 'update_summary', ARRAY['agent'], '{}'),
+  (8, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 11 (SSO)
   (11, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
   (11, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (11, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (11, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (11, 'close_ticket', ARRAY['agent'], '{}'),
+  (11, 'assign_ticket', ARRAY['agent'], '{}'),
+  (11, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 12 (CRA)
   (12, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
-  (12, 'search_project_docs', ARRAY['customer', 'agent'], '{}')
+  (12, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (12, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (12, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (12, 'close_ticket', ARRAY['agent'], '{}'),
+  (12, 'assign_ticket', ARRAY['agent'], '{}'),
+  (12, 'escalate_to_pm', ARRAY['agent'], '{}')
 ON CONFLICT (project_id, tool_name) DO NOTHING;

@@ -121,8 +121,25 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
   private fallbackClassify(text: string): string {
     const lowerText = text.toLowerCase();
 
-    // Ticket keywords
-    if (lowerText.includes("ตั๋ว") || lowerText.includes("ticket") || lowerText.includes("เปิดเรื่อง")) {
+    // Ticket keywords - creation, status, management
+    if (
+      lowerText.includes("ตั๋ว") ||
+      lowerText.includes("ticket") ||
+      lowerText.includes("เปิดเรื่อง") ||
+      lowerText.includes("สถานะ") ||
+      lowerText.includes("status") ||
+      lowerText.includes("ปิดตั๋ว") ||
+      lowerText.includes("close ticket") ||
+      lowerText.includes("merge") ||
+      lowerText.includes("รวมตั๋ว") ||
+      lowerText.includes("มอบหมาย") ||
+      lowerText.includes("assign") ||
+      lowerText.includes("ติดตาม") ||
+      lowerText.includes("follow up") ||
+      lowerText.includes("ความคืบหน้า") ||
+      lowerText.includes("เรื่องเดิม") ||
+      lowerText.includes("TCK-")
+    ) {
       return "ticket";
     }
 
@@ -131,7 +148,10 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
       lowerText.includes("คู่มือ") ||
       lowerText.includes("login") ||
       lowerText.includes("expired") ||
-      lowerText.includes("sso")
+      lowerText.includes("sso") ||
+      lowerText.includes("วิธี") ||
+      lowerText.includes("how to") ||
+      lowerText.includes("ใช้งาน")
     ) {
       return "knowledge";
     }

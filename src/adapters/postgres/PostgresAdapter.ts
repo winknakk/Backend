@@ -866,13 +866,15 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async getMessages(conversationId: string): Promise<any[]> {
     const query = `
-      SELECT role, content, created_at AS timestamp
+      SELECT id, conversation_id, role, content, created_at AS timestamp
       FROM messages
       WHERE conversation_id = $1::integer
       ORDER BY created_at ASC
     `;
     const res = await pool.query(query, [conversationId]);
     return res.rows.map((r) => ({
+      id: r.id,
+      conversation_id: r.conversation_id,
       role: r.role,
       content: r.content,
       timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
