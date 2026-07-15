@@ -5,8 +5,16 @@ import { z } from "zod";
 
 export class DynamicMcpTool implements ITool {
   readonly definition: McpToolDefinition;
-  readonly inputSchema: z.ZodObject<any>;
-  readonly outputSchema: z.ZodObject<any>;
+  readonly inputSchema: z.ZodObject<any> | z.ZodType<any>;
+  readonly outputSchema: z.ZodObject<any> | z.ZodType<any>;
+
+  readonly name: string;
+  readonly version: string;
+  readonly description: string;
+  readonly owner: string;
+  readonly asyncSyncCapability: "sync" | "async";
+  readonly requiredPermissions: string[];
+
   private client: PromptXMcpClient;
 
   constructor(
@@ -27,9 +35,16 @@ export class DynamicMcpTool implements ITool {
     this.client = client;
     this.inputSchema = z.object({}).passthrough() as any;
     this.outputSchema = z.object({}).passthrough() as any;
+
+    this.name = name;
+    this.version = version || "1.0.0";
+    this.description = description;
+    this.owner = "promptx";
+    this.asyncSyncCapability = "sync";
+    this.requiredPermissions = [name];
   }
 
-  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+  async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     console.log(`[DynamicMcpTool] Executing remote tool '${this.definition.name}' via PromptX MCP`);
 
     // Strip the namespace prefix (if any) to get the original tool name to call remote
@@ -39,7 +54,7 @@ export class DynamicMcpTool implements ITool {
       remoteName = remoteName.substring(dotIndex + 1);
     }
 
-    const response = await this.client.callTool(remoteName, params);
+    const response = await this.client.callTool(remoteName, params, context);
     return response;
   }
 }

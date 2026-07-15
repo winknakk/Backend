@@ -1,0 +1,83 @@
+{
+  "name": "get_ticket_status",
+  "version": "2.0",
+  "description": "Retrieve lightweight status details of a support ticket including enrichment progress.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["get_ticket_status"],
+  "backend": {
+    "method": "GET",
+    "endpoint": "/api/v1/internal/tickets/status"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID" }
+    },
+    "required": ["ticketId"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "status": { "type": "string" },
+          "enrichmentState": { "type": "string" },
+          "aiConfidenceMetrics": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "number" },
+              "summary": { "type": "number" },
+              "duplicate": { "type": "number" }
+            }
+          },
+          "duplicateOfTicketId": { "type": "number", "nullable": true },
+          "duplicateScore": { "type": "number" },
+          "duplicateReason": { "type": "string", "nullable": true },
+          "processingMetadata": {
+            "type": "object",
+            "properties": {
+              "createdVia": { "type": "string" },
+              "createdAt": { "type": "string", "format": "date-time" },
+              "dueDate": { "type": "string", "format": "date-time", "nullable": true },
+              "assignedPm": { "type": "string", "nullable": true }
+            }
+          }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": [],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "nocodb-ticket-status-inquiry",
+    "waitForEvents": [],
+    "nextEvents": []
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool to quickly query ticket details, check whether enrichment is completed, and inspect confidence metrics or duplicate score details."],
+    "memoryUsage": "none",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": false,
+    "key": ""
+  },
+  "observability": {
+    "metrics": ["get_ticket_status_total", "get_ticket_status_latency"],
+    "logs": ["Retrieving ticket status for {ticketId}"],
+    "trace": true
+  }
+}

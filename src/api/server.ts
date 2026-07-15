@@ -497,10 +497,13 @@ fastify.get("/traces", async (request, reply) => {
 
 fastify.get("/tools", async (request, reply) => {
   const tools = toolRegistry.listTools().map((t) => ({
-    name: t.definition.name,
+    name: t.name || t.definition.name,
     source: t.definition.source || "local",
-    version: t.definition.version || "1.0.0",
-    description: t.definition.description,
+    version: t.version || t.definition.version || "1.0.0",
+    description: t.description || t.definition.description,
+    owner: t.owner || t.definition.owner || "platform-engineering",
+    asyncSyncCapability: t.asyncSyncCapability || t.definition.asyncSyncCapability || "sync",
+    requiredPermissions: t.requiredPermissions || t.definition.requiredPermissions || [t.name || t.definition.name],
     inputSchema: t.definition.inputSchema,
   }));
   return reply.code(200).send(tools);
@@ -732,6 +735,58 @@ fastify.post("/api/v1/internal/tickets/update-plane", async (request, reply) => 
   const body = request.body as any;
   await dbAdapter.updateTicketPlaneIssue(body.ticketId, body.planeIssueId);
   return reply.code(200).send({ success: true });
+});
+
+fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
+  const body = request.body as any;
+  const tool = toolRegistry.getTool("close_ticket");
+  if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
+  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
+  try {
+    const result = await tool.execute(body, context);
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
+  const body = request.body as any;
+  const tool = toolRegistry.getTool("assign_ticket");
+  if (!tool) return reply.code(500).send({ error: "Tool assign_ticket not found" });
+  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
+  try {
+    const result = await tool.execute(body, context);
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
+  const body = request.body as any;
+  const tool = toolRegistry.getTool("merge_ticket");
+  if (!tool) return reply.code(500).send({ error: "Tool merge_ticket not found" });
+  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
+  try {
+    const result = await tool.execute(body, context);
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+fastify.post("/api/v1/internal/tickets/update-summary", async (request, reply) => {
+  const body = request.body as any;
+  const tool = toolRegistry.getTool("update_summary");
+  if (!tool) return reply.code(500).send({ error: "Tool update_summary not found" });
+  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
+  try {
+    const result = await tool.execute(body, context);
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    return reply.code(500).send({ error: err.message });
+  }
 });
 
 fastify.get("/api/v1/internal/identities/search", async (request, reply) => {

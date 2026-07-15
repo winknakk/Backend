@@ -58,7 +58,8 @@ export class PieceAdapter implements IPieceAdapter {
     pieceName: string,
     actionName: string,
     authConnection: any,
-    props: Record<string, any>
+    props: Record<string, any>,
+    context?: any
   ): Promise<any> {
     console.log(`[PieceAdapter] Calling Piece Action '${pieceName}::${actionName}'...`);
 
@@ -76,11 +77,19 @@ export class PieceAdapter implements IPieceAdapter {
 
       console.log(`[PieceAdapter] NocoDB Create Record: baseId=${baseId}, tableId=${tableId}`);
       try {
+        const headers: Record<string, string> = {
+          "xc-token": apiToken,
+          "Content-Type": "application/json",
+        };
+        if (context?.correlationId) {
+          headers["x-correlation-id"] = context.correlationId;
+        }
+        if (context?.traceId) {
+          headers["x-trace-id"] = context.traceId;
+        }
+
         const response = await axios.post(`${baseUrl}/api/v1/db/data/v1/${baseId}/${tableId}`, tableColumns, {
-          headers: {
-            "xc-token": apiToken,
-            "Content-Type": "application/json",
-          },
+          headers,
           timeout: 5000,
         });
         return {

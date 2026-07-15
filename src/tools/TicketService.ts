@@ -25,32 +25,58 @@ export class TicketService {
   }
 
   async createTicket(input: TicketInput): Promise<ExecutionResult> {
-    // 1. Calculate SLA Due Date dynamically based on project SLA policies
-    let resolveHours = 120; // default fallback
-    try {
-      const configLoader = ConfigLoaderService.getInstance();
-      const projectId = input.projectId || "1";
-      const slaConfig = await configLoader.getSlaPolicy(projectId);
-      const policy = slaConfig.policies.find((p) => p.priority === input.priority);
-      if (policy) {
-        resolveHours = policy.resolveHours;
-      }
-    } catch (err: any) {
-      console.error("Failed to query resolve_hours dynamically for ticket creation SLA calculation:", err.message);
-    }
-
-    const startDate = new Date();
-    const dueDate = new Date(startDate.getTime() + resolveHours * 60 * 60 * 1000);
-
-    // 2. Generate Sequential Mock Ticket Number: TCK-YYYY-[5-digit random]
-    const currentYear = startDate.getFullYear();
-    const randomSuffix = Math.floor(10000 + Math.random() * 90000);
-    const ticketNumber = `TCK-${currentYear}-${randomSuffix}`;
-
-    // 3. Save to database via UnitOfWork & PostgresTicketRepository
     try {
       const projectIdNum = parseInt(input.projectId, 10) || 1;
       const conversationIdNum = parseInt(input.conversationId, 10);
+
+      // Check for existing duplicate (idempotency check)
+      const existing = await this.ticketRepo.findByConversationAndSubject(conversationIdNum, input.subject);
+      if (existing) {
+        return {
+          success: true,
+          data: {
+            id: existing.id.toString(),
+            ticketId: existing.ticketId,
+            conversationId: existing.conversationId.toString(),
+            subject: existing.subject,
+            summary: existing.summary,
+            severity: existing.severity,
+            priority: existing.priority,
+            projectId: existing.projectId?.toString() || input.projectId,
+            status: existing.status as any,
+            startDate: existing.createdAt.toISOString(),
+            dueDate: existing.dueDate?.toISOString() || null,
+            createdBy: "AI Support Agent",
+            enrichmentState: existing.enrichmentState,
+            aiConfidenceMetrics: existing.aiConfidenceMetrics
+          },
+          error: null,
+          source: "postgres_idempotent",
+          executionId: require("crypto").randomUUID()
+        };
+      }
+
+      // 1. Calculate SLA Due Date dynamically based on project SLA policies
+      let resolveHours = 120; // default fallback
+      try {
+        const configLoader = ConfigLoaderService.getInstance();
+        const projectId = input.projectId || "1";
+        const slaConfig = await configLoader.getSlaPolicy(projectId);
+        const policy = slaConfig.policies.find((p) => p.priority === input.priority);
+        if (policy) {
+          resolveHours = policy.resolveHours;
+        }
+      } catch (err: any) {
+        console.error("Failed to query resolve_hours dynamically for ticket creation SLA calculation:", err.message);
+      }
+
+      const startDate = new Date();
+      const dueDate = new Date(startDate.getTime() + resolveHours * 60 * 60 * 1000);
+
+      // 2. Generate Sequential Mock Ticket Number: TCK-YYYY-[5-digit random]
+      const currentYear = startDate.getFullYear();
+      const randomSuffix = Math.floor(10000 + Math.random() * 90000);
+      const ticketNumber = `TCK-${currentYear}-${randomSuffix}`;
 
       const ticket = Ticket.create({
         ticketId: ticketNumber,
@@ -99,6 +125,7 @@ export class TicketService {
         priority: ticket.priority,
         projectId: input.projectId,
         status: ticket.status as any,
+        processingStatus: "PENDING_ENRICHMENT",
         startDate: ticket.createdAt.toISOString(),
         dueDate: dueDate.toISOString(),
         createdBy: "AI Support Agent",

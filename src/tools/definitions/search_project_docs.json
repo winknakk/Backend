@@ -1,0 +1,75 @@
+{
+  "name": "search_project_docs",
+  "version": "2.0",
+  "description": "Search historical troubleshooting documents, past conversations, and resolved issues for standard solutions.",
+  "category": "knowledge",
+  "owner": "knowledge-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["search_project_docs"],
+  "backend": {
+    "method": "GET",
+    "endpoint": "/api/v1/internal/knowledge/search"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string", "description": "Search query text (e.g. error message, app crash)" },
+      "projectId": { "type": "string", "description": "Optional project ID to filter searches" }
+    },
+    "required": ["query"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": { "type": "string" },
+                "id": { "type": "string" },
+                "type": { "type": "string" },
+                "content": { "type": "string" },
+                "confidence": { "type": "number" },
+                "metadata": { "type": "object" }
+              }
+            }
+          }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": {
+    "publish": [],
+    "subscribe": []
+  },
+  "automationX": {
+    "flow": "vector-knowledge-search",
+    "waitForEvents": [],
+    "nextEvents": []
+  },
+  "agentX": {
+    "reasoningHints": ["Use this tool as the first option to resolve user inquiries about troubleshooting, standard guidelines, and documentation before resorting to creating a ticket."],
+    "memoryUsage": "none",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": {
+    "enabled": true,
+    "maxAttempts": 3,
+    "backoff": "exponential"
+  },
+  "idempotency": {
+    "enabled": false,
+    "key": ""
+  },
+  "observability": {
+    "metrics": ["search_project_docs_total", "search_project_docs_latency"],
+    "logs": ["Searching knowledge base for query: {query}"],
+    "trace": true
+  }
+}
