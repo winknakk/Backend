@@ -890,7 +890,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void> {
     await pool.query(
-      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE id = $2",
+      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE ticket_id = $2",
       [planeIssueId, ticketId]
     );
   }
