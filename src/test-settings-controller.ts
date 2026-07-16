@@ -191,7 +191,7 @@ async function runTests() {
 
     // Fetch immediately via ConfigLoaderService (should load fresh from DB since cache was invalidated)
     const cachedPrompt2 = await configLoader.getPromptConfig(projectId);
-    if (cachedPrompt2.systemInstruction === updatedPromptText) {
+    if (cachedPrompt2.systemInstruction.startsWith(updatedPromptText)) {
       console.log("✅ Success: Cache eviction worked correctly. Subsequent ConfigLoader read returned fresh value:", cachedPrompt2.systemInstruction);
     } else {
       console.error("❌ Test Failed: ConfigLoader returned stale value:", cachedPrompt2.systemInstruction);

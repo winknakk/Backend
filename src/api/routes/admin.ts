@@ -29,6 +29,36 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
   // Add authentication hook for all admin endpoints
   fastify.addHook("onRequest", authHook);
 
+  // Validate conversationId and projectId parameters
+  fastify.addHook("preHandler", async (request, reply) => {
+    const params = request.params as any;
+    const routeUrl = (request as any).routeOptions?.url || "";
+    if (params && params.id !== undefined && routeUrl) {
+      if (routeUrl.includes("/api/admin/conversations/:id")) {
+        const id = String(params.id);
+        const parsed = parseInt(id, 10);
+        if (isNaN(parsed) || parsed <= 0 || id === "null" || id === "undefined") {
+          return reply.code(400).send({
+            error: "Bad Request",
+            message: `Invalid conversationId: ${id}`,
+          });
+        }
+      }
+    }
+
+    const query = request.query as any;
+    if (query && query.projectId !== undefined) {
+      const pId = String(query.projectId);
+      const parsed = parseInt(pId, 10);
+      if (isNaN(parsed) || parsed <= 0 || pId === "null" || pId === "undefined") {
+        return reply.code(400).send({
+          error: "Bad Request",
+          message: `Invalid projectId: ${pId}`,
+        });
+      }
+    }
+  });
+
   // 1. GET /api/v1/admin/metrics
   fastify.get("/api/v1/admin/metrics", async (request, reply) => {
     const query = request.query as any;
@@ -616,6 +646,51 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const projectId = query?.projectId ? String(query.projectId) : undefined;
     const tickets = await deps.dbAdapter.listAllTickets(undefined, projectId);
     return reply.code(200).send(tickets);
+  });
+
+  // GET /api/admin/tickets/:id
+  fastify.get("/api/admin/tickets/:id", async (request, reply) => {
+    const params = request.params as any;
+    const ticketIdStr = String(params.id);
+    const isNumeric = /^\d+$/.test(ticketIdStr);
+    const query = isNumeric 
+      ? `SELECT * FROM tickets WHERE id = $1` 
+      : `SELECT * FROM tickets WHERE ticket_id = $1`;
+    const { rows } = await pool.query(query, [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr]);
+    if (rows.length === 0) {
+      return reply.code(404).send({ error: "Ticket not found" });
+    }
+    const ticket = rows[0];
+    return reply.code(200).send({
+      id: String(ticket.id),
+      ticketId: ticket.ticket_id,
+      conversationId: String(ticket.conversation_id),
+      projectId: String(ticket.project_id),
+      subject: ticket.subject,
+      summary: ticket.summary,
+      status: ticket.status,
+      priority: ticket.priority,
+      severity: ticket.severity,
+      assignedPm: ticket.assigned_pm,
+      createdVia: ticket.created_via,
+      planeIssueId: ticket.plane_issue_id,
+      dueDate: ticket.due_date ? ticket.due_date.toISOString() : null,
+      createdAt: ticket.created_at.toISOString(),
+      enrichmentState: ticket.enrichment_state,
+      aiTitle: ticket.title,
+      runningSummary: ticket.running_summary,
+      lastAiSummary: ticket.last_ai_summary,
+      duplicateOfTicketId: ticket.duplicate_of_ticket_id ? String(ticket.duplicate_of_ticket_id) : null,
+      duplicateScore: ticket.duplicate_score,
+      duplicateReason: ticket.duplicate_reason,
+      aiConfidenceMetrics: ticket.ai_confidence_metrics,
+    });
+  });
+
+  // GET /api/admin/traces/raw
+  fastify.get("/api/admin/traces/raw", async (request, reply) => {
+    const traces = await deps.dbAdapter.listAllTraces();
+    return reply.code(200).send(traces);
   });
 
   // 12. POST /api/admin/conversations/:id/tickets

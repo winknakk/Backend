@@ -62,6 +62,7 @@ import Redis from "ioredis";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any });
+fastify.register(websocketPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const adminConnections = new Set<any>();
 
@@ -596,6 +597,10 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
   const conversationId = payload.conversationId;
+  const parsed = parseInt(String(conversationId), 10);
+  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
+    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
+  }
   await dbAdapter.updateHandoffState(conversationId, "human");
   if (takeoverManager) {
     const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
@@ -729,6 +734,11 @@ fastify.get("/api/v1/internal/messages", async (request, reply) => {
 
 fastify.get("/api/v1/internal/conversations/identity", async (request, reply) => {
   const query = request.query as any;
+  const conversationId = query.conversationId;
+  const parsed = parseInt(String(conversationId), 10);
+  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
+    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
+  }
   const ident = await dbAdapter.getConversationIdent(query.conversationId);
   return reply.code(200).send(ident);
 });
@@ -1044,6 +1054,11 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
 
 fastify.get("/api/v1/internal/conversations/details", async (request, reply) => {
   const query = request.query as any;
+  const conversationId = query.conversationId;
+  const parsed = parseInt(String(conversationId), 10);
+  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
+    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
+  }
   const conv = await dbAdapter.getConversation(query.conversationId);
   if (!conv) {
     return reply.code(404).send({ error: "Conversation not found" });
@@ -1062,7 +1077,6 @@ registerAdminRoutes(fastify, {
 });
 
 // Register WebChat Gateway and WebSockets
-fastify.register(websocketPlugin);
 fastify.register(WebChatGateway);
 
 const start = async () => {

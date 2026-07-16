@@ -41,6 +41,15 @@ if (replicaPool !== pool) {
 
 export class PostgresAdapter implements DatabaseAdapter {
   private takeoverManager = new TakeoverManager();
+
+  private isValidConversationId(conversationId: any): boolean {
+    if (conversationId === null || conversationId === undefined) return false;
+    const str = String(conversationId).trim();
+    if (str === "" || str === "null" || str === "undefined") return false;
+    const num = Number(str);
+    return !isNaN(num) && Number.isInteger(num) && num > 0;
+  }
+
   // Helper to execute read queries with failover
   private async executeReadQuery(
     text: string,
@@ -93,13 +102,21 @@ export class PostgresAdapter implements DatabaseAdapter {
         }
       }
 
+      let parsedConvId: number | null = null;
+      if (input.conversationId) {
+        const parsed = parseInt(input.conversationId, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          parsedConvId = parsed;
+        }
+      }
+
       const { rows } = await pool.query(
         `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, created_via, project_id, severity, due_date)
          VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9)
          RETURNING *`,
         [
           ticketNumber,
-          input.conversationId,
+          parsedConvId,
           input.subject,
           input.summary,
           "Open",
@@ -178,6 +195,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   // ─── Conversation ──────────────────────────────────────────
 
   async getConversation(conversationId: string): Promise<any> {
+    if (!this.isValidConversationId(conversationId)) return null;
     const fallback = async () => {
       const list = await BackupManager.readFromBackup<any>("conversations");
       return list.find((c) => String(c.id) === String(conversationId)) || null;
@@ -196,6 +214,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   // ─── Messages ──────────────────────────────────────────────
 
   async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
+    if (!this.isValidConversationId(conversationId)) return null;
     try {
       const { rows } = await pool.query(
         `INSERT INTO messages (conversation_id, role, content, created_at)
@@ -469,6 +488,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   // ─── Conversation History ─────────────────────────────────
 
   async getConversationHistory(conversationId: string, limit: number = 50): Promise<any[]> {
+    if (!this.isValidConversationId(conversationId)) return [];
     const fallback = async () => {
       const list = await BackupManager.readFromBackup<any>("messages");
       return list
@@ -492,6 +512,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   // ─── Handoff State ────────────────────────────────────────
 
   async updateHandoffState(conversationId: string, handledBy: "ai" | "human"): Promise<void> {
+    if (!this.isValidConversationId(conversationId)) return;
     try {
       await pool.query(`UPDATE conversations SET handled_by = $1, updated_at = NOW() WHERE id = $2`, [
         handledBy,
@@ -727,7 +748,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     const conditions: string[] = [];
 
     if (conversationId) {
-      queryParams.push(conversationId);
+      if (!this.isValidConversationId(conversationId)) {
+        return [];
+      }
+      queryParams.push(parseInt(conversationId, 10));
       conditions.push(`t.conversation_id = $${queryParams.length}`);
     }
     if (projectId) {
@@ -735,11 +759,15 @@ export class PostgresAdapter implements DatabaseAdapter {
       conditions.push(`t.project_id = $${queryParams.length}`);
     }
     if (identityId) {
-      queryParams.push(parseInt(identityId, 10));
-      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length})`);
+      const parsed = parseInt(identityId, 10);
+      if (isNaN(parsed)) return [];
+      queryParams.push(parsed);
+      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length}::varchar)`);
     }
     if (profileId) {
-      queryParams.push(parseInt(profileId, 10));
+      const parsed = parseInt(profileId, 10);
+      if (isNaN(parsed)) return [];
+      queryParams.push(parsed);
       conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id IN (SELECT id FROM identities WHERE profile_id = $${queryParams.length}))`);
     }
 
@@ -806,8 +834,12 @@ export class PostgresAdapter implements DatabaseAdapter {
     
     const queryParams: any[] = [];
     if (projectId) {
+      const parsedProjectId = parseInt(projectId, 10);
+      if (isNaN(parsedProjectId)) {
+        return [];
+      }
       query += ` WHERE c.project_id = $1 `;
-      queryParams.push(parseInt(projectId, 10) || 1);
+      queryParams.push(parsedProjectId);
     }
     
     query += ` ORDER BY c.updated_at DESC`;
@@ -865,6 +897,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   }
 
   async getMessages(conversationId: string): Promise<any[]> {
+    if (!this.isValidConversationId(conversationId)) return [];
     const query = `
       SELECT id, conversation_id, role, content, created_at AS timestamp
       FROM messages
@@ -882,6 +915,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   }
 
   async getConversationIdent(conversationId: string): Promise<any> {
+    if (!this.isValidConversationId(conversationId)) return null;
     const query = `
       SELECT i.channel, i.channel_ref
       FROM conversations c

@@ -331,12 +331,12 @@ export class Ticket extends BaseAggregate<number> {
     }
     (this as any).id = id;
 
-    // Recreate any TicketCreatedEvent in the events array to carry the correct database ID
+    // Recreate any TicketCreatedEvent, TicketAssignedEvent, or TicketSummaryUpdatedEvent in the events array to carry the correct database ID
     const events = (this as any)._domainEvents || [];
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
       if (ev instanceof TicketCreatedEvent && ev.ticketId === 0) {
-        events[i] = new TicketCreatedEvent(
+        const newEv = new TicketCreatedEvent(
           id,
           ev.readableId,
           ev.conversationId,
@@ -344,6 +344,16 @@ export class Ticket extends BaseAggregate<number> {
           ev.projectId,
           ev.summary
         );
+        (newEv as any).occurredAt = ev.occurredAt;
+        events[i] = newEv;
+      } else if (ev instanceof TicketAssignedEvent && ev.ticketId === 0) {
+        const newEv = new TicketAssignedEvent(id, ev.agentId);
+        (newEv as any).occurredAt = ev.occurredAt;
+        events[i] = newEv;
+      } else if (ev instanceof TicketSummaryUpdatedEvent && ev.ticketId === 0) {
+        const newEv = new TicketSummaryUpdatedEvent(id, ev.runningSummary, ev.lastAiSummary);
+        (newEv as any).occurredAt = ev.occurredAt;
+        events[i] = newEv;
       }
     }
   }
