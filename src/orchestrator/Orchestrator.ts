@@ -32,6 +32,9 @@ export class Orchestrator {
     );
 
     try {
+      // Ensure local conversation and identity exist first for the customer
+      await this.memoryService.ensureConversation(message.senderId, "1", message.channel);
+
       // 1. Hydrate memory and load session context
       const sessionContext = await this.memoryService.loadSessionContext(message.senderId, message.channel);
 

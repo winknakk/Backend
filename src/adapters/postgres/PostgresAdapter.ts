@@ -788,7 +788,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       return {
         id: String(r.id),
         id1: String(r.id),
-        ticketId: String(r.id),
+        ticketId: String(r.ticket_id || r.id),
+        ticket_id: String(r.ticket_id || r.id),
         conversationId: String(r.conversation_id),
         subject: r.subject,
         summary: r.summary,
@@ -800,6 +801,9 @@ export class PostgresAdapter implements DatabaseAdapter {
         planeIssueId: r.plane_issue_id,
         dueDate,
         createdAt: baseDate.toISOString(),
+        aiTitle: r.title,
+        runningSummary: r.running_summary,
+        lastAiSummary: r.last_ai_summary,
         companyId: undefined,
       };
     });

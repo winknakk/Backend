@@ -187,6 +187,11 @@ async function bootstrap() {
     if (job.data.channel === "WebChat") {
       try {
         const webhookUrl = `${config.PROMPTX_FLOW_WEBHOOK_URL}/sync`;
+
+        // Ensure local conversation and identity exist first for the stable customer identity
+        const localConvId = await memoryService.ensureConversation(job.data.senderId, "1", "WebChat");
+        serverLogger.info(`[BullMQ Worker] Ensured local conversation (ID: ${localConvId}) for customer: ${job.data.senderId}`);
+
         serverLogger.info(`[BullMQ Worker] Forwarding WebChat message to PromptX Flow: ${webhookUrl}`);
         
         const response = await axios.post(webhookUrl, {
@@ -214,7 +219,8 @@ async function bootstrap() {
 
         return { text: replyText, recipientId: job.data.senderId, channel: "WebChat" };
       } catch (err: any) {
-        serverLogger.error({ error: err.message }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
+        const responseData = err.response?.data;
+        serverLogger.error({ error: err.message, responseData }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
         throw err;
       }
     } else {
@@ -521,12 +527,24 @@ fastify.get("/agents", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
+  
+  let conversationId = payload.conversationId;
+  const parsedConvId = parseInt(String(conversationId), 10);
+  if (!conversationId || isNaN(parsedConvId) || parsedConvId <= 0) {
+    const convRes = await pool.query(
+      `SELECT id FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+    );
+    if (convRes.rows.length > 0) {
+      conversationId = convRes.rows[0].id.toString();
+    }
+  }
+
   const result = await ticketService.createTicket({
-    conversationId: payload.conversationId,
-    subject: payload.subject,
-    summary: payload.summary,
-    severity: payload.severity,
-    priority: payload.priority,
+    conversationId,
+    subject: payload.subject || "No Subject Provided",
+    summary: payload.summary || "No Summary Provided",
+    severity: payload.severity || "Medium",
+    priority: payload.priority || "P3",
     projectId: payload.projectId || "1",
   });
   if (!result.success || !result.data) {
@@ -609,7 +627,8 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
   return reply.code(200).send({ success: true, handled_by: "human" });
 });
 
-fastify.get("/api/admin/socket", { websocket: true }, (socket, req) => {
+fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
+  const socket = (connection as any).socket;
   serverLogger.info("Admin WebSocket connection established");
   adminConnections.add(socket);
 
@@ -974,19 +993,42 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   const projectId = query.projectId || request.headers["x-project-id"];
 
   let res;
-  if (projectId) {
+  const isPromptXId = String(identityId).startsWith("convo_") || 
+                      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(identityId));
+
+  if (isPromptXId) {
     res = await pool.query(
-      `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
-      [identityId, status, parseInt(String(projectId), 10) || null]
+      `SELECT * FROM conversations WHERE promptx_conversation_id = $1 LIMIT 1`,
+      [identityId]
     );
+    if (res.rows.length === 0) {
+      const fallbackRes = await pool.query(
+        `SELECT * FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+      );
+      if (fallbackRes.rows.length > 0) {
+        const convId = fallbackRes.rows[0].id;
+        await pool.query(
+          `UPDATE conversations SET promptx_conversation_id = $1 WHERE id = $2`,
+          [identityId, convId]
+        );
+        res = fallbackRes;
+      }
+    }
   } else {
-    res = await pool.query(
-      `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
-      [identityId, status]
-    );
+    if (projectId) {
+      res = await pool.query(
+        `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
+        [identityId, status, parseInt(String(projectId), 10) || null]
+      );
+    } else {
+      res = await pool.query(
+        `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
+        [identityId, status]
+      );
+    }
   }
   
-  if (res.rows.length === 0) {
+  if (!res || res.rows.length === 0) {
     return reply.code(200).send([]);
   }
   

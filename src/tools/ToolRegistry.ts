@@ -532,6 +532,12 @@ export class ToolRegistry implements IToolRegistry {
   }
 
   getTool(name: string): ITool | undefined {
+    // Look for remote namespaced PromptX tool first to ensure runtime flow execution
+    for (const toolKey of this.tools.keys()) {
+      if (toolKey.startsWith(`promptx.${name}_`)) {
+        return this.tools.get(toolKey);
+      }
+    }
     return this.tools.get(name);
   }
 
