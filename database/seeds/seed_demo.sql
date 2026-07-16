@@ -16,7 +16,7 @@ ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name;
 INSERT INTO projects (id, company_id, name, environment, project_type) VALUES 
   (1, 1, 'AutomationX Demo', 'AutomationX Demo Environment', 'Demo Project'),
   (2, 2, 'Customer Success Service', 'Customer Success Production', 'Support Project'),
-  (999, 999, '24/7', 'Avalant 24/7 Production', 'Support Project'),
+  (8, 5, '24/7', 'Avalant 24/7 Production', 'Support Project'),
   (11, 5, 'SSO Project', 'SSO Production', 'Support Project'),
   (12, 5, 'CRA Project', 'CRA Production', 'Support Project')
 ON CONFLICT (id) DO UPDATE SET 
@@ -29,7 +29,7 @@ ON CONFLICT (id) DO UPDATE SET
 INSERT INTO profiles (id, company_id, name) VALUES 
   (1, 1, 'John Doe'),
   (2, 2, 'Jane Smith'),
-  (999, 999, 'Akkharin Laksana'),
+  (999, 5, 'Akkharin Laksana'),
   (11, 5, 'SSO Test Customer'),
   (12, 5, 'CRA Test Customer'),
   (10, 5, 'LINE Test User'),
@@ -39,11 +39,11 @@ ON CONFLICT (id) DO UPDATE SET company_id = EXCLUDED.company_id, name = EXCLUDED
 INSERT INTO profile_projects (profile_id, project_id) VALUES 
   (1, 1),
   (2, 2),
-  (999, 999),
+  (999, 8),
   (11, 11),
   (12, 12),
   (10, 1),
-  (67, 999)
+  (67, 8)
 ON CONFLICT (profile_id, project_id) DO NOTHING;
 
 -- 3. Identities (LINE and WhatsApp references)
@@ -62,10 +62,10 @@ INSERT INTO conversations (id, identity_id, project_id, channel, status, handled
   (1, 1, 1, 'line', 'open', 'ai', NULL),
   (2, 2, 2, 'whatsapp', 'open', 'human', 'agent_alice'),
   (3, 1, 1, 'line', 'closed', 'ai', NULL),
-  (999, 999, 999, 'line', 'open', 'ai', NULL),
+  (999, 999, 8, 'line', 'open', 'ai', NULL),
   (11, 11, 11, 'line', 'open', 'ai', NULL),
   (12, 12, 12, 'line', 'open', 'ai', NULL),
-  (67, 67, 999, 'line', 'open', 'ai', NULL)
+  (67, 67, 8, 'line', 'open', 'ai', NULL)
 ON CONFLICT (id) DO UPDATE SET identity_id = EXCLUDED.identity_id, project_id = EXCLUDED.project_id, channel = EXCLUDED.channel, status = EXCLUDED.status, handled_by = EXCLUDED.handled_by;
 
 -- 5. Message History
