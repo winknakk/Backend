@@ -37,6 +37,8 @@ import { McpToolRouter } from "../mcp/McpToolRouter";
 import { MemoryService } from "../memory/MemoryService";
 import { HumanReplyService } from "../services/humanReplyService";
 import { PlaneService } from "../services/planeService";
+import { PlaneWebhookService, verifyPlaneWebhookSignature } from "../services/planeWebhookService";
+import { PlaneReverseSyncPoller } from "../services/PlaneReverseSyncPoller";
 import { AgentManager } from "../agent/AgentRuntime";
 import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
@@ -91,6 +93,8 @@ const metricAggregator = new MetricAggregator(dbAdapter);
 const ingestionService = new IngestionService(vectorStore, embeddingService);
 const humanReplyService = new HumanReplyService(dbAdapter);
 const planeService = new PlaneService(dbAdapter);
+const planeWebhookService = new PlaneWebhookService(dbAdapter);
+const planeReverseSyncPoller = new PlaneReverseSyncPoller(planeWebhookService);
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
 
 const orchestrator = new Orchestrator(memoryService, agentManager, takeoverManager);
@@ -288,10 +292,12 @@ async function bootstrap() {
   // 5. Start background outbox polling loop
   const outboxProcessor = new OutboxProcessor();
   outboxProcessor.start(10000);
+  planeReverseSyncPoller.start();
 
   fastify.addHook("onClose", async () => {
     serverLogger.info("Stopping background outbox processor...");
     outboxProcessor.stop();
+    planeReverseSyncPoller.stop();
   });
 }
 
@@ -735,6 +741,38 @@ fastify.post("/api/v1/internal/tickets/update-plane", async (request, reply) => 
   const body = request.body as any;
   await dbAdapter.updateTicketPlaneIssue(body.ticketId, body.planeIssueId);
   return reply.code(200).send({ success: true });
+});
+
+fastify.post("/api/v1/webhooks/plane", async (request, reply) => {
+  if (!config.PLANE_WEBHOOK_SECRET) {
+    return reply.code(503).send({ error: "Plane webhook is not configured" });
+  }
+
+  const signature = request.headers["x-plane-signature"] as string | undefined;
+  if (!verifyPlaneWebhookSignature(request.body, signature, config.PLANE_WEBHOOK_SECRET)) {
+    return reply.code(403).send({ error: "Invalid Plane webhook signature" });
+  }
+
+  try {
+    const result = await planeWebhookService.sync(request.body as any);
+    serverLogger.info(
+      {
+        deliveryId: request.headers["x-plane-delivery"],
+        planeIssueId: result.planeIssueId,
+        processed: result.processed,
+        matched: result.matched,
+        reason: result.reason,
+      },
+      "Plane webhook handled"
+    );
+    return reply.code(200).send({ success: true, ...result });
+  } catch (error: any) {
+    serverLogger.error(
+      { deliveryId: request.headers["x-plane-delivery"], error: error.message },
+      "Plane webhook failed"
+    );
+    return reply.code(503).send({ error: "Plane webhook processing failed" });
+  }
 });
 
 fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {

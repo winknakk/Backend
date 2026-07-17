@@ -895,6 +895,31 @@ export class PostgresAdapter implements DatabaseAdapter {
     );
   }
 
+  async syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean> {
+    const assignments: string[] = [];
+    const values: string[] = [];
+
+    if (changes.status) {
+      values.push(changes.status);
+      assignments.push(`status = $${values.length}`);
+    }
+    if (changes.priority) {
+      values.push(changes.priority);
+      assignments.push(`priority = $${values.length}`);
+    }
+    if (assignments.length === 0) return false;
+
+    values.push(planeIssueId);
+    const result = await pool.query(
+      `UPDATE tickets SET ${assignments.join(", ")} WHERE plane_issue_id = $${values.length}`,
+      values
+    );
+    return (result.rowCount || 0) > 0;
+  }
+
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
     const isNumeric = /^\d+$/.test(String(ticketId));
     let ticketRes;
