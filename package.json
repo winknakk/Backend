@@ -2,6 +2,7 @@
   "scripts": {
     "db:migrate": "npx tsx src/adapters/postgres/run-migrations-cli.ts",
     "db:seed": "npx tsx src/adapters/postgres/run-seeds-cli.ts",
+    "plane:sync": "npx tsx src/run-plane-reverse-sync.ts",
     "build": "npx tsc",
     "lint": "npx eslint \"src/**/*.ts\"",
     "format": "npx prettier --check \"src/**/*.ts\"",

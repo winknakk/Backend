@@ -585,6 +585,20 @@ export class LocalDataAdapter implements DatabaseAdapter {
     }
   }
 
+  async syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    const idx = tickets.findIndex((ticket) => String(ticket.plane_issue_id) === String(planeIssueId));
+    if (idx === -1) return false;
+
+    if (changes.status) tickets[idx].status = changes.status;
+    if (changes.priority) tickets[idx].priority = changes.priority;
+    this.writeTable("Tickets", tickets);
+    return true;
+  }
+
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
     const tickets = this.readTable<any>("Tickets", DbTicketSchema);
     const ticket = tickets.find((t) => String(t.id1) === String(ticketId));

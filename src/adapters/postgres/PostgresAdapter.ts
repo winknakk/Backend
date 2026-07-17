@@ -938,9 +938,34 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void> {
     await pool.query(
-      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE id = $2",
+      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE ticket_id = $2",
       [planeIssueId, ticketId]
     );
+  }
+
+  async syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean> {
+    const assignments: string[] = [];
+    const values: string[] = [];
+
+    if (changes.status) {
+      values.push(changes.status);
+      assignments.push(`status = $${values.length}`);
+    }
+    if (changes.priority) {
+      values.push(changes.priority);
+      assignments.push(`priority = $${values.length}`);
+    }
+    if (assignments.length === 0) return false;
+
+    values.push(planeIssueId);
+    const result = await pool.query(
+      `UPDATE tickets SET ${assignments.join(", ")} WHERE plane_issue_id = $${values.length}`,
+      values
+    );
+    return (result.rowCount || 0) > 0;
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {

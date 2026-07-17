@@ -95,6 +95,15 @@ export interface DatabaseAdapter {
   updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void>;
 
   /**
+   * Applies Plane-originated status/priority changes to a linked ticket.
+   * Returns false when no ticket is linked to the supplied Plane issue ID.
+   */
+  syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean>;
+
+  /**
    * Retrieves ticket details along with company context.
    */
   getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }>;
