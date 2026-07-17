@@ -9,9 +9,9 @@ import {
 } from "./services/planeWebhookService";
 
 async function run(): Promise<void> {
-  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Done", group: "completed" }), "Done");
+  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Done", group: "completed" }), "closed");
   assert.strictEqual(mapPlaneStateToTicketStatus({ group: "started" }), "In Progress");
-  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Cancelled" }), "Cancelled");
+  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Cancelled" }), "closed");
   assert.strictEqual(mapPlanePriorityToTicketPriority("urgent"), "P1");
   assert.strictEqual(mapPlanePriorityToTicketPriority("high"), "P2");
   assert.strictEqual(mapPlanePriorityToTicketPriority("medium"), "P3");
@@ -42,7 +42,7 @@ async function run(): Promise<void> {
 
   assert.deepStrictEqual(captured, {
     planeIssueId: "plane-issue-1",
-    changes: { status: "Done", priority: "P2" },
+    changes: { status: "closed", priority: "P2" },
   });
   assert.strictEqual(result.processed, true);
   assert.strictEqual(result.matched, true);

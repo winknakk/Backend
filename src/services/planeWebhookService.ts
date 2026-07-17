@@ -45,12 +45,13 @@ function canonicalStatusName(name: string): string {
     unstarted: "Todo",
     started: "In Progress",
     "in progress": "In Progress",
-    completed: "Done",
-    complete: "Done",
-    done: "Done",
-    resolved: "Done",
-    cancelled: "Cancelled",
-    canceled: "Cancelled",
+    completed: "closed",
+    complete: "closed",
+    done: "closed",
+    resolved: "closed",
+    closed: "closed",
+    cancelled: "closed",
+    canceled: "closed",
   };
   return known[normalized] || name.trim();
 }
@@ -63,9 +64,9 @@ export function mapPlaneStateToTicketStatus(state?: { name?: string; group?: str
     backlog: "Backlog",
     unstarted: "Todo",
     started: "In Progress",
-    completed: "Done",
-    cancelled: "Cancelled",
-    canceled: "Cancelled",
+    completed: "closed",
+    cancelled: "closed",
+    canceled: "closed",
   };
   return state.group ? groupMap[state.group.trim().toLowerCase()] : undefined;
 }
@@ -123,7 +124,7 @@ export class PlaneWebhookService {
     }
 
     const state = await this.resolveState(data, payloadProjectId || configuredProjectId);
-    const status = data.completed_at ? "Done" : mapPlaneStateToTicketStatus(state);
+    const status = data.completed_at ? "closed" : mapPlaneStateToTicketStatus(state);
     const priority = mapPlanePriorityToTicketPriority(data.priority);
     if (!status && !priority) {
       return { processed: false, matched: false, reason: "no_supported_changes", planeIssueId };

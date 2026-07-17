@@ -181,7 +181,7 @@ async function bootstrap() {
   toolRegistry.registerTool(new UpdateSummaryTool());
   toolRegistry.registerTool(new FindTicketTool());
   toolRegistry.registerTool(new MergeTicketTool());
-  toolRegistry.registerTool(new CloseTicketTool());
+  toolRegistry.registerTool(new CloseTicketTool(planeService));
   toolRegistry.registerTool(new AssignTicketTool());
   toolRegistry.registerTool(new EscalateToPmTool());
 
@@ -739,8 +739,14 @@ fastify.get("/api/v1/internal/tickets/details", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/update-plane", async (request, reply) => {
   const body = request.body as any;
-  await dbAdapter.updateTicketPlaneIssue(body.ticketId, body.planeIssueId);
-  return reply.code(200).send({ success: true });
+  try {
+    const planeIssueId = await planeService.resolvePlaneWorkItemId(body.ticketId, body.planeIssueId);
+    await dbAdapter.updateTicketPlaneIssue(body.ticketId, planeIssueId);
+    return reply.code(200).send({ success: true, planeIssueId });
+  } catch (error: any) {
+    serverLogger.error({ ticketId: body.ticketId, error: error.message }, "Plane ticket link validation failed");
+    return reply.code(502).send({ error: error.message });
+  }
 });
 
 fastify.post("/api/v1/webhooks/plane", async (request, reply) => {

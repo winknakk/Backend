@@ -9,6 +9,7 @@ import { TransactionManager } from "../shared/repositories/TransactionManager";
 import { UnitOfWork } from "../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../infrastructure/db/PostgresTicketRepository";
 import { AdapterFactory } from "../adapters/AdapterFactory";
+import { PlaneService, PlaneTicketClosureResult } from "../services/planeService";
 
 // V2 Tool Contract Schema
 export const McpToolRegistryV2Schema = z.object({
@@ -305,6 +306,8 @@ export class CloseTicketTool implements ITool {
   });
   readonly outputSchema = ExecutionResultSchema;
 
+  constructor(private readonly planeService?: Pick<PlaneService, "syncTicketClosureToPlane">) {}
+
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
@@ -312,6 +315,13 @@ export class CloseTicketTool implements ITool {
     const ticketRepo = new PostgresTicketRepository(txManager);
 
     let alreadyClosed = false;
+    let planeSync: PlaneTicketClosureResult | undefined;
+
+    // Update Plane first. If it fails, PostgreSQL remains unchanged instead of
+    // being reopened by the Plane-to-PostgreSQL reconciliation poller.
+    if (this.planeService) {
+      planeSync = await this.planeService.syncTicketClosureToPlane(ticketIdStr);
+    }
 
     await uow.execute(async () => {
       let ticket = await ticketRepo.findByTicketId(ticketIdStr);
@@ -331,7 +341,7 @@ export class CloseTicketTool implements ITool {
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, status: "closed", alreadyClosed },
+      data: { ticketId: ticketIdStr, status: "closed", alreadyClosed, planeSync },
       error: null,
       source: "local",
       executionId: require("crypto").randomUUID(),
