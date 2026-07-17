@@ -362,6 +362,11 @@ fastify.post("/webhook/message", async (request, reply) => {
   }
 });
 
+fastify.post("/api/v1/internal/debug-log", async (request, reply) => {
+  serverLogger.info({ debugData: request.body }, "[Cloud Debug Log]");
+  return reply.code(200).send({ success: true });
+});
+
 fastify.get("/health", async (request, reply) => {
   if (GracefulShutdownService.checkShuttingDown()) {
     return reply.code(503).send({
