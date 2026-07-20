@@ -20,7 +20,7 @@ export interface DatabaseAdapter {
   /**
    * Saves a message log to the conversation.
    */
-  saveMessage(conversationId: string, role: string, content: string): Promise<any>;
+  saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any>;
 
   /**
    * Finds an active conversation or creates one if it doesn't exist.

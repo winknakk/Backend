@@ -76,7 +76,12 @@ export class Orchestrator {
           "Human takeover active: bypassing AgentRuntime reasoning loop."
         );
 
-        await this.memoryService.appendConversationLog(sessionContext.conversationId, "customer", message.text);
+        await this.memoryService.appendConversationLog(
+          sessionContext.conversationId,
+          "customer",
+          message.text,
+          message.externalId
+        );
 
         const durationMs = timer();
         return {
@@ -88,7 +93,7 @@ export class Orchestrator {
       }
 
       // 2. Resolve Agent session
-      const agentSession = await this.agentManager.getOrCreateSession(message.senderId, sessionContext.companyId);
+      const agentSession = await this.agentManager.getOrCreateSession(message.senderId, sessionContext.companyId, message.channel);
 
       // 3. Trigger Agent reasoning and tool loop
       const reply = await agentSession.chat(message, reqId);

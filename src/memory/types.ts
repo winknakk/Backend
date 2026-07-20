@@ -51,7 +51,7 @@ export interface IMemoryService {
   /**
    * Appends a new conversation log (either from the user, AI, or human support) to NocoDB.
    */
-  appendConversationLog(conversationId: string, role: "customer" | "ai" | "system", message: string): Promise<void>;
+  appendConversationLog(conversationId: string, role: "customer" | "ai" | "system", message: string, externalId?: string): Promise<void>;
 
   /**
    * Creates or returns an active conversation ID for a client.

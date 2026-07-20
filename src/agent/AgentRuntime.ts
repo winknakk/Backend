@@ -76,7 +76,7 @@ export class AgentRuntime implements IAgentSession {
     logger.info({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start chat processing");
 
     // Append customer log
-    await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput);
+    await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput, message.externalId);
 
     // Get full message history with Ids for memory tracking
     const fullHistory = await this.memoryService.getFullConversationHistory(conversationId);
@@ -105,7 +105,8 @@ export class AgentRuntime implements IAgentSession {
     const reply = await this.runHandoffLoop(sanitizedMessage, richSessionContext);
 
     // 5. Log AI response
-    await this.memoryService.appendConversationLog(conversationId, "ai", reply.text);
+    const aiExternalId = message.externalId ? `ai_${message.externalId}` : undefined;
+    await this.memoryService.appendConversationLog(conversationId, "ai", reply.text, aiExternalId);
 
     // 6. Sanitize outgoing response
     const sanitizedOutput = await this.policyEngine.sanitizeOutputText(reply.text);
@@ -310,8 +311,8 @@ export class AgentManager {
     this.agentRouter = supervisor;
   }
 
-  async getOrCreateSession(senderId: string, companyId: string): Promise<AgentRuntime> {
-    const conversationId = await this.memoryService.ensureConversation(senderId, companyId, "LINE");
+  async getOrCreateSession(senderId: string, companyId: string, channel: string = "LINE"): Promise<AgentRuntime> {
+    const conversationId = await this.memoryService.ensureConversation(senderId, companyId, channel);
     const sessionId = `sess_${conversationId}`;
 
     if (!this.activeSessions[sessionId]) {

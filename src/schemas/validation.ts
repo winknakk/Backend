@@ -7,7 +7,7 @@ export type Severity = string;
 export const PrioritySchema = z.string().min(1, "Priority is required");
 export type Priority = string;
 
-export const ChannelTypeSchema = z.enum(["LINE", "Email", "WebChat", "Teams"]);
+export const ChannelTypeSchema = z.enum(["LINE", "line", "line_group", "LINE_GROUP", "Email", "WebChat", "Teams"]);
 export type ChannelType = z.infer<typeof ChannelTypeSchema>;
 
 export const InboundMessageSchema = z.object({
@@ -16,6 +16,7 @@ export const InboundMessageSchema = z.object({
   text: z.string().min(1, "Message content cannot be empty"),
   receivedAt: z.string().datetime(),
   companyId: z.string().optional(),
+  externalId: z.string().optional(),
 });
 export type InboundMessage = z.infer<typeof InboundMessageSchema>;
 
@@ -24,6 +25,7 @@ export const OutboundMessageSchema = z.object({
   channel: ChannelTypeSchema,
   text: z.string().min(1, "Response content cannot be empty"),
   sentAt: z.string().datetime(),
+  externalId: z.string().optional(),
 });
 export type OutboundMessage = z.infer<typeof OutboundMessageSchema>;
 

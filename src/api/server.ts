@@ -743,7 +743,12 @@ fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
 
 fastify.post("/api/v1/internal/messages", async (request, reply) => {
   const body = request.body as any;
-  await dbAdapter.saveMessage(body.conversationId, body.role || "human", body.content);
+  await dbAdapter.saveMessage(
+    body.conversationId,
+    body.role || "human",
+    body.content,
+    body.externalId || body.external_id
+  );
   return reply.code(200).send({ success: true });
 });
 

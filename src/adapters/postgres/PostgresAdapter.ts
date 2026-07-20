@@ -213,14 +213,15 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   // ─── Messages ──────────────────────────────────────────────
 
-  async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any> {
     if (!this.isValidConversationId(conversationId)) return null;
     try {
       const { rows } = await pool.query(
-        `INSERT INTO messages (conversation_id, role, content, created_at)
-         VALUES ($1, $2, $3, NOW())
+        `INSERT INTO messages (conversation_id, role, content, external_id, created_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (conversation_id, external_id) DO UPDATE SET content = EXCLUDED.content
          RETURNING *`,
-        [conversationId, role, content]
+        [conversationId, role, content, externalId || null]
       );
 
       const msgRow = rows[0];

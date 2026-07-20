@@ -25,9 +25,10 @@ export class MemoryService implements IMemoryService {
   async appendConversationLog(
     conversationId: string,
     role: "customer" | "ai" | "system",
-    message: string
+    message: string,
+    externalId?: string
   ): Promise<void> {
-    await this.dbAdapter.saveMessage(conversationId, role, message);
+    await this.dbAdapter.saveMessage(conversationId, role, message, externalId);
   }
 
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
