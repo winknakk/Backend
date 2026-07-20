@@ -12,6 +12,7 @@ import { TakeoverManager } from "./human-takeover/TakeoverManager";
 import { MemoryService } from "./memory/MemoryService";
 import { RedisSessionManager } from "./memory/RedisSessionManager";
 import { ConversationResolver } from "./conversation/ConversationResolver";
+import { RuntimeContextResolver } from "./services/RuntimeContextResolver";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -166,7 +167,44 @@ async function run() {
 
   const sessionUpdated = await redisSessionManager.getSession(conversationId);
   console.log("   - Updated session active participants:", sessionUpdated?.activeParticipants);
-  assert(sessionUpdated?.activeParticipants.includes(testSenderB), "User B should be added as participant");
+  assert(!!sessionUpdated && sessionUpdated.activeParticipants.includes(testSenderB), "User B should be added as participant");
+
+  // Scenario 6: Test JIT Ticket inherits projectId from conversation using RuntimeContextResolver
+  console.log("\n7. Testing JIT Ticket project ID inheritance from conversation...");
+  
+  // Create and assign project ID 8
+  await pool.query("INSERT INTO projects (id, name, company_id) VALUES (8, 'Test Project 8', 1) ON CONFLICT (id) DO NOTHING");
+  await pool.query("UPDATE conversations SET project_id = 8 WHERE id = $1", [conversationId]);
+  
+  const contextResolver = new RuntimeContextResolver(dbAdapter);
+  const runtimeContext = await contextResolver.resolveRuntimeContext(conversationId);
+  
+  console.log("   - Resolved project_id from context:", runtimeContext?.projectId);
+  assert(runtimeContext !== null, "RuntimeContext should be resolved");
+  if (!runtimeContext) throw new Error("RuntimeContext is null");
+  assert(runtimeContext.projectId === 8, "Project ID must be resolved as 8 from the conversation");
+  assert(runtimeContext.channel === "line_group", "Channel must be line_group");
+
+  // Create a new JIT Ticket and verify its project_id is inherited as 8
+  const { TicketResolver } = await import("./services/TicketResolver");
+  const ticketResolver = new TicketResolver(dbAdapter);
+  const jitTicket = await ticketResolver.createJitTicket(
+    String(conversationId),
+    companyIdStr,
+    "Escalation test for project 8",
+    testSender
+  );
+  
+  console.log("   - Created JIT ticket ID:", jitTicket.id, "project_id:", jitTicket.project_id);
+  
+  // Retrieve the ticket directly from DB to verify project_id
+  const { rows: ticketCheck } = await pool.query("SELECT project_id FROM tickets WHERE id = $1", [parseInt(jitTicket.id, 10)]);
+  console.log("   - Persisted ticket project_id in DB:", ticketCheck[0]?.project_id);
+  assert(ticketCheck[0]?.project_id === 8, "JIT Ticket must inherit project_id = 8 from the conversation");
+
+  const resolvedTickets = await dbAdapter.listAllTickets(String(conversationId), String(runtimeContext.projectId));
+  console.log(`   - Found ${resolvedTickets.length} ticket(s) using resolved project ID 8`);
+  assert(resolvedTickets.length > 0, "Should load tickets for the conversation");
 
   // Cleanup
   await redisSessionManager.deleteSession(conversationId);

@@ -32,6 +32,7 @@ import { IngestionService } from "../aiops/ragops/IngestionService";
 import { EvalTestRunner } from "../aiops/llmops/EvalTestRunner";
 import { registerAdminRoutes } from "./routes/admin";
 import { PolicyEngine } from "../policy/PolicyEngine";
+import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { ExecutionTraceService } from "../execution/ExecutionTrace";
 import { McpToolRouter } from "../mcp/McpToolRouter";
 import { MemoryService } from "../memory/MemoryService";
@@ -71,6 +72,7 @@ const adminConnections = new Set<any>();
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
 const ticketService = new TicketService(dbAdapter);
+const runtimeContextResolver = new RuntimeContextResolver(dbAdapter);
 
 const embeddingService = new EmbeddingService();
 const vectorStore =
@@ -613,9 +615,18 @@ fastify.post("/api/v1/tickets", async (request, reply) => {
 
 fastify.get("/api/v1/internal/tickets/status", async (request, reply) => {
   const query = request.query as any;
+  let projectId = query.projectId;
+
+  if ((!projectId || projectId === "" || projectId === "null" || projectId === "undefined") && query.conversationId) {
+    const context = await runtimeContextResolver.resolveRuntimeContext(query.conversationId);
+    if (context && context.projectId) {
+      projectId = String(context.projectId);
+    }
+  }
+
   const tickets = await dbAdapter.listAllTickets(
     query.conversationId,
-    query.projectId,
+    projectId,
     query.profileId,
     query.identityId
   );

@@ -1,6 +1,7 @@
 import { DatabaseAdapter } from "../adapters/types";
 import { createLogger } from "../observability/logger";
 import { randomUUID } from "crypto";
+import { RuntimeContextResolver } from "./RuntimeContextResolver";
 
 const logger = createLogger("TicketResolver");
 
@@ -25,15 +26,28 @@ export class TicketResolver {
   ): Promise<any> {
     logger.info({ conversationId, companyId, subject }, "Initiating JIT Ticket Escalation");
 
-    // 1. Resolve Project ID for the company
+    // 1. Resolve Project ID from Conversation Context using RuntimeContextResolver
     let projectId: string | undefined;
     try {
-      const sessionContext = await this.dbAdapter.loadSessionContext(senderId, "line_group");
-      if (sessionContext?.companyContext?.projects?.length > 0) {
-        projectId = sessionContext.companyContext.projects[0].projectId;
+      const contextResolver = new RuntimeContextResolver(this.dbAdapter);
+      const context = await contextResolver.resolveRuntimeContext(conversationId);
+      if (context && context.projectId) {
+        projectId = String(context.projectId);
       }
     } catch (err: any) {
-      logger.warn({ conversationId, error: err.message }, "Could not load projects for company context");
+      logger.warn({ conversationId, error: err.message }, "Could not load project_id from RuntimeContextResolver");
+    }
+
+    // 2. Fallback: If conversation has no project_id, resolve from company projects
+    if (!projectId) {
+      try {
+        const sessionContext = await this.dbAdapter.loadSessionContext(senderId, "line_group");
+        if (sessionContext?.companyContext?.projects?.length > 0) {
+          projectId = sessionContext.companyContext.projects[0].projectId;
+        }
+      } catch (err: any) {
+        logger.warn({ conversationId, error: err.message }, "Could not load projects for company context");
+      }
     }
 
     // 2. Generate a unique ticket number

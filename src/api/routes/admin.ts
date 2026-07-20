@@ -50,11 +50,16 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     if (query && query.projectId !== undefined) {
       const pId = String(query.projectId);
       const parsed = parseInt(pId, 10);
-      if (isNaN(parsed) || parsed <= 0 || pId === "null" || pId === "undefined") {
-        return reply.code(400).send({
-          error: "Bad Request",
-          message: `Invalid projectId: ${pId}`,
-        });
+      if (isNaN(parsed) || parsed <= 0 || pId === "null" || pId === "undefined" || pId === "") {
+        // If conversationId is provided and valid, allow it to pass so it can be resolved from the conversation context.
+        const parsedConv = parseInt(String(query.conversationId), 10);
+        const hasValidConvId = query.conversationId && !isNaN(parsedConv) && parsedConv > 0;
+        if (!hasValidConvId) {
+          return reply.code(400).send({
+            error: "Bad Request",
+            message: `Invalid projectId: ${pId}`,
+          });
+        }
       }
     }
   });
