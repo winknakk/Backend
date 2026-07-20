@@ -17,6 +17,8 @@ export const InboundMessageSchema = z.object({
   receivedAt: z.string().datetime(),
   companyId: z.string().optional(),
   externalId: z.string().optional(),
+  isMentioned: z.boolean().optional(),
+  senderRef: z.string().optional(),
 });
 export type InboundMessage = z.infer<typeof InboundMessageSchema>;
 

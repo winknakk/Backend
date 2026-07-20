@@ -53,4 +53,8 @@ export class MemoryService implements IMemoryService {
       timestamp: m.timestamp || m.created_at || new Date().toISOString(),
     }));
   }
+
+  getDatabaseAdapter(): DatabaseAdapter {
+    return this.dbAdapter;
+  }
 }

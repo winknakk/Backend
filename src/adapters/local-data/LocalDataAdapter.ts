@@ -107,6 +107,11 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return newMessage;
   }
 
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    return tickets.find((t) => String(t.conversation_id) === conversationId && t.status !== "Closed") || null;
+  }
+
   async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult> {
     const executionId = randomUUID();
     const tickets = this.readTable<any>("Tickets", DbTicketSchema);

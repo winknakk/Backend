@@ -67,4 +67,9 @@ export interface IMemoryService {
    * Retrieves the full conversation history with message Ids for memory tracking.
    */
   getFullConversationHistory(conversationId: string): Promise<Array<{ id: string; role: string; content: string; timestamp: string }>>;
+
+  /**
+   * Returns the underlying DatabaseAdapter instance.
+   */
+  getDatabaseAdapter(): any;
 }

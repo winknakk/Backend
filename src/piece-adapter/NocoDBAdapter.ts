@@ -259,6 +259,10 @@ export class NocoDBAdapter implements DatabaseAdapter {
     }
   }
 
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    return null;
+  }
+
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
     try {
       // 1. Resolve Identity

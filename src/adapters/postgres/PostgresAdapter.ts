@@ -237,6 +237,28 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
   }
 
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    try {
+      const { rows } = await pool.query(
+        `SELECT * FROM tickets
+         WHERE conversation_id = $1 AND status != 'Closed'
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [parseInt(conversationId, 10)]
+      );
+      if (rows.length === 0) return null;
+      return {
+        ...rows[0],
+        id1: String(rows[0].id),
+        ticket_id: String(rows[0].ticket_id),
+        conversation_id: String(rows[0].conversation_id),
+      };
+    } catch (err: any) {
+      logger.error({ conversationId, error: err.message }, "Failed to get latest ticket for conversation");
+      return null;
+    }
+  }
+
   // ─── Ensure Conversation ──────────────────────────────────
 
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {

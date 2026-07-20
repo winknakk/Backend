@@ -23,6 +23,11 @@ export interface DatabaseAdapter {
   saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any>;
 
   /**
+   * Retrieves the latest active ticket for a given conversation.
+   */
+  getLatestTicketForConversation(conversationId: string): Promise<any>;
+
+  /**
    * Finds an active conversation or creates one if it doesn't exist.
    * Returns the conversation ID.
    */

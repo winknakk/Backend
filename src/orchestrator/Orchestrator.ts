@@ -5,6 +5,7 @@ import { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
 import { randomUUID } from "crypto";
 import { TakeoverManager } from "../human-takeover/TakeoverManager";
+import { ConversationResolver } from "../conversation/ConversationResolver";
 
 const logger = createLogger("Orchestrator");
 
@@ -12,11 +13,18 @@ export class Orchestrator {
   public memoryService: IMemoryService;
   public agentManager: AgentManager;
   public takeoverManager: TakeoverManager;
+  public conversationResolver: ConversationResolver;
 
-  constructor(memoryService: IMemoryService, agentManager: AgentManager, takeoverManager = new TakeoverManager()) {
+  constructor(
+    memoryService: IMemoryService,
+    agentManager: AgentManager,
+    takeoverManager = new TakeoverManager(),
+    conversationResolver = new ConversationResolver()
+  ) {
     this.memoryService = memoryService;
     this.agentManager = agentManager;
     this.takeoverManager = takeoverManager;
+    this.conversationResolver = conversationResolver;
   }
 
   /**
@@ -37,11 +45,12 @@ export class Orchestrator {
 
       // 1. Hydrate memory and load session context
       const sessionContext = await this.memoryService.loadSessionContext(message.senderId, message.channel);
+      const conversationId = sessionContext.conversationId;
 
       logger.info(
         {
           requestId: reqId,
-          conversationId: sessionContext.conversationId,
+          conversationId,
           companyId: sessionContext.companyId,
           component: "Orchestrator",
         },
@@ -49,7 +58,26 @@ export class Orchestrator {
       );
 
       // Check Human Takeover State
-      const takeoverState = await this.takeoverManager.getTakeoverState(sessionContext.conversationId);
+      const takeoverState = await this.takeoverManager.getTakeoverState(conversationId);
+      const isHumanHandoffActive = takeoverState.status === "PENDING_HUMAN" || takeoverState.status === "ACTIVE_HUMAN" || sessionContext.handledBy === "human";
+
+      // Verify active participant status & group mentions (only if human handoff is NOT active)
+      if (!isHumanHandoffActive) {
+        const resolution = await this.conversationResolver.shouldProcess(message, conversationId);
+        if (!resolution.shouldProcess) {
+          const durationMs = timer();
+          logger.info(
+            { requestId: reqId, conversationId, reason: resolution.reason, component: "Orchestrator" },
+            "Group conversation message ignored (not mentioned and no active participant session)"
+          );
+          return {
+            recipientId: message.senderId,
+            channel: message.channel,
+            text: `Muted: ${resolution.reason}`,
+            sentAt: new Date().toISOString(),
+          };
+        }
+      }
       
       // If human session expired, switch handled_by back to AI in DB
       if (takeoverState.status === "ACTIVE_AI" && sessionContext.handledBy === "human") {
