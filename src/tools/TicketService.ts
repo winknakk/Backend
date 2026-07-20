@@ -8,6 +8,7 @@ import { BackupManager } from "../adapters/postgres/BackupManager";
 import { BullMQEventPublisher } from "../infrastructure/queue/BullMQEventPublisher";
 import { TicketInput, ExecutionResult } from "../schemas/validation";
 import { DatabaseAdapter } from "../adapters/types";
+import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 
 export class TicketService {
   private dbAdapter: DatabaseAdapter;
@@ -26,8 +27,20 @@ export class TicketService {
 
   async createTicket(input: TicketInput): Promise<ExecutionResult> {
     try {
-      const projectIdNum = parseInt(input.projectId, 10) || 1;
+      let projectIdNum = parseInt(input.projectId, 10) || 1;
       const conversationIdNum = parseInt(input.conversationId, 10);
+
+      if (!isNaN(conversationIdNum) && conversationIdNum > 0) {
+        try {
+          const contextResolver = new RuntimeContextResolver(this.dbAdapter);
+          const context = await contextResolver.resolveRuntimeContext(conversationIdNum);
+          if (context && context.projectId) {
+            projectIdNum = context.projectId;
+          }
+        } catch (err: any) {
+          console.error("Failed to resolve conversation context during ticket creation:", err.message);
+        }
+      }
 
       // Check for existing duplicate (idempotency check)
       const existing = await this.ticketRepo.findByConversationAndSubject(conversationIdNum, input.subject);
