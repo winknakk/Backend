@@ -20,7 +20,12 @@ export interface DatabaseAdapter {
   /**
    * Saves a message log to the conversation.
    */
-  saveMessage(conversationId: string, role: string, content: string): Promise<any>;
+  saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any>;
+
+  /**
+   * Retrieves the latest active ticket for a given conversation.
+   */
+  getLatestTicketForConversation(conversationId: string): Promise<any>;
 
   /**
    * Finds an active conversation or creates one if it doesn't exist.
@@ -72,7 +77,7 @@ export interface DatabaseAdapter {
   /**
    * Lists all tickets globally or filtered by conversation and project.
    */
-  listAllTickets(conversationId?: string, projectId?: string): Promise<any[]>;
+  listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]>;
 
   /**
    * Lists all conversations globally or filtered by project.

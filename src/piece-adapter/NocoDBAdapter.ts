@@ -229,7 +229,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
     }
   }
 
-  async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any> {
     const messageData = {
       conversation_id: Number(conversationId) || conversationId,
       role,
@@ -257,6 +257,10 @@ export class NocoDBAdapter implements DatabaseAdapter {
       }
       return { id: "mock-msg-id", id1: "mock-msg-id", ...messageData };
     }
+  }
+
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    return null;
   }
 
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
@@ -458,7 +462,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
     return field;
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
     const now = Date.now();
     // Cache for 8 seconds to prevent excessive NocoDB calls when no conversation filter is applied
     if (!conversationId && !projectId && this.cachedTicketsList.length > 0 && (now - this.lastTicketsFetch) < 8000) {

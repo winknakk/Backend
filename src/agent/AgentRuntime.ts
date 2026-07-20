@@ -14,6 +14,7 @@ import { config } from "../config/env";
 import { ConversationMemoryService } from "../memory/ConversationMemoryService";
 
 import { IExecutionTraceService } from "../execution/types";
+import { TicketResolver } from "../services/TicketResolver";
 
 const logger = createLogger("AgentRuntime");
 
@@ -32,6 +33,7 @@ export class AgentRuntime implements IAgentSession {
   private agentRouter: IAgentRouter;
   private maxHandoffDepth: number;
   private conversationMemoryService: ConversationMemoryService;
+  private ticketResolver: TicketResolver;
 
   constructor(
     sessionId: string,
@@ -49,6 +51,7 @@ export class AgentRuntime implements IAgentSession {
     this.traceService = traceService;
     this.maxHandoffDepth = config.MAX_AGENT_HANDOFF_DEPTH;
     this.conversationMemoryService = new ConversationMemoryService();
+    this.ticketResolver = new TicketResolver(this.memoryService.getDatabaseAdapter());
 
     const supervisor = new SupervisorAgent();
     supervisor.registerAgent(new SupportAgent());
@@ -76,7 +79,7 @@ export class AgentRuntime implements IAgentSession {
     logger.info({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start chat processing");
 
     // Append customer log
-    await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput);
+    await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput, message.externalId);
 
     // Get full message history with Ids for memory tracking
     const fullHistory = await this.memoryService.getFullConversationHistory(conversationId);
@@ -86,6 +89,34 @@ export class AgentRuntime implements IAgentSession {
 
     // 3. Knowledge-Aware Agentic Decision Flow
     logger.debug({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start PromptX reasoning loop");
+
+    // Resolve active ticket or JIT-escalate if the context demands
+    let activeTicket = await this.ticketResolver.resolveActiveTicket(conversationId);
+
+    // Dynamic JIT escalation check:
+    // If no active ticket exists AND the user indicates a service request / issue, create a JIT ticket
+    const needsTicketEscalation = !activeTicket && (
+      sanitizedInput.toLowerCase().includes("พัง") ||
+      sanitizedInput.toLowerCase().includes("ล่ม") ||
+      sanitizedInput.toLowerCase().includes("error") ||
+      sanitizedInput.toLowerCase().includes("broken") ||
+      sanitizedInput.toLowerCase().includes("fail") ||
+      sanitizedInput.toLowerCase().includes("issue") ||
+      sanitizedInput.toLowerCase().includes("ticket") ||
+      sanitizedInput.toLowerCase().includes("help")
+    );
+
+    if (needsTicketEscalation) {
+      logger.info({ conversationId, text: sanitizedInput }, "Heuristic triggered JIT Ticket creation");
+      activeTicket = await this.ticketResolver.createJitTicket(
+        conversationId,
+        this.companyId,
+        `IT Support Escalation: ${sanitizedInput.substring(0, 50)}...`,
+        message.senderId
+      );
+    }
+
+    const activeTicketId = activeTicket ? activeTicket.ticket_id : undefined;
 
     const richSessionContext = {
       ...sessionContext,
@@ -97,6 +128,7 @@ export class AgentRuntime implements IAgentSession {
       conversationId,
       sessionId: this.sessionId,
       parentTraceId: reqId,
+      ticketId: activeTicketId,
     };
 
     const sanitizedMessage = { ...message, text: sanitizedInput };
@@ -105,7 +137,8 @@ export class AgentRuntime implements IAgentSession {
     const reply = await this.runHandoffLoop(sanitizedMessage, richSessionContext);
 
     // 5. Log AI response
-    await this.memoryService.appendConversationLog(conversationId, "ai", reply.text);
+    const aiExternalId = message.externalId ? `ai_${message.externalId}` : undefined;
+    await this.memoryService.appendConversationLog(conversationId, "ai", reply.text, aiExternalId);
 
     // 6. Sanitize outgoing response
     const sanitizedOutput = await this.policyEngine.sanitizeOutputText(reply.text);
@@ -310,8 +343,8 @@ export class AgentManager {
     this.agentRouter = supervisor;
   }
 
-  async getOrCreateSession(senderId: string, companyId: string): Promise<AgentRuntime> {
-    const conversationId = await this.memoryService.ensureConversation(senderId, companyId, "LINE");
+  async getOrCreateSession(senderId: string, companyId: string, channel: string = "LINE"): Promise<AgentRuntime> {
+    const conversationId = await this.memoryService.ensureConversation(senderId, companyId, channel);
     const sessionId = `sess_${conversationId}`;
 
     if (!this.activeSessions[sessionId]) {

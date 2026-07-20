@@ -29,6 +29,28 @@ async function run() {
     } catch {}
   }
 
+  // Seed mock JSON database files if they are empty
+  const seedFile = (name: string, content: any[]) => {
+    const files = fs.readdirSync(dataDir);
+    const match = files.find(f => f.includes(`(${name})`) && f.endsWith(".json")) ||
+                  files.find(f => f.includes(name) && f.endsWith(".json"));
+    const filePath = match ? path.join(dataDir, match) : path.join(dataDir, `Ticket V.2 - ${name} (${name}).json`);
+    
+    let existingContent: any[] = [];
+    if (fs.existsSync(filePath)) {
+      try {
+        existingContent = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      } catch {}
+    }
+    if (existingContent.length === 0) {
+      fs.writeFileSync(filePath, JSON.stringify(content, null, 2), "utf-8");
+    }
+  };
+
+  seedFile("Companies", [{ id1: "1", name: "Test Company", company: "1", Profiles: "" }]);
+  seedFile("Profiles", [{ id1: "1", company_id: "1", name: "Test Profile", company: "1", projects: "", Identities: "", Profile_Projects: "" }]);
+  seedFile("Projects", [{ id1: "1", company_id: "1", name: "Test Project", Companies: "", Companies1: "", Profiles: "", Conversations: "", Profile_Projects: "" }]);
+
   // Setup basic dependencies for Orchestrator
   const dbAdapter = new LocalDataAdapter();
   const toolRegistry = new ToolRegistry();

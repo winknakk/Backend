@@ -176,6 +176,40 @@ export class PromptXMcpClient {
       20000,
       context
     );
+
+    // Extract text content and parse potential JSON wraps
+    const textContent = response?.content?.[0]?.text;
+    if (typeof textContent === "string") {
+      try {
+        const jsonMatch = textContent.match(/```json\s*([\s\S]*?)\s*```/);
+        if (jsonMatch && jsonMatch[1]) {
+          const parsed = JSON.parse(jsonMatch[1]);
+          if (parsed && typeof parsed === "object") {
+            const body = parsed.body || parsed;
+            if (body && typeof body === "object" && body.response !== undefined) {
+              return body.response;
+            }
+            return body;
+          }
+        }
+      } catch (e) {
+        // Fallback
+      }
+
+      try {
+        const parsed = JSON.parse(textContent);
+        if (parsed && typeof parsed === "object") {
+          const body = parsed.body || parsed;
+          if (body && typeof body === "object" && body.response !== undefined) {
+            return body.response;
+          }
+          return body;
+        }
+      } catch (e) {
+        // Fallback
+      }
+    }
+
     return response;
   }
 }

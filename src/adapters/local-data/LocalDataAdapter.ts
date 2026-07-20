@@ -85,7 +85,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return conversations.find((c) => c.id1 === conversationId);
   }
 
-  async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any> {
     const messages = this.readTable<any>("Messages", DbMessageSchema);
 
     const maxId = messages.reduce((max, m) => {
@@ -105,6 +105,11 @@ export class LocalDataAdapter implements DatabaseAdapter {
     messages.push(newMessage);
     this.writeTable("Messages", messages);
     return newMessage;
+  }
+
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    return tickets.find((t) => String(t.conversation_id) === conversationId && t.status !== "Closed") || null;
   }
 
   async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult> {
@@ -437,7 +442,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return this.readTable<AuditLog>("Traces", AuditLogSchema);
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
     try {
       let tickets = this.readTable<any>("Tickets", DbTicketSchema);
       if (conversationId) {
@@ -445,6 +450,18 @@ export class LocalDataAdapter implements DatabaseAdapter {
       }
       if (projectId) {
         tickets = tickets.filter((t) => String(t.project_id || 1) === String(projectId));
+      }
+      if (identityId) {
+        const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+        const matchingConvIds = conversations.filter(c => String(c.identity_id) === String(identityId)).map(c => String(c.id));
+        tickets = tickets.filter(t => matchingConvIds.includes(String(t.conversation_id)));
+      }
+      if (profileId) {
+        const identities = this.readTable<any>("Identities", DbIdentitySchema);
+        const matchingIdentIds = identities.filter(i => String(i.profile_id) === String(profileId)).map(i => String(i.id));
+        const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+        const matchingConvIds = conversations.filter(c => matchingIdentIds.includes(String(c.identity_id))).map(c => String(c.id));
+        tickets = tickets.filter(t => matchingConvIds.includes(String(t.conversation_id)));
       }
       return tickets;
     } catch {

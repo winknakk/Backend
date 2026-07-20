@@ -227,12 +227,19 @@ export class FindTicketTool implements ITool {
     projectId: z.string().optional(),
     status: z.string().optional(),
     conversationId: z.string().optional(),
+    profileId: z.string().optional(),
+    identityId: z.string().optional(),
   });
   readonly outputSchema = ExecutionResultSchema;
 
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const dbAdapter = AdapterFactory.getAdapter();
-    const tickets = await dbAdapter.listAllTickets(params.conversationId, params.projectId);
+    const tickets = await dbAdapter.listAllTickets(
+      params.conversationId,
+      params.projectId,
+      params.profileId,
+      params.identityId
+    );
     let filtered = tickets;
     if (params.status) {
       filtered = tickets.filter(
@@ -535,6 +542,12 @@ export class ToolRegistry implements IToolRegistry {
   }
 
   getTool(name: string): ITool | undefined {
+    // Look for remote namespaced PromptX tool first to ensure runtime flow execution
+    for (const toolKey of this.tools.keys()) {
+      if (toolKey.startsWith(`promptx.${name}_`)) {
+        return this.tools.get(toolKey);
+      }
+    }
     return this.tools.get(name);
   }
 

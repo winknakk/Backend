@@ -45,6 +45,12 @@ class FakeMemoryService implements IMemoryService {
   async getFullConversationHistory() {
     return [];
   }
+  getDatabaseAdapter() {
+    return {
+      getLatestTicketForConversation: async () => null,
+      createTicket: async () => ({ success: true, data: { id: "1", ticket_id: "TCK-1" } }),
+    } as any;
+  }
 }
 
 class FakeMcpRouter implements IMcpToolRouter {

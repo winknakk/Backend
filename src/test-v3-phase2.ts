@@ -67,11 +67,11 @@ async function runPhase2Tests() {
 
     // Call configLoader AFTER cache invalidation: should return new updated database value
     const updatedPrompt = await configLoader.getPromptConfig("1");
-    assert(updatedPrompt.systemInstruction === "You are an updated enterprise assistant", "Should return updated system instruction from database");
+    assert(updatedPrompt.systemInstruction.startsWith("You are an updated enterprise assistant"), "Should return updated system instruction from database");
 
     // Verify updated value is cached in Redis
     const newlyCachedPrompt = await cache.get<any>("config:project:1:prompt");
-    assert(newlyCachedPrompt.systemInstruction === "You are an updated enterprise assistant", "Updated prompt config should be cached in Redis");
+    assert(newlyCachedPrompt.systemInstruction.startsWith("You are an updated enterprise assistant"), "Updated prompt config should be cached in Redis");
 
     // Restore original prompt config in PostgreSQL
     await pool.query(

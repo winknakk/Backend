@@ -17,7 +17,7 @@ async function runPhase3Tests() {
   console.log("AutomationX V3 Phase 3 Redis State & Queue Verification Tests");
   console.log("============================================================");
 
-  const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 1 });
+  const redis = new Redis(config.REDIS_URL);
   const takeoverManager = new RedisTakeoverManager();
 
   try {
@@ -117,6 +117,9 @@ async function runPhase3Tests() {
     const lockVal = await redis.get(lockKey);
     assert(lockVal === "done", "Idempotency token must be set to 'done' in Redis on successful job completion");
 
+    // Close the first worker to prevent competing for DLQ failing jobs
+    await jobQueue.disconnect();
+
     // 3. Verify Dead Letter Queue (DLQ) Fault-Tolerance
     console.log("Testing Dead Letter Queue (DLQ) Fault-Tolerance...");
     const badEventId = `evt-fail-${Date.now()}`;
@@ -162,7 +165,6 @@ async function runPhase3Tests() {
     await redis.del(`processed:event:${eventId}`);
     await redis.del(`processed:event:${badEventId}`);
     await takeoverManager.disconnect();
-    await jobQueue.disconnect();
     await failingQueue.disconnect();
     await redis.quit();
 

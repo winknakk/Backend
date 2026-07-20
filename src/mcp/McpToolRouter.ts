@@ -132,7 +132,13 @@ export class McpToolRouter implements IMcpToolRouter {
           `Running tool '${toolName}' (attempt ${attempts}/${maxAttempts})`
         );
 
-        result = await tool.execute(authResponse.sanitizedParams || params, toolContext);
+        let mappedParams = authResponse.sanitizedParams || params;
+        if (tool.definition && tool.definition.inputSchema) {
+          mappedParams = this.mapParamsDynamically(mappedParams, tool.definition.inputSchema);
+        }
+
+        result = await tool.execute(mappedParams, toolContext);
+        result = this.normalizeOutputDynamically(result);
         success = true;
         break;
       } catch (e: any) {
@@ -278,6 +284,62 @@ export class McpToolRouter implements IMcpToolRouter {
       message,
       retryable: false,
       correlationId
+    };
+  }
+
+  private mapParamsDynamically(inputParams: Record<string, any>, inputSchema: any): Record<string, any> {
+    if (!inputSchema || typeof inputSchema !== "object") return inputParams;
+
+    const expectedProperties = inputSchema.properties 
+      ? Object.keys(inputSchema.properties) 
+      : (inputSchema.type === "object" && typeof inputSchema.properties === "object" 
+          ? Object.keys(inputSchema.properties) 
+          : []);
+
+    if (expectedProperties.length === 0) return inputParams;
+
+    const normalizedExpectedMap = new Map<string, string>();
+    for (const prop of expectedProperties) {
+      const normalized = prop.toLowerCase().replace(/_/g, "");
+      normalizedExpectedMap.set(normalized, prop);
+    }
+
+    const mapped: Record<string, any> = {};
+    for (const [key, value] of Object.entries(inputParams)) {
+      const keyNormalized = key.toLowerCase().replace(/_/g, "");
+      if (normalizedExpectedMap.has(keyNormalized)) {
+        const targetKey = normalizedExpectedMap.get(keyNormalized)!;
+        mapped[targetKey] = value;
+      } else {
+        mapped[key] = value;
+      }
+    }
+
+    return mapped;
+  }
+
+  private normalizeOutputDynamically(result: any): any {
+    if (!result || typeof result !== "object") {
+      return { success: true, data: result, error: null, source: "remote" };
+    }
+
+    if ("success" in result && ("data" in result || "error" in result)) {
+      return result;
+    }
+
+    let success = true;
+    let error = null;
+
+    if (result.status === "error" || result.success === false) {
+      success = false;
+      error = result.error || result.message || "Execution failed";
+    }
+
+    return {
+      success,
+      data: result.data !== undefined ? result.data : result,
+      error,
+      source: "remote",
     };
   }
 }

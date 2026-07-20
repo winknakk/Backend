@@ -51,7 +51,7 @@ export interface IMemoryService {
   /**
    * Appends a new conversation log (either from the user, AI, or human support) to NocoDB.
    */
-  appendConversationLog(conversationId: string, role: "customer" | "ai" | "system", message: string): Promise<void>;
+  appendConversationLog(conversationId: string, role: "customer" | "ai" | "system", message: string, externalId?: string): Promise<void>;
 
   /**
    * Creates or returns an active conversation ID for a client.
@@ -67,4 +67,9 @@ export interface IMemoryService {
    * Retrieves the full conversation history with message Ids for memory tracking.
    */
   getFullConversationHistory(conversationId: string): Promise<Array<{ id: string; role: string; content: string; timestamp: string }>>;
+
+  /**
+   * Returns the underlying DatabaseAdapter instance.
+   */
+  getDatabaseAdapter(): any;
 }

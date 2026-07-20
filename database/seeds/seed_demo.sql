@@ -29,7 +29,7 @@ ON CONFLICT (id) DO UPDATE SET
 INSERT INTO profiles (id, company_id, name) VALUES 
   (1, 1, 'John Doe'),
   (2, 2, 'Jane Smith'),
-  (5, 5, 'Akkharin Laksana'),
+  (999, 5, 'Akkharin Laksana'),
   (11, 5, 'SSO Test Customer'),
   (12, 5, 'CRA Test Customer'),
   (10, 5, 'LINE Test User'),
@@ -39,7 +39,7 @@ ON CONFLICT (id) DO UPDATE SET company_id = EXCLUDED.company_id, name = EXCLUDED
 INSERT INTO profile_projects (profile_id, project_id) VALUES 
   (1, 1),
   (2, 2),
-  (5, 8),
+  (999, 8),
   (11, 11),
   (12, 12),
   (10, 1),
@@ -50,7 +50,7 @@ ON CONFLICT (profile_id, project_id) DO NOTHING;
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES 
   ('1', 1, 'line', 'U123456'),
   ('2', 2, 'whatsapp', 'W987654'),
-  ('7', 5, 'line', 'Uad28c1eabbcbe1608e038d4d162f4944'),
+  ('999', 999, 'line', 'Uad28c1eabbcbe1608e038d4d162f4944'),
   ('11', 11, 'line', 'U4be68575767f6b4a56e7d079f4c6d442'),
   ('12', 12, 'line', 'U60cacc31b2bb8a8ea8fb1779265edbc9'),
   ('13', 10, 'line', 'U6256f0c4dbb64edacf9eea92904e49b1'),
@@ -62,7 +62,7 @@ INSERT INTO conversations (id, identity_id, project_id, channel, status, handled
   (1, 1, 1, 'line', 'open', 'ai', NULL),
   (2, 2, 2, 'whatsapp', 'open', 'human', 'agent_alice'),
   (3, 1, 1, 'line', 'closed', 'ai', NULL),
-  (5, 7, 8, 'line', 'open', 'ai', NULL),
+  (999, 999, 8, 'line', 'open', 'ai', NULL),
   (11, 11, 11, 'line', 'open', 'ai', NULL),
   (12, 12, 12, 'line', 'open', 'ai', NULL),
   (67, 67, 8, 'line', 'open', 'ai', NULL)
@@ -77,7 +77,7 @@ INSERT INTO messages (id, conversation_id, role, content) VALUES
   (5, 2, 'human', 'Hi Jane, this is Alice from billing. How can I help?'),
   (6, 3, 'customer', 'Hi there, how does the system work?'),
   (7, 3, 'ai', 'Our system automatically tracks issues and resolves tickets.'),
-  (8, 5, 'customer', 'ระบบล่ม ขึ้น Error 404 Server เข้าไม่ได้เลย รีบด่วน'),
+  (8, 999, 'customer', 'ระบบล่ม ขึ้น Error 404 Server เข้าไม่ได้เลย รีบด่วน'),
   (9, 11, 'customer', 'ขอความช่วยเหลือ เข้าใช้งานระบบ SSO ไม่ได้ครับ'),
   (10, 12, 'customer', 'สอบถามเรื่องสิทธิ์ใช้งานระบบ CRA หน่อยครับ')
 ON CONFLICT (id) DO NOTHING;
@@ -164,13 +164,47 @@ INSERT INTO project_routing_rules (project_id, rule_type, conditions, target_han
 ON CONFLICT DO NOTHING;
 
 INSERT INTO project_mcp_permissions (project_id, tool_name, allowed_roles, policy_rules) VALUES
+  -- Project 1 (Demo)
   (1, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
   (1, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (1, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (1, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (1, 'merge_ticket', ARRAY['agent'], '{}'),
+  (1, 'close_ticket', ARRAY['agent'], '{}'),
+  (1, 'assign_ticket', ARRAY['agent'], '{}'),
+  (1, 'update_summary', ARRAY['agent'], '{}'),
+  (1, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 2
   (2, 'create_ticket', ARRAY['agent'], '{}'),
+  (2, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (2, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (2, 'close_ticket', ARRAY['agent'], '{}'),
+  (2, 'assign_ticket', ARRAY['agent'], '{}'),
+  (2, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 8 (Avalant 24/7)
   (8, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
   (8, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (8, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (8, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (8, 'merge_ticket', ARRAY['agent'], '{}'),
+  (8, 'close_ticket', ARRAY['agent'], '{}'),
+  (8, 'assign_ticket', ARRAY['agent'], '{}'),
+  (8, 'update_summary', ARRAY['agent'], '{}'),
+  (8, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 11 (SSO)
   (11, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
   (11, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (11, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (11, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (11, 'close_ticket', ARRAY['agent'], '{}'),
+  (11, 'assign_ticket', ARRAY['agent'], '{}'),
+  (11, 'escalate_to_pm', ARRAY['agent'], '{}'),
+  -- Project 12 (CRA)
   (12, 'create_ticket', ARRAY['customer', 'agent'], '{}'),
-  (12, 'search_project_docs', ARRAY['customer', 'agent'], '{}')
+  (12, 'search_project_docs', ARRAY['customer', 'agent'], '{}'),
+  (12, 'get_ticket_status', ARRAY['customer', 'agent'], '{}'),
+  (12, 'find_ticket', ARRAY['customer', 'agent'], '{}'),
+  (12, 'close_ticket', ARRAY['agent'], '{}'),
+  (12, 'assign_ticket', ARRAY['agent'], '{}'),
+  (12, 'escalate_to_pm', ARRAY['agent'], '{}')
 ON CONFLICT (project_id, tool_name) DO NOTHING;

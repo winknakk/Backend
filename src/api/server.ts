@@ -32,6 +32,7 @@ import { IngestionService } from "../aiops/ragops/IngestionService";
 import { EvalTestRunner } from "../aiops/llmops/EvalTestRunner";
 import { registerAdminRoutes } from "./routes/admin";
 import { PolicyEngine } from "../policy/PolicyEngine";
+import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { ExecutionTraceService } from "../execution/ExecutionTrace";
 import { McpToolRouter } from "../mcp/McpToolRouter";
 import { MemoryService } from "../memory/MemoryService";
@@ -64,12 +65,14 @@ import Redis from "ioredis";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any });
+fastify.register(websocketPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const adminConnections = new Set<any>();
 
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
 const ticketService = new TicketService(dbAdapter);
+const runtimeContextResolver = new RuntimeContextResolver(dbAdapter);
 
 const embeddingService = new EmbeddingService();
 const vectorStore =
@@ -128,7 +131,7 @@ fastify.addHook("onRequest", (request, reply, done) => {
   const correlationId = (request.headers["x-correlation-id"] as string) || (request.headers["x-request-id"] as string) || randomUUID();
   const requestId = (request.headers["x-request-id"] as string) || randomUUID();
   const projectId = (request.headers["x-project-id"] as string) || (request.query as any)?.projectId || "1";
-  
+
   const context = {
     correlationId,
     requestId,
@@ -190,8 +193,13 @@ async function bootstrap() {
     if (job.data.channel === "WebChat") {
       try {
         const webhookUrl = `${config.PROMPTX_FLOW_WEBHOOK_URL}/sync`;
+
+        // Ensure local conversation and identity exist first for the stable customer identity
+        const localConvId = await memoryService.ensureConversation(job.data.senderId, "1", "WebChat");
+        serverLogger.info(`[BullMQ Worker] Ensured local conversation (ID: ${localConvId}) for customer: ${job.data.senderId}`);
+
         serverLogger.info(`[BullMQ Worker] Forwarding WebChat message to PromptX Flow: ${webhookUrl}`);
-        
+
         const response = await axios.post(webhookUrl, {
           channel: "WebChat",
           customer_ref: job.data.senderId,
@@ -200,7 +208,7 @@ async function bootstrap() {
 
         const replyText = response.data.reply_text || "No reply from Agent.";
         const convId = response.data.conversation_id;
-        
+
         serverLogger.info(`[BullMQ Worker] Received sync reply from PromptX Flow: "${replyText}" (convId: ${convId})`);
 
         const sessionContext = await memoryService.loadSessionContext(job.data.senderId, "WebChat");
@@ -217,7 +225,8 @@ async function bootstrap() {
 
         return { text: replyText, recipientId: job.data.senderId, channel: "WebChat" };
       } catch (err: any) {
-        serverLogger.error({ error: err.message }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
+        const responseData = err.response?.data;
+        serverLogger.error({ error: err.message, responseData }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
         throw err;
       }
     } else {
@@ -361,6 +370,11 @@ fastify.post("/webhook/message", async (request, reply) => {
   }
 });
 
+fastify.post("/api/v1/internal/debug-log", async (request, reply) => {
+  serverLogger.info({ debugData: request.body }, "[Cloud Debug Log]");
+  return reply.code(200).send({ success: true });
+});
+
 fastify.get("/health", async (request, reply) => {
   if (GracefulShutdownService.checkShuttingDown()) {
     return reply.code(503).send({
@@ -419,7 +433,7 @@ fastify.get("/metrics", async (request, reply) => {
 fastify.get("/metrics/prometheus", async (request, reply) => {
   const mainMetrics = MetricsService.getInstance().getMetrics();
   const cacheMetrics = CacheService.getInstance().getMetrics();
-  
+
   let qDepth = 0;
   try {
     qDepth = typeof (jobQueue as any).getQueueDepth === "function" ? await (jobQueue as any).getQueueDepth() : 0;
@@ -525,13 +539,26 @@ fastify.get("/agents", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
+
+  let conversationId = payload.conversationId;
+  const parsedConvId = parseInt(String(conversationId), 10);
+  if (!conversationId || isNaN(parsedConvId) || parsedConvId <= 0) {
+    const convRes = await pool.query(
+      `SELECT id FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+    );
+    if (convRes.rows.length > 0) {
+      conversationId = convRes.rows[0].id.toString();
+    }
+  }
+
   const result = await ticketService.createTicket({
-    conversationId: body.conversationId,
-    subject: body.subject,
-    summary: body.summary,
-    severity: body.severity,
-    priority: body.priority,
-    projectId: body.projectId || "1",
+    conversationId,
+    subject: payload.subject || "No Subject Provided",
+    summary: payload.summary || "No Summary Provided",
+    severity: payload.severity || "Medium",
+    priority: payload.priority || "P3",
+    projectId: payload.projectId || "1",
   });
   if (!result.success || !result.data) {
     return reply.code(200).send(result);
@@ -588,21 +615,42 @@ fastify.post("/api/v1/tickets", async (request, reply) => {
 
 fastify.get("/api/v1/internal/tickets/status", async (request, reply) => {
   const query = request.query as any;
-  const tickets = await dbAdapter.listAllTickets(query.conversationId);
+  let projectId = query.projectId;
+
+  if ((!projectId || projectId === "" || projectId === "null" || projectId === "undefined") && query.conversationId) {
+    const context = await runtimeContextResolver.resolveRuntimeContext(query.conversationId);
+    if (context && context.projectId) {
+      projectId = String(context.projectId);
+    }
+  }
+
+  const tickets = await dbAdapter.listAllTickets(
+    query.conversationId,
+    projectId,
+    query.profileId,
+    query.identityId
+  );
   return reply.code(200).send(tickets);
 });
 
 fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) => {
   const body = request.body as any;
-  await dbAdapter.updateHandoffState(body.conversationId, "human");
+  const payload = body.data ? { ...body.data } : body;
+  const conversationId = payload.conversationId;
+  const parsed = parseInt(String(conversationId), 10);
+  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
+    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
+  }
+  await dbAdapter.updateHandoffState(conversationId, "human");
   if (takeoverManager) {
     const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-    takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
+    takeoverManager.setTakeoverState(conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
   }
   return reply.code(200).send({ success: true, handled_by: "human" });
 });
 
-fastify.get("/api/admin/socket", { websocket: true }, (socket, req) => {
+fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
+  const socket = (connection as any).socket;
   serverLogger.info("Admin WebSocket connection established");
   adminConnections.add(socket);
 
@@ -706,7 +754,12 @@ fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
 
 fastify.post("/api/v1/internal/messages", async (request, reply) => {
   const body = request.body as any;
-  await dbAdapter.saveMessage(body.conversationId, body.role || "human", body.content);
+  await dbAdapter.saveMessage(
+    body.conversationId,
+    body.role || "human",
+    body.content,
+    body.externalId || body.external_id
+  );
   return reply.code(200).send({ success: true });
 });
 
@@ -727,6 +780,11 @@ fastify.get("/api/v1/internal/messages", async (request, reply) => {
 
 fastify.get("/api/v1/internal/conversations/identity", async (request, reply) => {
   const query = request.query as any;
+  const conversationId = query.conversationId;
+  const parsed = parseInt(String(conversationId), 10);
+  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
+    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
+  }
   const ident = await dbAdapter.getConversationIdent(query.conversationId);
   return reply.code(200).send(ident);
 });
@@ -739,14 +797,9 @@ fastify.get("/api/v1/internal/tickets/details", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/update-plane", async (request, reply) => {
   const body = request.body as any;
-  try {
-    const planeIssueId = await planeService.resolvePlaneWorkItemId(body.ticketId, body.planeIssueId);
-    await dbAdapter.updateTicketPlaneIssue(body.ticketId, planeIssueId);
-    return reply.code(200).send({ success: true, planeIssueId });
-  } catch (error: any) {
-    serverLogger.error({ ticketId: body.ticketId, error: error.message }, "Plane ticket link validation failed");
-    return reply.code(502).send({ error: error.message });
-  }
+  const payload = body.data ? { ...body.data } : body;
+  await dbAdapter.updateTicketPlaneIssue(payload.ticketId, payload.planeIssueId);
+  return reply.code(200).send({ success: true });
 });
 
 fastify.post("/api/v1/webhooks/plane", async (request, reply) => {
@@ -783,11 +836,12 @@ fastify.post("/api/v1/webhooks/plane", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -796,11 +850,12 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("assign_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool assign_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -809,11 +864,12 @@ fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("merge_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool merge_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -822,11 +878,12 @@ fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/update-summary", async (request, reply) => {
   const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
   const tool = toolRegistry.getTool("update_summary");
   if (!tool) return reply.code(500).send({ error: "Tool update_summary not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(body, context);
+    const result = await tool.execute(payload, context);
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
@@ -837,16 +894,16 @@ fastify.get("/api/v1/internal/identities/search", async (request, reply) => {
   const query = request.query as any;
   const channel = query.channel;
   const channelRef = query.channelRef || query.channel_ref;
-  
+
   const res = await pool.query(
     `SELECT * FROM identities WHERE channel = $1 AND channel_ref = $2 LIMIT 1`,
     [channel, channelRef]
   );
-  
+
   if (res.rows.length === 0) {
     return reply.code(200).send([]);
   }
-  
+
   const ident = res.rows[0];
   return reply.code(200).send([
     {
@@ -883,21 +940,37 @@ fastify.get("/api/v1/internal/identities/details", async (request, reply) => {
 fastify.get("/api/v1/internal/profiles/details", async (request, reply) => {
   const query = request.query as any;
   const profileId = query.profileId || query.profile_id;
-  
+
+  if (!profileId || profileId === "null" || profileId === "undefined") {
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        company_id: { id: null },
+        name: null
+      }
+    });
+  }
+
   const res = await pool.query(
     `SELECT * FROM profiles WHERE id = $1 LIMIT 1`,
     [profileId]
   );
-  
+
   if (res.rows.length === 0) {
-    return reply.code(404).send({ error: "Profile not found" });
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        company_id: { id: null },
+        name: null
+      }
+    });
   }
-  
+
   const prof = res.rows[0];
   return reply.code(200).send({
     id: prof.id,
     fields: {
-      company_id: prof.company_id ? { id: prof.company_id } : null,
+      company_id: prof.company_id ? { id: prof.company_id } : { id: null },
       name: prof.name
     }
   });
@@ -906,22 +979,62 @@ fastify.get("/api/v1/internal/profiles/details", async (request, reply) => {
 fastify.get("/api/v1/internal/companies/details", async (request, reply) => {
   const query = request.query as any;
   const companyId = query.companyId || query.company_id;
-  
+
+  if (!companyId || companyId === "null" || companyId === "undefined") {
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        name: null,
+        ai_profile_context: "ผู้ใช้นี้ยังไม่มีข้อมูลบัญชีที่เชื่อมโยงในระบบ กรุณาขอข้อมูลชื่อและชื่อบริษัทของลูกค้าก่อนให้บริการ"
+      }
+    });
+  }
+
   const res = await pool.query(
     `SELECT * FROM companies WHERE id = $1 LIMIT 1`,
     [companyId]
   );
-  
+
   if (res.rows.length === 0) {
-    return reply.code(404).send({ error: "Company not found" });
+    return reply.code(200).send({
+      id: null,
+      fields: {
+        name: null,
+        ai_profile_context: "ผู้ใช้นี้ยังไม่มีข้อมูลบัญชีที่เชื่อมโยงในระบบ กรุณาขอข้อมูลชื่อและชื่อบริษัทของลูกค้าก่อนให้บริการ"
+      }
+    });
   }
-  
+
   const comp = res.rows[0];
   return reply.code(200).send({
     id: comp.id,
     fields: {
-      name: comp.name
+      name: comp.name,
+      ai_profile_context: comp.ai_profile_context
     }
+  });
+});
+
+fastify.all("/api/v1/internal/rag", async (request, reply) => {
+  const method = request.method;
+  let query: string;
+  let projectId: string;
+
+  if (method === "GET" || method === "DELETE") {
+    const q = request.query as any;
+    query = q.query;
+    projectId = q.projectId || q.project_id || "1";
+  } else {
+    const body = (request.body || {}) as any;
+    const payload = body.data ? { ...body.data } : body;
+    query = payload.query;
+    projectId = payload.projectId || payload.project_id || "1";
+  }
+
+  const results = await knowledgeService.searchKnowledgeBase(query || "", String(projectId));
+  return reply.code(200).send({
+    success: true,
+    data: { results }
   });
 });
 
@@ -939,22 +1052,45 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   const projectId = query.projectId || request.headers["x-project-id"];
 
   let res;
-  if (projectId) {
+  const isPromptXId = String(identityId).startsWith("convo_") ||
+    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(identityId));
+
+  if (isPromptXId) {
     res = await pool.query(
-      `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
-      [identityId, status, parseInt(String(projectId), 10) || null]
+      `SELECT * FROM conversations WHERE promptx_conversation_id = $1 LIMIT 1`,
+      [identityId]
     );
+    if (res.rows.length === 0) {
+      const fallbackRes = await pool.query(
+        `SELECT * FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+      );
+      if (fallbackRes.rows.length > 0) {
+        const convId = fallbackRes.rows[0].id;
+        await pool.query(
+          `UPDATE conversations SET promptx_conversation_id = $1 WHERE id = $2`,
+          [identityId, convId]
+        );
+        res = fallbackRes;
+      }
+    }
   } else {
-    res = await pool.query(
-      `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
-      [identityId, status]
-    );
+    if (projectId) {
+      res = await pool.query(
+        `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
+        [identityId, status, parseInt(String(projectId), 10) || null]
+      );
+    } else {
+      res = await pool.query(
+        `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
+        [identityId, status]
+      );
+    }
   }
-  
-  if (res.rows.length === 0) {
+
+  if (!res || res.rows.length === 0) {
     return reply.code(200).send([]);
   }
-  
+
   const conv = res.rows[0];
   return reply.code(200).send([
     {
@@ -978,9 +1114,19 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
   const channel = body.channel;
   const status = body.status || "open";
   const handledBy = body.handledBy || body.handled_by || "ai";
-  const projectId = body.projectId || body.project_id || request.headers["x-project-id"];
-  const parsedProjectId = projectId ? (parseInt(String(projectId), 10) || null) : null;
-  
+  let projectId = body.projectId || body.project_id || request.headers["x-project-id"];
+  let parsedProjectId = projectId ? (parseInt(String(projectId), 10) || null) : null;
+
+  if (!parsedProjectId && body.destination) {
+    const channelRes = await pool.query(
+      "SELECT project_id FROM project_channels WHERE channel_id = $1 LIMIT 1",
+      [body.destination]
+    );
+    if (channelRes.rows.length > 0) {
+      parsedProjectId = channelRes.rows[0].project_id;
+    }
+  }
+
   // Get next id
   const nextIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
   const nextId = nextIdRes.rows[0].next_id;
@@ -991,7 +1137,7 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
      RETURNING *`,
     [nextId, identityId, channel, status, handledBy, parsedProjectId]
   );
-  
+
   const conv = res.rows[0];
   return reply.code(200).send({
     id: conv.id,
@@ -1009,6 +1155,11 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
 
 fastify.get("/api/v1/internal/conversations/details", async (request, reply) => {
   const query = request.query as any;
+  const conversationId = query.conversationId;
+  const parsed = parseInt(String(conversationId), 10);
+  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
+    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
+  }
   const conv = await dbAdapter.getConversation(query.conversationId);
   if (!conv) {
     return reply.code(404).send({ error: "Conversation not found" });
@@ -1027,7 +1178,6 @@ registerAdminRoutes(fastify, {
 });
 
 // Register WebChat Gateway and WebSockets
-fastify.register(websocketPlugin);
 fastify.register(WebChatGateway);
 
 const start = async () => {

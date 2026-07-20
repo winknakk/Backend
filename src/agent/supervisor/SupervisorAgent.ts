@@ -34,6 +34,20 @@ export class SupervisorAgent implements IAgentRouter {
 
     let decision = "support";
 
+    if (this.isTicketFollowUp(message.text)) {
+      decision = "ticket";
+      logger.info(
+        { requestId: reqId, conversationId, decision, component: "SupervisorAgent" },
+        `Routing decision: resolved agent target is "${decision}"`
+      );
+      MetricsService.getInstance().recordRoutingDecision(decision);
+      const ticketAgent = this.agents.get(decision) || this.agents.get("support");
+      if (!ticketAgent) {
+        throw new Error(`Critical routing error: default "support" agent is not registered.`);
+      }
+      return ticketAgent;
+    }
+
     if (process.env.NODE_ENV === "test") {
       decision = this.fallbackClassify(message.text);
       logger.info(
@@ -121,8 +135,29 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
   private fallbackClassify(text: string): string {
     const lowerText = text.toLowerCase();
 
-    // Ticket keywords
-    if (lowerText.includes("ตั๋ว") || lowerText.includes("ticket") || lowerText.includes("เปิดเรื่อง")) {
+    if (this.isTicketFollowUp(text) || lowerText.includes("สถานะ") || lowerText.includes("ปิด")) {
+      return "ticket";
+    }
+
+    // Ticket keywords - creation, status, management
+    if (
+      lowerText.includes("ตั๋ว") ||
+      lowerText.includes("ticket") ||
+      lowerText.includes("เปิดเรื่อง") ||
+      lowerText.includes("สถานะ") ||
+      lowerText.includes("status") ||
+      lowerText.includes("ปิดตั๋ว") ||
+      lowerText.includes("close ticket") ||
+      lowerText.includes("merge") ||
+      lowerText.includes("รวมตั๋ว") ||
+      lowerText.includes("มอบหมาย") ||
+      lowerText.includes("assign") ||
+      lowerText.includes("ติดตาม") ||
+      lowerText.includes("follow up") ||
+      lowerText.includes("ความคืบหน้า") ||
+      lowerText.includes("เรื่องเดิม") ||
+      lowerText.includes("TCK-")
+    ) {
       return "ticket";
     }
 
@@ -131,11 +166,34 @@ Respond with ONLY the name of the target agent ("ticket", "knowledge", or "suppo
       lowerText.includes("คู่มือ") ||
       lowerText.includes("login") ||
       lowerText.includes("expired") ||
-      lowerText.includes("sso")
+      lowerText.includes("sso") ||
+      lowerText.includes("วิธี") ||
+      lowerText.includes("how to") ||
+      lowerText.includes("ใช้งาน")
     ) {
       return "knowledge";
     }
 
     return "support";
+  }
+
+  private isTicketFollowUp(text: string): boolean {
+    const lowerText = text.toLowerCase();
+    return (
+      lowerText.includes("tck-") ||
+      lowerText.includes("ตั๋ว") ||
+      lowerText.includes("ticket") ||
+      lowerText.includes("เลขอะไร") ||
+      lowerText.includes("ปิดเลย") ||
+      lowerText.includes("ปิดอันนี้") ||
+      lowerText.includes("อันนี้") ||
+      lowerText.includes("อันเมื่อกี้") ||
+      lowerText.includes("เมื่อกี้") ||
+      lowerText.includes("เรื่องเดิม") ||
+      lowerText.includes("เปิดใหม่") ||
+      lowerText.includes("รวมสองใบ") ||
+      lowerText.includes("อัปเดตอันเดิม") ||
+      lowerText.includes("อัพเดตอันเดิม")
+    );
   }
 }
