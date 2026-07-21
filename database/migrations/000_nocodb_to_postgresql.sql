@@ -36,7 +36,7 @@ CREATE TABLE profile_projects (
 );
 
 CREATE TABLE identities (
-    id VARCHAR(50) PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     profile_id INT REFERENCES profiles(id) ON DELETE SET NULL,
     channel VARCHAR(50) NOT NULL,
     channel_ref VARCHAR(255) NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE identities (
 CREATE TABLE conversations (
     id INT PRIMARY KEY,
     promptx_conversation_id VARCHAR(100) UNIQUE,
-    identity_id VARCHAR(50) REFERENCES identities(id) ON DELETE SET NULL,
+    identity_id INTEGER REFERENCES identities(id) ON DELETE SET NULL,
     project_id INT REFERENCES projects(id) ON DELETE SET NULL,
     status VARCHAR(50) NOT NULL,
     channel VARCHAR(50) NOT NULL,
@@ -168,7 +168,7 @@ INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('7', 5, 'l
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('8', 6, 'email', 'wasinee@novamed.th');
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('9', 7, 'email', 'wasineessssss@novamed.th');
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('10', 8, 'whatsapp', '+66823456789');
-INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('-*', 9, 'email', 'supachai@sunrisefinance.th');
+INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('11', 9, 'email', 'supachai@sunrisefinance.th');
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('12', 10, 'line', 'U6256f0c4dbb64edacf9eea92904e49b1');
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('13', 11, 'line_group', 'C1f1e16d088840fb3201bc0af9baa7cef');
 INSERT INTO identities (id, profile_id, channel, channel_ref) VALUES ('14', NULL, 'line', 'Uunknown99999');

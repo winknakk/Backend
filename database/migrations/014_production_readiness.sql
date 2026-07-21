@@ -110,3 +110,20 @@ ALTER TABLE tickets
 -- 7. AUDIT LOGS OPERATOR LINK
 ALTER TABLE admin_audit_logs
   ADD COLUMN IF NOT EXISTS operator_id INTEGER REFERENCES operators(id) ON DELETE SET NULL;
+
+-- 8. AI MEMORY (Long-Term Memory)
+CREATE TABLE IF NOT EXISTS ai_memory (
+  id               SERIAL PRIMARY KEY,
+  profile_id       INTEGER REFERENCES profiles(id) ON DELETE CASCADE,
+  project_id       INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  memory_type      VARCHAR(50) NOT NULL CHECK (memory_type IN ('preference','fact','issue','resolution','context')),
+  key              VARCHAR(255) NOT NULL,
+  value            TEXT NOT NULL,
+  value_embedding  TEXT,
+  source_conv_id   INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+  source_ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL,
+  confidence       NUMERIC(3,2) NOT NULL DEFAULT 1.00,
+  expires_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

@@ -7,6 +7,7 @@ import { ExecutionResult } from "../schemas/validation";
 import { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
 import { MetricsService } from "../observability/MetricsService";
+import { IssueSessionResolver } from "../runtime/IssueSessionResolver";
 
 const logger = createLogger("McpToolRouter");
 
@@ -30,6 +31,51 @@ export class McpToolRouter implements IMcpToolRouter {
       userRole: "customer",
     };
     const agentId = sessionContext.activeAgentId || "unknown-agent";
+
+    // 0. Enforce local capability-based IssueSession flags checks
+    const activeSession = IssueSessionResolver.current();
+    if (activeSession) {
+      if (!activeSession.canExecuteTool(toolName)) {
+        const reason = `Tool execution blocked by active IssueSession flags (state: ${activeSession.state}, allowToolExecution: ${activeSession.flags.allowToolExecution})`;
+        const denyTraceId = await this.executionTraceService.startTrace({
+          sessionId: sessionContext.sessionId,
+          agentId,
+          toolName,
+          reason,
+          arguments: {
+            agentId,
+            toolName,
+            reason,
+            params,
+          },
+          requestId: sessionContext.requestId,
+          conversationId: sessionContext.conversationId,
+          parentTraceId: sessionContext.parentTraceId,
+        });
+        await this.executionTraceService.failTrace(denyTraceId, reason);
+
+        logger.warn(
+          {
+            requestId: sessionContext.requestId,
+            conversationId: sessionContext.conversationId,
+            traceId: denyTraceId,
+            agentId,
+            toolName,
+            reason,
+            component: "McpToolRouter",
+            durationMs: timer(),
+          },
+          `Tool call '${toolName}' rejected by IssueSession flags. Reason: ${reason}`
+        );
+        return {
+          success: false,
+          data: null,
+          error: reason,
+          source: "policy_engine",
+          executionId: denyTraceId,
+        };
+      }
+    }
 
     // 1. Authorize Tool Call through Policy Engine
     const authResponse = await this.policyEngine.authorizeToolCall(toolName, params, policyContext);

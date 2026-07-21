@@ -7,6 +7,23 @@
 -- MUST RUN AFTER: 014_production_readiness.sql
 -- ============================================================
 
+-- 0. HELPER FUNCTIONS REQUIRED FOR MIGRATION
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE OR REPLACE FUNCTION uuid_generate_v7()
+RETURNS UUID AS $$
+DECLARE
+  unix_ts_ms BYTEA;
+  uuid_bytes BYTEA;
+BEGIN
+  unix_ts_ms := substring(int8send((extract(epoch from clock_timestamp()) * 1000)::bigint) from 3);
+  uuid_bytes := uuid_send(gen_random_uuid());
+  uuid_bytes := overlay(uuid_bytes placing unix_ts_ms from 1 for 6);
+  uuid_bytes := set_bit(uuid_bytes, 52, 1);
+  uuid_bytes := set_bit(uuid_bytes, 53, 1);
+  RETURN encode(uuid_bytes, 'hex')::uuid;
+END $$ LANGUAGE plpgsql VOLATILE;
+
 -- 1. WEBHOOK EVENTS (Ingestion Idempotency Aggregate Root)
 CREATE TABLE IF NOT EXISTS webhook_events (
   id                UUID PRIMARY KEY DEFAULT uuid_generate_v7(),
@@ -72,6 +89,24 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
   embedding     TEXT NOT NULL DEFAULT '',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 2.1 CONVERSATION HANDOFFS (AI-to-Human Handover Logs)
+CREATE TABLE IF NOT EXISTS conversation_handoffs (
+  id               SERIAL PRIMARY KEY,
+  conversation_id  INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  project_id       INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  from_owner       VARCHAR(20) NOT NULL CHECK (from_owner IN ('ai','human','system')),
+  to_owner         VARCHAR(20) NOT NULL CHECK (to_owner IN ('ai','human','system')),
+  from_operator_id INTEGER REFERENCES operators(id) ON DELETE SET NULL,
+  to_operator_id   INTEGER REFERENCES operators(id) ON DELETE SET NULL,
+  trigger_type     VARCHAR(50) NOT NULL DEFAULT 'unknown' CHECK (trigger_type IN ('customer_request','ai_escalation','operator_claim','operator_release','timeout_expired','force_release','sla_breach','system')),
+  reason           TEXT,
+  started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ended_at         TIMESTAMPTZ,
+  context_snapshot JSONB NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_handoffs_conversation ON conversation_handoffs(conversation_id, started_at DESC);
 
 -- 3. SOFT DELETE COLUMNS
 ALTER TABLE conversations  ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;

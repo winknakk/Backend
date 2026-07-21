@@ -1167,6 +1167,130 @@ fastify.get("/api/v1/internal/conversations/details", async (request, reply) => 
   return reply.code(200).send(conv);
 });
 
+fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
+  const body = request.body as any;
+  const senderId = body.senderId || body.sender_ref;
+  const channel = body.channel || "LINE";
+  const messageText = body.messageText || body.message || "";
+  const isMentioned = body.isMentioned === true || body.isMentioned === "true";
+
+  if (!senderId) {
+    return reply.code(400).send({ error: "Bad Request", message: "Missing senderId" });
+  }
+
+  try {
+    // 1. Ensure conversation and identity exist first for the customer
+    await memoryService.ensureConversation(senderId, "1", channel);
+
+    // 2. Load context
+    const sessionContext = await memoryService.loadSessionContext(senderId, channel);
+    const conversationId = sessionContext.conversationId;
+
+    // 3. Find identity & profile details
+    const identityResult = await pool.query(
+      `SELECT i.id AS identity_id, i.profile_id, p.company_id, p.name AS profile_name
+       FROM identities i
+       JOIN profiles p ON p.id = i.profile_id
+       WHERE LOWER(i.channel) = LOWER($1) AND i.channel_ref = $2
+       LIMIT 1`,
+      [channel, senderId]
+    );
+
+    const identityRow = identityResult.rows[0];
+    const profileId = identityRow?.profile_id;
+    const profileName = identityRow?.profile_name || "Unknown Customer";
+    const companyId = identityRow?.company_id || 1;
+
+    // Get company details
+    const companyResult = await pool.query(`SELECT id, name FROM companies WHERE id = $1 LIMIT 1`, [companyId]);
+    const companyName = companyResult.rows[0]?.name || "Default Company";
+
+    // 4. Check group policy / shouldProcess
+    const policyCheck = await orchestrator.conversationResolver.shouldProcess({
+      senderId,
+      channel,
+      message: messageText,
+      isMentioned
+    } as any, conversationId);
+
+    // 5. Get active ticket details
+    const activeTicket = await dbAdapter.getLatestTicketForConversation(conversationId);
+
+    // 6. Build response components
+    const identity = {
+      id: identityRow?.identity_id,
+      profile_id: profileId,
+      channel,
+      channel_ref: senderId,
+      name: profileName
+    };
+
+    const profile = {
+      id: profileId,
+      company_id: companyId,
+      name: profileName
+    };
+
+    const company = {
+      id: companyId,
+      name: companyName
+    };
+
+    const conversation = {
+      id: conversationId,
+      identity_id: identityRow?.identity_id,
+      status: policyCheck.shouldProcess ? sessionContext.status : "muted",
+      handledBy: sessionContext.handledBy,
+      channel,
+      muteReason: policyCheck.shouldProcess ? null : policyCheck.reason
+    };
+
+    const ticket = activeTicket ? {
+      id: activeTicket.id,
+      ticketCode: activeTicket.ticket_id,
+      status: activeTicket.status,
+      priority: activeTicket.priority,
+      slaBreached: activeTicket.sla_breached || false
+    } : null;
+
+    // Check if human takeover is active
+    const takeoverState = await orchestrator.takeoverManager.getTakeoverState(conversationId);
+    const isHumanTakeover = takeoverState.status === "ACTIVE_HUMAN" || takeoverState.status === "PENDING_HUMAN" || sessionContext.handledBy === "human";
+
+    // Build runtimeFlags
+    const runtimeFlags = {
+      allowReply: policyCheck.shouldProcess && !isHumanTakeover,
+      allowToolExecution: policyCheck.shouldProcess && !isHumanTakeover,
+      allowWorkflow: policyCheck.shouldProcess,
+      allowMemoryWrite: policyCheck.shouldProcess && !isHumanTakeover
+    };
+
+    // Load message history
+    const history = await memoryService.getConversationHistory(conversationId, 10);
+    const historySummary = history.map(h => `${h.role === 'customer' ? 'Customer' : h.role === 'ai' ? 'Assistant' : 'Support'}: ${h.content}`).join("\n");
+
+    return reply.code(200).send({
+      identity,
+      profile,
+      company,
+      conversation,
+      ticket,
+      runtimeFlags,
+      policy: {
+        shouldProcess: policyCheck.shouldProcess,
+        reason: policyCheck.reason
+      },
+      sessionMetadata: {
+        resolvedAt: new Date().toISOString()
+      },
+      historySummary
+    });
+  } catch (err: any) {
+    serverLogger.error({ error: err.message, senderId }, "Failed to resolve session context");
+    return reply.code(500).send({ error: "Internal Server Error", message: err.message });
+  }
+});
+
 // Register Phase 9 Admin Routes
 registerAdminRoutes(fastify, {
   metricAggregator,

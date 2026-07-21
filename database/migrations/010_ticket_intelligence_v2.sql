@@ -9,6 +9,10 @@ BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'tickets' AND column_name = 'id' AND data_type = 'character varying') THEN
     ALTER TABLE tickets RENAME COLUMN id TO ticket_id;
     ALTER TABLE tickets ADD COLUMN id SERIAL PRIMARY KEY;
+  ELSE
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'tickets_pkey') THEN
+      ALTER TABLE tickets ADD CONSTRAINT tickets_pkey PRIMARY KEY (id);
+    END IF;
   END IF;
 END $$;
 
