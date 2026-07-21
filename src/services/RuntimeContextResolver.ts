@@ -1,6 +1,7 @@
 import { DatabaseAdapter } from "../adapters/types";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { createLogger } from "../observability/logger";
+import { IssueSessionResolver } from "../runtime/IssueSessionResolver";
 
 const logger = createLogger("RuntimeContextResolver");
 
@@ -26,6 +27,15 @@ export class RuntimeContextResolver {
       return null;
     }
 
+    // 1. Try resolving from request-scoped L1 cache inside active IssueSession
+    const activeSession = IssueSessionResolver.current();
+    if (activeSession) {
+      const cached = activeSession.cache.get<RuntimeContext>(`runtime-context:${parsedConvId}`);
+      if (cached) {
+        return cached;
+      }
+    }
+
     try {
       const { rows } = await pool.query(
         `SELECT 
@@ -48,7 +58,7 @@ export class RuntimeContextResolver {
       if (rows.length === 0) return null;
 
       const row = rows[0];
-      return {
+      const context: RuntimeContext = {
         conversationId: row.conversation_id,
         identityId: row.identity_id ? parseInt(row.identity_id, 10) : 0,
         projectId: row.project_id ? parseInt(row.project_id, 10) : 1,
@@ -56,6 +66,13 @@ export class RuntimeContextResolver {
         handledBy: row.handled_by === "human" ? "human" : "ai",
         channel: row.channel || "LINE",
       };
+
+      // 2. Cache resolved context back into request-scoped L1 cache
+      if (activeSession) {
+        activeSession.cache.set(`runtime-context:${parsedConvId}`, context);
+      }
+
+      return context;
     } catch (err: any) {
       logger.error({ conversationId, error: err.message }, "Failed to resolve runtime context from conversation");
       return null;

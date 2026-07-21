@@ -293,7 +293,7 @@ export class PostgresAdapter implements DatabaseAdapter {
           "id"
         );
 
-        const maxIdentRes = await pool.query("SELECT COALESCE(MAX(id::integer), 0) + 1 AS next_id FROM identities WHERE id ~ '^[0-9]+$'");
+        const maxIdentRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM identities");
         const nextIdentId = maxIdentRes.rows[0].next_id.toString();
 
         const newIdentity = await pool.query(

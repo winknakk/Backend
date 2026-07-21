@@ -6,6 +6,10 @@ import { startTimer } from "../observability/timing";
 import { randomUUID } from "crypto";
 import { TakeoverManager } from "../human-takeover/TakeoverManager";
 import { ConversationResolver } from "../conversation/ConversationResolver";
+import { IssueSessionBuilder } from "../runtime/IssueSessionBuilder";
+import { IssueSessionResolver } from "../runtime/IssueSessionResolver";
+import { LifecycleState } from "../runtime/IssueSession";
+import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 
 const logger = createLogger("Orchestrator");
 
@@ -57,87 +61,133 @@ export class Orchestrator {
         `Hydrated session context for company ID: ${sessionContext.companyId}`
       );
 
-      // Check Human Takeover State
-      const takeoverState = await this.takeoverManager.getTakeoverState(conversationId);
-      const isHumanHandoffActive = takeoverState.status === "PENDING_HUMAN" || takeoverState.status === "ACTIVE_HUMAN" || sessionContext.handledBy === "human";
+      // Resolve database adapter and project context to build IssueSession
+      const dbAdapter = (this.memoryService as any).dbAdapter;
+      const contextResolver = new RuntimeContextResolver(dbAdapter);
+      const runtimeContext = await contextResolver.resolveRuntimeContext(conversationId);
+      if (!runtimeContext) {
+        throw new Error(`Failed to resolve RuntimeContext for conversation ${conversationId}`);
+      }
 
-      // Verify active participant status & group mentions (only if human handoff is NOT active)
-      if (!isHumanHandoffActive) {
-        const resolution = await this.conversationResolver.shouldProcess(message, conversationId);
-        if (!resolution.shouldProcess) {
-          const durationMs = timer();
+      const activeTicket = await dbAdapter.getLatestTicketForConversation(conversationId);
+
+      const conversationState = {
+        id: runtimeContext.conversationId,
+        status: sessionContext.status as any,
+        handledBy: sessionContext.handledBy,
+        channel: runtimeContext.channel
+      };
+
+      const ticketState = {
+        id: activeTicket?.id,
+        ticketCode: activeTicket?.ticket_id,
+        status: activeTicket?.status,
+        priority: activeTicket?.priority,
+        slaBreached: activeTicket?.sla_breached || false
+      };
+
+      const session = new IssueSessionBuilder()
+        .withSessionId(reqId)
+        .withContext(runtimeContext)
+        .withConversation(conversationState)
+        .withTicket(ticketState)
+        .build();
+
+      session.transitionTo(LifecycleState.HYDRATING);
+      session.transitionTo(LifecycleState.READY);
+
+      return await IssueSessionResolver.run(session, async () => {
+        session.transitionTo(LifecycleState.PROCESSING);
+
+        // Check Human Takeover State
+        const takeoverState = await this.takeoverManager.getTakeoverState(conversationId);
+        const isHumanHandoffActive = takeoverState.status === "PENDING_HUMAN" || takeoverState.status === "ACTIVE_HUMAN" || sessionContext.handledBy === "human";
+
+        // Verify active participant status & group mentions (only if human handoff is NOT active)
+        if (!isHumanHandoffActive) {
+          const resolution = await this.conversationResolver.shouldProcess(message, conversationId);
+          if (!resolution.shouldProcess) {
+            const durationMs = timer();
+            logger.info(
+              { requestId: reqId, conversationId, reason: resolution.reason, component: "Orchestrator" },
+              "Group conversation message ignored (not mentioned and no active participant session)"
+            );
+            session.transitionTo(LifecycleState.RESPONDING);
+            session.transitionTo(LifecycleState.COMPLETED);
+            return {
+              recipientId: message.senderId,
+              channel: message.channel,
+              text: `Muted: ${resolution.reason}`,
+              sentAt: new Date().toISOString(),
+            };
+          }
+        }
+        
+        // If human session expired, switch handled_by back to AI in DB
+        if (takeoverState.status === "ACTIVE_AI" && sessionContext.handledBy === "human") {
           logger.info(
-            { requestId: reqId, conversationId, reason: resolution.reason, component: "Orchestrator" },
-            "Group conversation message ignored (not mentioned and no active participant session)"
+            {
+              requestId: reqId,
+              conversationId: sessionContext.conversationId,
+              component: "Orchestrator",
+            },
+            "Human session expired. Switching database handoff state back to 'ai'."
           );
+          await this.memoryService.updateHandoffState(sessionContext.conversationId, "ai");
+          sessionContext.handledBy = "ai";
+          session.conversation = { ...session.conversation, handledBy: "ai" };
+        }
+
+        if (takeoverState.status === "PENDING_HUMAN" || takeoverState.status === "ACTIVE_HUMAN") {
+          logger.info(
+            {
+              requestId: reqId,
+              conversationId: sessionContext.conversationId,
+              status: takeoverState.status,
+              component: "Orchestrator",
+            },
+            "Human takeover active: bypassing AgentRuntime reasoning loop."
+          );
+
+          await this.memoryService.appendConversationLog(
+            sessionContext.conversationId,
+            "customer",
+            message.text,
+            message.externalId
+          );
+
+          const durationMs = timer();
+          session.transitionTo(LifecycleState.RESPONDING);
+          session.transitionTo(LifecycleState.COMPLETED);
           return {
             recipientId: message.senderId,
             channel: message.channel,
-            text: `Muted: ${resolution.reason}`,
+            text: `Message flagged for human support. (AI Muted - Room Status: ${takeoverState.status})`,
             sentAt: new Date().toISOString(),
           };
         }
-      }
-      
-      // If human session expired, switch handled_by back to AI in DB
-      if (takeoverState.status === "ACTIVE_AI" && sessionContext.handledBy === "human") {
-        logger.info(
-          {
-            requestId: reqId,
-            conversationId: sessionContext.conversationId,
-            component: "Orchestrator",
-          },
-          "Human session expired. Switching database handoff state back to 'ai'."
-        );
-        await this.memoryService.updateHandoffState(sessionContext.conversationId, "ai");
-        sessionContext.handledBy = "ai";
-      }
 
-      if (takeoverState.status === "PENDING_HUMAN" || takeoverState.status === "ACTIVE_HUMAN") {
-        logger.info(
-          {
-            requestId: reqId,
-            conversationId: sessionContext.conversationId,
-            status: takeoverState.status,
-            component: "Orchestrator",
-          },
-          "Human takeover active: bypassing AgentRuntime reasoning loop."
-        );
+        // 2. Resolve Agent session
+        const agentSession = await this.agentManager.getOrCreateSession(message.senderId, sessionContext.companyId, message.channel);
 
-        await this.memoryService.appendConversationLog(
-          sessionContext.conversationId,
-          "customer",
-          message.text,
-          message.externalId
-        );
+        // 3. Trigger Agent reasoning and tool loop
+        const reply = await agentSession.chat(message, reqId);
 
+        session.transitionTo(LifecycleState.RESPONDING);
         const durationMs = timer();
-        return {
-          recipientId: message.senderId,
-          channel: message.channel,
-          text: `Message flagged for human support. (AI Muted - Room Status: ${takeoverState.status})`,
-          sentAt: new Date().toISOString(),
-        };
-      }
+        logger.info(
+          {
+            requestId: reqId,
+            conversationId: sessionContext.conversationId,
+            durationMs,
+            component: "Orchestrator",
+          },
+          `Webhook process completed in ${durationMs.toFixed(2)}ms`
+        );
 
-      // 2. Resolve Agent session
-      const agentSession = await this.agentManager.getOrCreateSession(message.senderId, sessionContext.companyId, message.channel);
-
-      // 3. Trigger Agent reasoning and tool loop
-      const reply = await agentSession.chat(message, reqId);
-
-      const durationMs = timer();
-      logger.info(
-        {
-          requestId: reqId,
-          conversationId: sessionContext.conversationId,
-          durationMs,
-          component: "Orchestrator",
-        },
-        `Webhook process completed in ${durationMs.toFixed(2)}ms`
-      );
-
-      return reply;
+        session.transitionTo(LifecycleState.COMPLETED);
+        return reply;
+      });
     } catch (err: any) {
       const durationMs = timer();
       logger.error(
