@@ -25,24 +25,27 @@ async function main() {
 
   const sql = fs.readFileSync(filePath, "utf-8");
   const client = await pool.connect();
+  let exitCode = 0;
 
   try {
     await client.query("BEGIN");
     await client.query(sql);
     await client.query("COMMIT");
     logger.info({ seedFile }, "Database seeding completed successfully.");
-    await pool.end();
-    process.exit(0);
   } catch (err: any) {
     await client.query("ROLLBACK");
     logger.error({ seedFile, error: err.message }, "Database seeding failed!");
-    try {
-      await pool.end();
-    } catch {}
-    process.exit(1);
+    exitCode = 1;
   } finally {
     client.release();
   }
+
+  await pool.end();
+  process.exitCode = exitCode;
 }
 
-main();
+main().catch(async (err: any) => {
+  logger.error({ error: err.message }, "Database seed runner failed before transaction completion!");
+  await pool.end().catch(() => undefined);
+  process.exitCode = 1;
+});

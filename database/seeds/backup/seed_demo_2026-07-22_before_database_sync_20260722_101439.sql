@@ -3,21 +3,8 @@
 -- seed_demo.sql
 -- ============================================================
 
--- Clean existing demo data. This seed intentionally rebuilds the configured
--- development/demo dataset and must never be used as a production baseline.
-TRUNCATE TABLE
-  admin_audit_logs, ai_memory, company_holidays, company_holiday_calendars,
-  conversation_events, conversation_handoffs, conversation_participants,
-  conversation_ticket_links, customer_enrollments, document_embeddings,
-  internal_notes, knowledge_embeddings, knowledge_documents,
-  message_attachments, operator_project_access, takeover_sessions, operators,
-  teams, outbox_events, ticket_events, ticket_embeddings, webhook_events,
-  webchat_sessions, traces, tickets, messages, conversations, identities,
-  profile_projects, profiles, project_prompts, project_sla_policies,
-  project_channels, project_ai_settings, project_routing_rules,
-  project_business_hours, project_holidays, project_mcp_permissions,
-  project_feature_flags, projects, companies
-RESTART IDENTITY CASCADE;
+-- Clean existing data
+TRUNCATE TABLE traces, tickets, messages, conversations, identities, profile_projects, profiles, project_prompts, project_sla_policies, project_channels, project_ai_settings, project_routing_rules, project_business_hours, project_holidays, project_mcp_permissions, project_feature_flags, projects, companies CASCADE;
 
 -- 1. Companies & Projects
 INSERT INTO companies (id, name) VALUES 
@@ -45,9 +32,9 @@ INSERT INTO profiles (id, company_id, name) VALUES
   (5, 5, 'Akkharin Laksana'),
   (11, 5, 'SSO Test Customer'),
   (12, 5, 'CRA Test Customer'),
-  (10, 1, 'LINE Test User'),
+  (10, 5, 'LINE Test User'),
   (67, 5, 'Natapohn Sawatsakulpattana'),
-  (404, 1, 'LINE Group Demo User')
+  (404, 5, 'Not Found')
 ON CONFLICT (id) DO UPDATE SET company_id = EXCLUDED.company_id, name = EXCLUDED.name;
 
 INSERT INTO profile_projects (profile_id, project_id) VALUES 
@@ -57,8 +44,7 @@ INSERT INTO profile_projects (profile_id, project_id) VALUES
   (11, 11),
   (12, 12),
   (10, 1),
-  (67, 8),
-  (404, 1)
+  (67, 8)
 ON CONFLICT (profile_id, project_id) DO NOTHING;
 
 -- 3. Identities (LINE and WhatsApp references)
@@ -169,10 +155,10 @@ INSERT INTO tickets (ticket_id, conversation_id, project_id, subject, summary, s
   ('TCK-2026-00001', 1, 1, 'Orbit App Session Expired', 'Customer reported login loop on Orbit App.', 'Open', 'P2', 'ai'),
   ('TCK-2026-00002', 2, 2, 'Billing Invoice Issue', 'Customer requested refund or review of invoice #1004.', 'Open', 'P1', 'ai'),
   ('TCK-2026-00003', 3, 1, 'General System Inquiry', 'Customer asked about system operational flows.', 'Resolved', 'P4', 'ai'),
-  ('TCK-2026-35448', 67, 8, 'ระบบล่ม 502 Bad Gateway', 'ระบบล่มขึ้น 502 Bad Gateway เข้าใช้งานไม่ได้เลย ต้องการเร่งแก้ไขด่วน', 'closed', 'P1', 'ai'),
-  ('TCK-2026-83685', 67, 8, 'ระบบล่ม 405 Method Not Allowed', 'ลูกค้าแจ้งว่าเข้าใช้งานระบบไม่ได้ ขึ้นข้อความ error 405 Method Not Allowed ต้องการแก้ไขด่วน', 'closed', 'P1', 'ai'),
-  ('TCK-2026-90715', 67, 8, 'ระบบล่มขึ้น 405 Method Not Allowed', 'ลูกค้ารายงานว่าระบบล่มไม่สามารถเข้าใช้งานได้ ขึ้นข้อความ error 405 Method Not Allowed ต้องการให้แก้ไขด่วน', 'closed', 'P1', 'ai'),
-  ('TCK-2026-69378', 67, 8, 'ระบบล่ม 408 Request Timeout', 'ลูกค้าแจ้งว่าไม่สามารถเข้าใช้งานระบบได้ เนื่องจากเกิดข้อผิดพลาด 408 Request Timeout ซึ่งส่งผลกระทบต่อการใช้งานอย่างรุนแรง ต้องการแก้ไขด่วน', 'Todo', 'P1', 'ai'),
+  ('TCK-2026-35448', 67, 1, 'ระบบล่ม 502 Bad Gateway', 'ระบบล่มขึ้น 502 Bad Gateway เข้าใช้งานไม่ได้เลย ต้องการเร่งแก้ไขด่วน', 'closed', 'P1', 'ai'),
+  ('TCK-2026-83685', 67, 1, 'ระบบล่ม 405 Method Not Allowed', 'ลูกค้าแจ้งว่าเข้าใช้งานระบบไม่ได้ ขึ้นข้อความ error 405 Method Not Allowed ต้องการแก้ไขด่วน', 'closed', 'P1', 'ai'),
+  ('TCK-2026-90715', 67, 1, 'ระบบล่มขึ้น 405 Method Not Allowed', 'ลูกค้ารายงานว่าระบบล่มไม่สามารถเข้าใช้งานได้ ขึ้นข้อความ error 405 Method Not Allowed ต้องการให้แก้ไขด่วน', 'closed', 'P1', 'ai'),
+  ('TCK-2026-69378', 67, 1, 'ระบบล่ม 408 Request Timeout', 'ลูกค้าแจ้งว่าไม่สามารถเข้าใช้งานระบบได้ เนื่องจากเกิดข้อผิดพลาด 408 Request Timeout ซึ่งส่งผลกระทบต่อการใช้งานอย่างรุนแรง ต้องการแก้ไขด่วน', 'Todo', 'P1', 'ai'),
   ('TCK-2026-79760', 404, 1, 'ระบบล่มขึ้น 404 เข้าไม่ได้', 'ลูกค้าแจ้งว่าระบบล่มขึ้น error 404 ไม่สามารถเข้าใช้งานได้ ต้องการความช่วยเหลือด่วน', 'closed', 'P1', 'ai')
 ON CONFLICT DO NOTHING;
 
@@ -305,153 +291,4 @@ INSERT INTO outbox_events (event_type, payload, status, attempts, error_message,
   ('TicketCreated', '{"ticketId": "TCK-2026-79760"}', 'failed', 5, 'Custom Id cannot be integers', '2026-07-20 10:49:00.810233+07')
 ON CONFLICT DO NOTHING;
 
--- 9. Operators, Teams, and Project Access
-INSERT INTO teams (id, company_id, name, description, status) VALUES
-  (1, 1, 'Demo Support', 'Demo support and escalation team', 'active'),
-  (2, 2, 'Customer Success', 'Retail customer-success team', 'active'),
-  (5, 5, 'Avalant Support', 'Avalant 24/7 support team', 'active')
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description;
-
-INSERT INTO operators (id, company_id, primary_team_id, email, name, display_name, role, status) VALUES
-  (1, 1, 1, 'demo.manager@ticketx.local', 'Demo Manager', 'Demo Manager', 'manager', 'active'),
-  (2, 2, 2, 'alice.agent@retail.example', 'Alice Agent', 'Alice', 'agent', 'active'),
-  (5, 5, 5, 'avalant.agent@ticketx.local', 'Avalant Agent', 'Avalant Support', 'agent', 'active')
-ON CONFLICT (id) DO UPDATE SET
-  company_id = EXCLUDED.company_id,
-  primary_team_id = EXCLUDED.primary_team_id,
-  name = EXCLUDED.name,
-  display_name = EXCLUDED.display_name,
-  role = EXCLUDED.role,
-  status = EXCLUDED.status;
-
-UPDATE projects SET team_id = 1 WHERE id = 1;
-UPDATE projects SET team_id = 2 WHERE id = 2;
-UPDATE projects SET team_id = 5 WHERE id IN (8, 11, 12);
-
-INSERT INTO operator_project_access (operator_id, project_id, role, granted_by) VALUES
-  (1, 1, 'manager', 1),
-  (2, 2, 'agent', 2),
-  (5, 8, 'agent', 5),
-  (5, 11, 'agent', 5),
-  (5, 12, 'agent', 5)
-ON CONFLICT (operator_id, project_id) DO NOTHING;
-
--- 10. Current Domain Relationships
-INSERT INTO conversation_participants
-  (conversation_id, project_id, participant_type, identity_id, session_role, join_source, joined_at)
-SELECT c.id, c.project_id, 'customer', c.identity_id, 'reporter', 'direct', c.created_at
-FROM conversations c
-WHERE c.identity_id IS NOT NULL
-ON CONFLICT (conversation_id, identity_id) DO NOTHING;
-
-INSERT INTO customer_enrollments
-  (profile_id, project_id, company_id, enrollment_source, enrollment_type, enrolled_at, is_active)
-SELECT pp.profile_id, pp.project_id, p.company_id, 'imported', 'customer', NOW(), TRUE
-FROM profile_projects pp
-JOIN projects p ON p.id = pp.project_id
-ON CONFLICT (profile_id, project_id) DO NOTHING;
-
-INSERT INTO conversation_ticket_links (conversation_id, ticket_id, link_type, linked_by)
-SELECT t.conversation_id,
-       t.id,
-       CASE
-         WHEN t.ticket_id IN (
-           'TCK-2026-00001', 'TCK-2026-00002', 'TCK-2026-00003',
-           'TCK-2026-69378', 'TCK-2026-79760'
-         ) THEN 'primary'
-         ELSE 'related'
-       END,
-       'system'
-FROM tickets t
-WHERE t.conversation_id IS NOT NULL
-ON CONFLICT (conversation_id, ticket_id) DO NOTHING;
-
-INSERT INTO conversation_handoffs
-  (conversation_id, project_id, from_owner, to_owner, to_operator_id, trigger_type, reason, started_at, context_snapshot, ticket_id)
-SELECT 2, 2, 'ai', 'human', 2, 'operator_claim',
-       'Billing request requires manual review', '2026-07-15 10:47:00+07',
-       '{"scenario":"billing_handoff"}'::jsonb, t.id
-FROM tickets t WHERE t.ticket_id = 'TCK-2026-00002';
-
-INSERT INTO takeover_sessions
-  (conversation_id, operator_id, project_id, status, acquired_at, expires_at, notes, ticket_id)
-SELECT 2, 2, 2, 'active', '2026-07-15 10:47:00+07', '2027-07-15 18:47:00+07',
-       'Demo active billing takeover', t.id
-FROM tickets t WHERE t.ticket_id = 'TCK-2026-00002';
-
-UPDATE conversations SET operator_id = 2, takeover_state = 'active' WHERE id = 2;
-
-INSERT INTO internal_notes (conversation_id, ticket_id, operator_id, content, is_pinned)
-SELECT 2, t.id, 2, 'Verify invoice #1004 before approving any refund.', TRUE
-FROM tickets t WHERE t.ticket_id = 'TCK-2026-00002';
-
--- 11. Knowledge, Memory, Webhook, and Audit Scenarios
-INSERT INTO company_holiday_calendars (id, company_id, name, country_code, is_default) VALUES
-  (1, 1, 'Thailand Public Holidays', 'TH', TRUE)
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, is_default = EXCLUDED.is_default;
-
-INSERT INTO company_holidays (calendar_id, holiday_date, name, holiday_type) VALUES
-  (1, '2026-12-05', 'National Day Demo Holiday', 'public')
-ON CONFLICT (calendar_id, holiday_date) DO UPDATE SET name = EXCLUDED.name;
-
-INSERT INTO knowledge_documents
-  (id, project_id, company_id, external_doc_id, title, raw_content, processed_content,
-   document_type, language, chunk_index, chunk_total, is_active, indexed_at, metadata, created_by)
-VALUES
-  ('11111111-1111-7111-8111-111111111111', 1, 1, 'demo-orbit-session-reset',
-   'Orbit App session reset guide',
-   'Clear the application cache, restart the Orbit App, and sign in again. Escalate if the session loop persists.',
-   'Clear cache, restart Orbit App, then sign in again.', 'procedure', 'en', 0, 1, TRUE, NOW(),
-   '{"scenario":"login_support","source":"seed_demo"}'::jsonb, 1)
-ON CONFLICT (project_id, external_doc_id, chunk_index) DO UPDATE SET
-  title = EXCLUDED.title,
-  raw_content = EXCLUDED.raw_content,
-  processed_content = EXCLUDED.processed_content,
-  is_active = EXCLUDED.is_active,
-  indexed_at = EXCLUDED.indexed_at;
-
-INSERT INTO ai_memory
-  (profile_id, project_id, memory_type, memory_scope, key, value, source_conv_id, confidence)
-VALUES
-  (1, 1, 'preference', 'customer', 'preferred_support_language', 'English', 1, 0.95)
-ON CONFLICT DO NOTHING;
-
-INSERT INTO webhook_events
-  (id, project_id, platform, channel_type, channel_id, platform_event_id,
-   idempotency_key, raw_payload, hmac_valid, status, attempts, processed_at, resulting_conv_id, received_at)
-VALUES
-  ('22222222-2222-7222-8222-222222222222', 1, 'line', 'line', 'channel-123', 'demo-event-001',
-   'seed-demo-line-event-001', '{"type":"message","scenario":"demo"}'::jsonb,
-   TRUE, 'processed', 1, '2026-07-15 10:46:36+07', 1, '2026-07-15 10:46:35+07')
-ON CONFLICT (idempotency_key) DO UPDATE SET status = EXCLUDED.status, processed_at = EXCLUDED.processed_at;
-
-INSERT INTO conversation_events (conversation_id, event_type, payload, correlation_id, created_at) VALUES
-  (2, 'HumanTakeoverStarted', '{"operatorId":2}'::jsonb, 'seed-demo-handoff-001', '2026-07-15 10:47:00+07');
-
-INSERT INTO ticket_events (ticket_id, event_type, actor, source, correlation_id, payload, created_at)
-SELECT t.id, 'TicketCreated', 'ai', 'seed_demo', 'seed-demo-ticket-00002',
-       '{"priority":"P1","scenario":"billing"}'::jsonb, '2026-07-15 10:46:36+07'
-FROM tickets t WHERE t.ticket_id = 'TCK-2026-00002';
-
-INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, operator_id, timestamp) VALUES
-  (1, 'demo_seed_loaded', '{}'::jsonb, '{"seed":"seed_demo.sql"}'::jsonb, 'database_seed', 1, NOW());
-
--- Keep serial sequences ahead of deterministic identifiers used above.
-DO $$
-DECLARE
-  target_table TEXT;
-  sequence_name TEXT;
-  max_id BIGINT;
-BEGIN
-  FOREACH target_table IN ARRAY ARRAY[
-    'companies','projects','profiles','identities','conversations',
-    'teams','operators','company_holiday_calendars'
-  ]
-  LOOP
-    sequence_name := pg_get_serial_sequence(target_table, 'id');
-    IF sequence_name IS NOT NULL THEN
-      EXECUTE format('SELECT COALESCE(MAX(id), 1) FROM %I', target_table) INTO max_id;
-      PERFORM setval(sequence_name, max_id, TRUE);
-    END IF;
-  END LOOP;
-END $$;
+-- 9. Ticket Events (skipped: integer ticket_id refs production-only rows)
