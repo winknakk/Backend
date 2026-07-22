@@ -173,9 +173,37 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
   // 7. GET /api/admin/conversations/:id/messages
   fastify.get("/api/admin/conversations/:id/messages", async (request, reply) => {
     const params = request.params as any;
+    const conversationId = parseInt(String(params.id), 10);
     const messages = await humanReplyService.getMessages(params.id);
-    return reply.code(200).send(messages);
+
+    const hydratedMessages = await Promise.all(messages.map(async (m: any) => {
+      const msgId = m.id || m.Id;
+      if (!msgId) return m;
+
+      const attRes = await pool.query(
+        `SELECT id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key 
+         FROM message_attachments WHERE message_id = $1`,
+        [msgId]
+      );
+
+      return {
+        ...m,
+        messageType: m.message_type || m.messageType || "text",
+        attachments: attRes.rows.map((att: any) => ({
+          id: att.id,
+          fileUrl: att.file_url,
+          thumbnailUrl: att.thumbnail_url || att.file_url,
+          fileName: att.file_name,
+          fileType: att.file_type || "image/jpeg",
+          fileSize: att.file_size || 0,
+          storageKey: att.storage_key
+        }))
+      };
+    }));
+
+    return reply.code(200).send(hydratedMessages);
   });
+
 
   // 8. POST /api/admin/conversations/:id/takeover
   fastify.post("/api/admin/conversations/:id/takeover", async (request, reply) => {
@@ -200,7 +228,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       });
     }
 
-    const result = await humanReplyService.sendReply(params.id, body.message);
+    const replyToId = body.reply_to_message_id ? parseInt(String(body.reply_to_message_id), 10) : undefined;
+    const result = await humanReplyService.sendReply(params.id, body.message, replyToId);
     if (deps.takeoverManager) {
       const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
       deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
@@ -255,11 +284,37 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
         return reply.code(404).send({ error: "Conversation not found" });
       }
 
-      // Query messages
+      // Query messages with attachments
       const { rows: dbMessages } = await pool.query(
-        `SELECT id, role, content, created_at FROM messages WHERE conversation_id = $1`,
+        `SELECT id, role, content, message_type, created_at FROM messages WHERE conversation_id = $1 ORDER BY id ASC`,
         [parseInt(conversationId, 10)]
       );
+
+      const hydratedMessages = await Promise.all(dbMessages.map(async (m: any) => {
+        const attRes = await pool.query(
+          `SELECT id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key 
+           FROM message_attachments WHERE message_id = $1`,
+          [m.id]
+        );
+        return {
+          id: `msg-${m.id}`,
+          messageId: m.id,
+          type: "message",
+          role: m.role,
+          content: m.content,
+          messageType: m.message_type || "text",
+          timestamp: m.created_at,
+          attachments: attRes.rows.map((att: any) => ({
+            id: att.id,
+            fileUrl: att.file_url,
+            thumbnailUrl: att.thumbnail_url || att.file_url,
+            fileName: att.file_name,
+            fileType: att.file_type || "image/jpeg",
+            fileSize: att.file_size || 0,
+            storageKey: att.storage_key
+          }))
+        };
+      }));
 
       // Query event logs
       const { rows: dbEvents } = await pool.query(
@@ -268,21 +323,16 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       );
 
       const timelineItems = [
-        ...dbMessages.map((m: any) => ({
-          id: `msg-${m.id}`,
-          type: "message",
-          role: m.role,
-          content: m.content,
-          timestamp: m.created_at,
-        })),
+        ...hydratedMessages,
         ...dbEvents.map((e: any) => ({
           id: `evt-${e.id}`,
           type: "event",
           eventType: e.event_type,
-          payload: JSON.parse(e.payload),
+          payload: typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload,
           timestamp: e.created_at,
         })),
       ];
+
 
       // Sort chronologically
       timelineItems.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());

@@ -72,7 +72,7 @@ export class HumanReplyService {
     return { success: true, handled_by: "human" };
   }
 
-  async sendReply(conversationId: string, message: string): Promise<any> {
+  async sendReply(conversationId: string, message: string, replyToMessageId?: number): Promise<any> {
     // 1. Mark room status as takeover (handled_by = 'human')
     await this.dbAdapter.updateHandoffState(conversationId, "human");
 
@@ -103,7 +103,7 @@ export class HumanReplyService {
               "Content-Type": "application/json",
               Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
             },
-            timeout: 5000,
+            timeout: 15000,
           }
         );
         console.log(`[HumanReplyService] LINE Push accepted.`);
@@ -160,7 +160,7 @@ export class HumanReplyService {
     // database failure must not report the message as unsent and encourage duplicates.
     let persisted = false;
     try {
-      await this.dbAdapter.saveMessage(conversationId, "human", message);
+      await this.dbAdapter.saveMessage(conversationId, "human", message, undefined, undefined, replyToMessageId);
       persisted = true;
     } catch (error: any) {
       console.error(`[HumanReplyService] Reply delivered but history persistence failed:`, error.message);
