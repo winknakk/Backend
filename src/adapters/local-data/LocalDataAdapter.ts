@@ -85,7 +85,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return conversations.find((c) => c.id1 === conversationId);
   }
 
-  async saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number): Promise<any> {
     const messages = this.readTable<any>("Messages", DbMessageSchema);
 
     const maxId = messages.reduce((max, m) => {

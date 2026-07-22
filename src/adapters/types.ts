@@ -20,7 +20,7 @@ export interface DatabaseAdapter {
   /**
    * Saves a message log to the conversation.
    */
-  saveMessage(conversationId: string, role: string, content: string, externalId?: string): Promise<any>;
+  saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number): Promise<any>;
 
   /**
    * Retrieves the latest active ticket for a given conversation.

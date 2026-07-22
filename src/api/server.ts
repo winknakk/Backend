@@ -375,6 +375,25 @@ fastify.post("/api/v1/internal/debug-log", async (request, reply) => {
   return reply.code(200).send({ success: true });
 });
 
+fastify.get("/api/v1/media/file", async (request, reply) => {
+  try {
+    const query = request.query as any;
+    const storageKey = query.key;
+    if (!storageKey) {
+      return reply.code(400).send({ error: "Missing storage key" });
+    }
+
+    const { S3MediaStorageService } = await import("../media/services/S3MediaStorageService");
+    const mediaService = new S3MediaStorageService({});
+    const { buffer, mimeType } = await mediaService.download(storageKey);
+
+    return reply.type(mimeType).send(buffer);
+  } catch (err: any) {
+    return reply.code(404).send({ error: "Media file not found", details: err.message });
+  }
+});
+
+
 fastify.get("/health", async (request, reply) => {
   if (GracefulShutdownService.checkShuttingDown()) {
     return reply.code(503).send({
@@ -1168,11 +1187,19 @@ fastify.get("/api/v1/internal/conversations/details", async (request, reply) => 
 });
 
 fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
-  const body = request.body as any;
-  const senderId = body.senderId || body.sender_ref;
-  const channel = body.channel || "LINE";
-  const messageText = body.messageText || body.message || "";
-  const isMentioned = body.isMentioned === true || body.isMentioned === "true";
+  let body = request.body as any;
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); } catch (e) {}
+  }
+  const payload = body.data ? (body.data.data ? body.data.data : body.data) : (body.body ? (body.body.data ? body.body.data : body.body) : body);
+
+  const senderId = payload.senderId || payload.sender_ref || payload.customer_ref;
+  const channel = payload.channel || "LINE";
+  const messageText = payload.messageText || payload.message || "";
+  const isMentioned = payload.isMentioned === true || payload.isMentioned === "true";
+  const messageType = payload.messageType || "text";
+  const imageId = payload.imageId || payload.lineImageId;
+
 
   if (!senderId) {
     return reply.code(400).send({ error: "Bad Request", message: "Missing senderId" });
@@ -1185,6 +1212,77 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     // 2. Load context
     const sessionContext = await memoryService.loadSessionContext(senderId, channel);
     const conversationId = sessionContext.conversationId;
+
+    // Auto-ingest LINE image if imageId is provided in webhook payload
+    if (imageId || messageType === "image") {
+      try {
+        const { LINEAdapter } = await import("../presentation/http/adapters/LINEAdapter");
+        const { S3MediaStorageService } = await import("../media/services/S3MediaStorageService");
+        const mediaStorage = new S3MediaStorageService({});
+        const lineToken = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
+        const lineAdapter = new LINEAdapter(mediaStorage, lineToken);
+
+        const lineEvent = {
+          type: "message",
+          message: { type: "image", id: imageId || `msg_${Date.now()}` },
+          source: { userId: senderId },
+          timestamp: Date.now()
+        };
+
+        const normalized = await lineAdapter.adaptEvent(lineEvent);
+        if (normalized && normalized.attachments.length > 0) {
+          const att = normalized.attachments[0];
+
+          // Find the latest image message in this conversation that has NO attachment yet
+          // (the normal flow already created a message record before this runs)
+          const existingMsgResult = await pool.query(
+            `SELECT m.id FROM messages m
+             LEFT JOIN message_attachments ma ON ma.message_id = m.id
+             WHERE m.conversation_id = $1
+               AND m.message_type = 'image'
+               AND ma.id IS NULL
+             ORDER BY m.id DESC
+             LIMIT 1`,
+            [String(conversationId)]
+          );
+
+          let messageId: number;
+          if (existingMsgResult.rows.length > 0) {
+            // Attach to the existing orphan image message
+            messageId = existingMsgResult.rows[0].id;
+          } else {
+            // No orphan found — create a new message record
+            const savedMsg = await dbAdapter.saveMessage(conversationId, "customer", messageText, normalized.externalMessageId, "image");
+            messageId = parseInt(savedMsg?.id, 10);
+          }
+
+          if (messageId) {
+            await pool.query(
+              `INSERT INTO message_attachments 
+                (message_id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key, attachment_status, metadata)
+               VALUES 
+                ($1, $2, $3, $4, $5, $6, $7, 'READY', $8)
+               ON CONFLICT DO NOTHING`,
+              [
+                messageId,
+                att.fileUrl,
+                att.thumbnailUrl || att.fileUrl,
+                att.fileName,
+                att.fileType,
+                att.fileSize,
+                att.storageKey,
+                JSON.stringify(att.metadata || {})
+              ]
+            );
+            serverLogger.info({ messageId, storageKey: att.storageKey, imageId }, "[LINEAdapter] Image attachment saved to DB successfully");
+          }
+        }
+      } catch (mediaErr: any) {
+        serverLogger.error({ error: mediaErr.message, senderId, imageId }, "Failed to auto-process incoming LINE image webhook");
+      }
+    }
+
+
 
     // 3. Find identity & profile details
     const identityResult = await pool.query(
@@ -1268,6 +1366,22 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     // Load message history
     const history = await memoryService.getConversationHistory(conversationId, 10);
     const historySummary = history.map(h => `${h.role === 'customer' ? 'Customer' : h.role === 'ai' ? 'Assistant' : 'Support'}: ${h.content}`).join("\n");
+
+    // Notify all connected Admin UI WebSockets that a new message/image has arrived
+    const notifyPayload = JSON.stringify({
+      event: "NEW_MESSAGE",
+      data: {
+        conversationId: String(conversationId),
+        channel,
+        customerName: profileName,
+        messageType
+      }
+    });
+    for (const adminSocket of adminConnections) {
+      if (adminSocket.readyState === 1) {
+        adminSocket.send(notifyPayload);
+      }
+    }
 
     return reply.code(200).send({
       identity,
