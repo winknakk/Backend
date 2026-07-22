@@ -70,6 +70,7 @@ export const TakeoverStateSchema = z.object({
   assignedHumanAgentId: z.string().optional(),
   updatedAt: z.string().datetime(),
   leaseExpiresAt: z.string().datetime().optional(),
+  maxLeaseExpiresAt: z.string().datetime().optional().nullable(),
   human_session_started_at: z.string().datetime().optional().nullable(),
   human_session_expire_at: z.string().datetime().optional().nullable(),
   last_human_reply_at: z.string().datetime().optional().nullable(),

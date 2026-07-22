@@ -67,7 +67,7 @@ const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any });
 fastify.register(websocketPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
-const adminConnections = new Set<any>();
+const adminConnections = new Map<any, string>();
 
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
@@ -99,6 +99,79 @@ const planeService = new PlaneService(dbAdapter);
 const planeWebhookService = new PlaneWebhookService(dbAdapter);
 const planeReverseSyncPoller = new PlaneReverseSyncPoller(planeWebhookService);
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
+
+async function requestHumanTakeover(input: {
+  conversationId: string;
+  role?: string;
+  content?: string;
+  reasonCode?: string;
+  reasonDetail?: string;
+  source?: string;
+}) {
+  const { conversationId, role, content, reasonCode, reasonDetail, source } = input;
+  await dbAdapter.updateHandoffState(conversationId, "human");
+  const pendingDurationMs = config.HUMAN_PENDING_TIMEOUT_MINUTES * 60 * 1000;
+  const takeoverState = await takeoverManager.setTakeoverState(
+    conversationId,
+    "PENDING_HUMAN",
+    undefined,
+    pendingDurationMs
+  );
+
+  if (content) {
+    const messages = await dbAdapter.getMessages(conversationId);
+    const exists = messages.some((message: any) => message.content === content && message.role === (role || "customer"));
+    if (!exists) {
+      await dbAdapter.saveMessage(conversationId, role || "customer", content);
+    }
+  }
+
+  let customerName = `Customer #${conversationId}`;
+  let conversationProjectId = "1";
+  try {
+    const result = await pool.query(
+      `SELECT p.name, c.project_id FROM conversations c
+       JOIN identities i ON c.identity_id = i.id::varchar
+       JOIN profiles p ON i.profile_id = p.id
+       WHERE c.id = $1::integer`,
+      [conversationId]
+    );
+    customerName = result.rows[0]?.name || customerName;
+    conversationProjectId = String(result.rows[0]?.project_id || conversationProjectId);
+  } catch (err: any) {
+    serverLogger.error({ error: err.message, conversationId }, "Failed to fetch customer name for takeover notification");
+  }
+
+  const notification = JSON.stringify({
+    event: "NEW_HUMAN_REQUEST",
+    data: {
+      conversationId,
+      customerName,
+      lastMessage: content || "Human assistance required",
+      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+      reasonDetail: reasonDetail || null,
+      source: source || "workflow",
+      expiresAt: takeoverState.leaseExpiresAt,
+    },
+  });
+  for (const [adminSocket, projectId] of adminConnections) {
+    if (projectId === conversationProjectId && adminSocket.readyState === 1) adminSocket.send(notification);
+  }
+
+  await redisPub.publish(
+    "webchat:outbound",
+    JSON.stringify({
+      conversationId,
+      recipientId: "admin",
+      channel: "WebChat",
+      event: "takeover_change",
+      status: "PENDING_HUMAN",
+      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+    })
+  );
+
+  return takeoverState;
+}
 
 const orchestrator = new Orchestrator(memoryService, agentManager, takeoverManager);
 const promptXMcpClient = new PromptXMcpClient();
@@ -206,24 +279,27 @@ async function bootstrap() {
           message: job.data.text
         });
 
-        const replyText = response.data.reply_text || "No reply from Agent.";
+        const replyText = String(response.data.reply_text || "");
+        const suppressReply = response.data.suppress_reply === true || replyText.trim().length === 0;
         const convId = response.data.conversation_id;
 
         serverLogger.info(`[BullMQ Worker] Received sync reply from PromptX Flow: "${replyText}" (convId: ${convId})`);
 
-        const sessionContext = await memoryService.loadSessionContext(job.data.senderId, "WebChat");
-        await redisPub.publish(
-          "webchat:outbound",
-          JSON.stringify({
-            conversationId: convId || sessionContext.conversationId,
-            recipientId: job.data.senderId,
-            channel: "WebChat",
-            text: replyText,
-            sentAt: new Date().toISOString()
-          })
-        );
+        if (!suppressReply) {
+          const sessionContext = await memoryService.loadSessionContext(job.data.senderId, "WebChat");
+          await redisPub.publish(
+            "webchat:outbound",
+            JSON.stringify({
+              conversationId: convId || sessionContext.conversationId,
+              recipientId: job.data.senderId,
+              channel: "WebChat",
+              text: replyText,
+              sentAt: new Date().toISOString()
+            })
+          );
+        }
 
-        return { text: replyText, recipientId: job.data.senderId, channel: "WebChat" };
+        return { text: replyText, recipientId: job.data.senderId, channel: "WebChat", suppressReply };
       } catch (err: any) {
         const responseData = err.response?.data;
         serverLogger.error({ error: err.message, responseData }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
@@ -660,18 +736,28 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
   if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
     return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
   }
-  await dbAdapter.updateHandoffState(conversationId, "human");
-  if (takeoverManager) {
-    const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-    takeoverManager.setTakeoverState(conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
-  }
-  return reply.code(200).send({ success: true, handled_by: "human" });
+  const state = await requestHumanTakeover({
+    conversationId: String(conversationId),
+    role: payload.role,
+    content: payload.content,
+    reasonCode: payload.reasonCode || payload.reason_code,
+    reasonDetail: payload.reasonDetail || payload.reason_detail,
+    source: payload.source || "agentx",
+  });
+  return reply.code(200).send({
+    success: true,
+    handled_by: "human",
+    status: state.status,
+    suppress_reply: true,
+    expires_at: state.leaseExpiresAt,
+  });
 });
 
 fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
   const socket = (connection as any).socket;
-  serverLogger.info("Admin WebSocket connection established");
-  adminConnections.add(socket);
+  const projectId = String((req.query as any)?.projectId || req.headers["x-project-id"] || "1");
+  serverLogger.info({ projectId }, "Admin WebSocket connection established");
+  adminConnections.set(socket, projectId);
 
   socket.on("close", () => {
     adminConnections.delete(socket);
@@ -681,7 +767,7 @@ fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
 
 fastify.post("/api/v1/webhooks/human_notify", async (request, reply) => {
   const body = request.body as any;
-  const { conversationId, role, content } = body;
+  const { conversationId, role, content, reasonCode, reasonDetail, source } = body;
 
   serverLogger.info({ conversationId, role, content }, "Received human_notify takeover webhook");
 
@@ -689,78 +775,31 @@ fastify.post("/api/v1/webhooks/human_notify", async (request, reply) => {
     return reply.code(400).send({ error: "Bad Request", message: "conversationId is required" });
   }
 
-  // Update handoff state in database
-  await dbAdapter.updateHandoffState(conversationId, "human");
-
-  // Set takeover state to PENDING_HUMAN in TakeoverManager
-  if (takeoverManager) {
-    const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-    await takeoverManager.setTakeoverState(conversationId, "PENDING_HUMAN", undefined, leaseDurationMs);
-  }
-
-  // Save the notification message if present and not already logged
-  if (content) {
-    const messages = await dbAdapter.getMessages(conversationId);
-    const exists = messages.some((m: any) => m.content === content && m.role === role);
-    if (!exists) {
-      await dbAdapter.saveMessage(conversationId, role || "customer", content);
-    }
-  }
-
-  // Fetch customer/profile name from DB
-  let customerName = `Customer #${conversationId}`;
-  try {
-    const res = await pool.query(
-      `SELECT p.name FROM conversations c 
-       JOIN identities i ON c.identity_id = i.id::varchar 
-       JOIN profiles p ON i.profile_id = p.id 
-       WHERE c.id = $1::integer`,
-      [conversationId]
-    );
-    if (res.rows.length > 0 && res.rows[0].name) {
-      customerName = res.rows[0].name;
-    }
-  } catch (err: any) {
-    serverLogger.error({ error: err.message }, "Failed to fetch customer name for takeover notification");
-  }
-
-  // Broadcast to all connected admin panels
-  const payload = {
-    event: "NEW_HUMAN_REQUEST",
-    data: {
-      conversationId,
-      customerName,
-      lastMessage: content || "Requested human assistance"
-    }
-  };
-  const payloadStr = JSON.stringify(payload);
-  for (const adminSocket of adminConnections) {
-    if (adminSocket.readyState === 1) { // 1 = OPEN
-      adminSocket.send(payloadStr);
-    }
-  }
-
-  // Publish state change to Redis Pub/Sub
-  await redisPub.publish(
-    "webchat:outbound",
-    JSON.stringify({
-      conversationId,
-      recipientId: "admin",
-      channel: "WebChat",
-      event: "takeover_change",
-      status: "PENDING_HUMAN"
-    })
-  );
-
-  return reply.code(200).send({ success: true, status: "PENDING_HUMAN" });
+  const state = await requestHumanTakeover({
+    conversationId: String(conversationId),
+    role,
+    content,
+    reasonCode,
+    reasonDetail,
+    source,
+  });
+  return reply.code(200).send({ success: true, status: state.status, expires_at: state.leaseExpiresAt });
 });
 
 fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
   const body = request.body as any;
+  const currentTakeover = await takeoverManager.getTakeoverState(body.conversationId);
+  if (currentTakeover.status !== "ACTIVE_HUMAN") {
+    return reply.code(409).send({
+      error: "Takeover required",
+      message: "Claim the conversation before sending a human reply.",
+      status: currentTakeover.status,
+    });
+  }
   const result = await humanReplyService.sendReply(body.conversationId, body.message);
   if (takeoverManager) {
-    const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-    takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
+    const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
+    await takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
   }
   return reply.code(200).send(result);
 });
@@ -1334,6 +1373,12 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
       name: companyName
     };
 
+    const takeoverState = await orchestrator.takeoverManager.getTakeoverState(conversationId);
+    if (takeoverState.status === "ACTIVE_AI" && sessionContext.handledBy === "human") {
+      await dbAdapter.updateHandoffState(conversationId, "ai");
+      sessionContext.handledBy = "ai";
+    }
+
     const conversation = {
       id: conversationId,
       identity_id: identityRow?.identity_id,
@@ -1352,7 +1397,6 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     } : null;
 
     // Check if human takeover is active
-    const takeoverState = await orchestrator.takeoverManager.getTakeoverState(conversationId);
     const isHumanTakeover = takeoverState.status === "ACTIVE_HUMAN" || takeoverState.status === "PENDING_HUMAN" || sessionContext.handledBy === "human";
 
     // Build runtimeFlags
@@ -1377,7 +1421,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         messageType
       }
     });
-    for (const adminSocket of adminConnections) {
+    for (const adminSocket of adminConnections.keys()) {
       if (adminSocket.readyState === 1) {
         adminSocket.send(notifyPayload);
       }
