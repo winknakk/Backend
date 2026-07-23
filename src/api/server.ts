@@ -787,6 +787,7 @@ fastify.post("/api/v1/webhooks/human_notify", async (request, reply) => {
 });
 
 fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
+  const body = request.body as any;
   const currentTakeover = await takeoverManager.getTakeoverState(body.conversationId);
   if (currentTakeover.status !== "ACTIVE_HUMAN") {
     return reply.code(409).send({
