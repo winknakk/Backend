@@ -777,7 +777,10 @@ fastify.post("/api/v1/internal/messages", async (request, reply) => {
     body.conversationId,
     body.role || "human",
     body.content,
-    body.externalId || body.external_id
+    body.externalId || body.external_id,
+    body.messageType || body.message_type,
+    body.replyToMessageId || body.reply_to_message_id,
+    body.quoteToken || body.quote_token
   );
   return reply.code(200).send({ success: true });
 });
@@ -1199,7 +1202,9 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
   const isMentioned = payload.isMentioned === true || payload.isMentioned === "true";
   const messageType = payload.messageType || "text";
   const imageId = payload.imageId || payload.lineImageId;
+  const quoteToken = payload.quoteToken || payload.quote_token || payload.event?.message?.quoteToken || null;
 
+  serverLogger.info({ senderId, messageText, quoteToken, channel }, "[Webhook] Inbound customer message payload received");
 
   if (!senderId) {
     return reply.code(400).send({ error: "Bad Request", message: "Missing senderId" });

@@ -93,7 +93,8 @@ export class LINEAdapter {
       textContent,
       attachments,
       receivedAt,
-      rawPayload: event
+      rawPayload: event,
+      quoteToken: lineMsg.quoteToken || undefined
     };
   }
 

@@ -213,16 +213,16 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   // ─── Messages ──────────────────────────────────────────────
 
-  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number, quoteToken?: string): Promise<any> {
     if (!this.isValidConversationId(conversationId)) return null;
     try {
       const typeToSave = messageType || (!content || content.includes('[ระบบตรวจพบรูปภาพ]') ? 'image' : 'text');
       const { rows } = await pool.query(
-        `INSERT INTO messages (conversation_id, role, content, message_type, external_id, reply_to_message_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        `INSERT INTO messages (conversation_id, role, content, message_type, external_id, reply_to_message_id, quote_token, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
          ON CONFLICT (conversation_id, external_id) DO UPDATE SET content = EXCLUDED.content, message_type = EXCLUDED.message_type
          RETURNING *`,
-        [conversationId, role, content, typeToSave, externalId || null, replyToMessageId || null]
+        [conversationId, role, content, typeToSave, externalId || null, replyToMessageId || null, quoteToken || null]
       );
 
       const msgRow = rows[0];

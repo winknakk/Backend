@@ -12,4 +12,5 @@ export interface INormalizedMessage {
   attachments: MessageAttachment[];
   receivedAt: Date;
   rawPayload: Record<string, any>;
+  quoteToken?: string;
 }
