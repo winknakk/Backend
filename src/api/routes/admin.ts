@@ -251,7 +251,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       });
     }
 
-    const replyToId = body.reply_to_message_id ? parseInt(String(body.reply_to_message_id), 10) : undefined;
+    const rawReplyTo = body.reply_to_message_id || body.replyToMessageId || body.reply_to_id || body.replyToId;
+    const replyToId = rawReplyTo ? parseInt(String(rawReplyTo), 10) : undefined;
     const result = await humanReplyService.sendReply(params.id, body.message, replyToId);
     if (deps.takeoverManager) {
       const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
