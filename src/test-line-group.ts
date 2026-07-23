@@ -149,8 +149,8 @@ async function run() {
   };
 
   const response = await orchestrator.handleIncomingMessage(customerInbound);
-  console.log("   - Orchestrator reply:", response.text);
-  assert(response.text.includes("Room Status: ACTIVE_HUMAN"), "AI must be muted during human takeover!");
+  console.log("   - Orchestrator suppressed reply:", response.suppressReply);
+  assert(response.suppressReply === true && response.text === "", "AI must be silently muted during human takeover!");
 
   // Verify that the message was saved in DB with the correct externalId
   const { rows: takeoverCheck } = await pool.query(

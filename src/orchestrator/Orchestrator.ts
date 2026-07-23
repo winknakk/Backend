@@ -162,7 +162,8 @@ export class Orchestrator {
           return {
             recipientId: message.senderId,
             channel: message.channel,
-            text: `Message flagged for human support. (AI Muted - Room Status: ${takeoverState.status})`,
+            text: "",
+            suppressReply: true,
             sentAt: new Date().toISOString(),
           };
         }

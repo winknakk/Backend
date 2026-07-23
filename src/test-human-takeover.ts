@@ -102,8 +102,8 @@ async function run() {
   };
 
   const reply = await orchestrator.handleIncomingMessage(msg);
-  console.log("Orchestrator reply:", reply.text);
-  assert(reply.text.includes("Room Status: ACTIVE_HUMAN"), "AI must be muted and takeover message returned.");
+  console.log("Orchestrator suppressed reply:", reply.suppressReply);
+  assert(reply.suppressReply === true && reply.text === "", "AI must be muted without customer-facing text.");
 
   // Verify conversation history has the customer message
   const history = await dbAdapter.getConversationHistory(conversationId);

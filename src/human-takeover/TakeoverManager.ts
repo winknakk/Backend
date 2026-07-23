@@ -31,15 +31,17 @@ export class TakeoverManager {
     if (this.redisManager) {
       const lease = await this.redisManager.checkLeaseStatus(conversationId);
       if (lease.active) {
+        const startedAt = lease.startedAt || Date.now();
         return {
           conversationId,
-          status: "ACTIVE_HUMAN",
+          status: lease.status || "ACTIVE_HUMAN",
           assignedHumanAgentId: lease.agentId,
           updatedAt: new Date().toISOString(),
           leaseExpiresAt: new Date(lease.expiresAt!).toISOString(),
-          human_session_started_at: new Date(lease.expiresAt! - 3600 * 1000).toISOString(),
+          maxLeaseExpiresAt: lease.maxExpiresAt ? new Date(lease.maxExpiresAt).toISOString() : null,
+          human_session_started_at: new Date(startedAt).toISOString(),
           human_session_expire_at: new Date(lease.expiresAt!).toISOString(),
-          last_human_reply_at: new Date(lease.expiresAt!).toISOString(),
+          last_human_reply_at: lease.lastHumanReplyAt ? new Date(lease.lastHumanReplyAt).toISOString() : null,
         };
       }
       return {
@@ -71,24 +73,32 @@ export class TakeoverManager {
     status: RoomStatus,
     assignedHumanAgentId?: string,
     leaseDurationMs?: number,
-    isReply?: boolean
+    isReply?: boolean,
+    maxSessionDurationMs = config.HUMAN_MAX_SESSION_MINUTES * 60 * 1000
   ): Promise<TakeoverState> {
     const now = new Date();
 
     if (this.redisManager) {
       if (status !== "ACTIVE_AI") {
         const duration = leaseDurationMs !== undefined ? leaseDurationMs : this.defaultLeaseDurationMs;
-        await this.redisManager.acquireLease(conversationId, assignedHumanAgentId || "human_agent", duration);
-        const expiresAt = now.getTime() + duration;
+        const lease = await this.redisManager.acquireLease(
+          conversationId,
+          assignedHumanAgentId || "human_agent",
+          duration,
+          status,
+          isReply,
+          maxSessionDurationMs
+        );
         return {
           conversationId,
           status,
           assignedHumanAgentId,
           updatedAt: now.toISOString(),
-          leaseExpiresAt: new Date(expiresAt).toISOString(),
-          human_session_started_at: now.toISOString(),
-          human_session_expire_at: new Date(expiresAt).toISOString(),
-          last_human_reply_at: isReply ? now.toISOString() : null,
+          leaseExpiresAt: new Date(lease.expiresAt).toISOString(),
+          maxLeaseExpiresAt: new Date(lease.maxExpiresAt).toISOString(),
+          human_session_started_at: new Date(lease.startedAt).toISOString(),
+          human_session_expire_at: new Date(lease.expiresAt).toISOString(),
+          last_human_reply_at: lease.lastHumanReplyAt ? new Date(lease.lastHumanReplyAt).toISOString() : null,
         };
       } else {
         await this.redisManager.releaseLease(conversationId);
@@ -103,17 +113,20 @@ export class TakeoverManager {
     // Local file fallback
     const existing = this.localStates.get(conversationId);
     let leaseExpiresAt: string | undefined;
+    let maxLeaseExpiresAt = existing?.maxLeaseExpiresAt || null;
     let human_session_started_at = existing?.human_session_started_at || null;
     let human_session_expire_at = existing?.human_session_expire_at || null;
     let last_human_reply_at = existing?.last_human_reply_at || null;
 
     if (status !== "ACTIVE_AI") {
       const duration = leaseDurationMs !== undefined ? leaseDurationMs : this.defaultLeaseDurationMs;
-      leaseExpiresAt = new Date(now.getTime() + duration).toISOString();
-      
-      if (!human_session_started_at) {
+      const continuingActiveSession = status === "ACTIVE_HUMAN" && existing?.status === "ACTIVE_HUMAN";
+      if (!continuingActiveSession || !human_session_started_at) {
         human_session_started_at = now.toISOString();
+        maxLeaseExpiresAt = new Date(now.getTime() + maxSessionDurationMs).toISOString();
       }
+      const hardExpiry = maxLeaseExpiresAt ? new Date(maxLeaseExpiresAt).getTime() : now.getTime() + maxSessionDurationMs;
+      leaseExpiresAt = new Date(Math.min(now.getTime() + duration, hardExpiry)).toISOString();
       human_session_expire_at = leaseExpiresAt;
 
       if (isReply) {
@@ -123,6 +136,7 @@ export class TakeoverManager {
       human_session_started_at = null;
       human_session_expire_at = null;
       last_human_reply_at = null;
+      maxLeaseExpiresAt = null;
     }
 
     const state: TakeoverState = {
@@ -131,6 +145,7 @@ export class TakeoverManager {
       assignedHumanAgentId,
       updatedAt: now.toISOString(),
       leaseExpiresAt,
+      maxLeaseExpiresAt,
       human_session_started_at,
       human_session_expire_at,
       last_human_reply_at,
@@ -153,6 +168,7 @@ export class TakeoverManager {
         state.human_session_started_at = null;
         state.human_session_expire_at = null;
         state.last_human_reply_at = null;
+        state.maxLeaseExpiresAt = null;
         state.updatedAt = new Date().toISOString();
         this.localStates.set(conversationId, state);
         this.saveState();

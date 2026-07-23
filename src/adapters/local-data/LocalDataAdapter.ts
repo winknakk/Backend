@@ -489,6 +489,10 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
       const cid = String(c.id1);
       const takeover = await this.takeoverManager.getTakeoverState(cid);
+      if (String(c.handled_by || "ai") === "human" && takeover.status === "ACTIVE_AI") {
+        await this.updateHandoffState(cid, "ai");
+        c.handled_by = "ai";
+      }
 
       let profileName = "Nattapong";
       let avatarUrl: string | null = null;

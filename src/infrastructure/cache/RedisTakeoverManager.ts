@@ -2,6 +2,7 @@ import Redis from "ioredis";
 import { config } from "../../config/env";
 import { getProjectId } from "../../kernel/context/RequestContextHolder";
 import { createLogger } from "../../observability/logger";
+import { RoomStatus } from "../../schemas/aiops";
 
 const logger = createLogger("RedisTakeoverManager");
 
@@ -26,13 +27,50 @@ export class RedisTakeoverManager {
   /**
    * Acquires a takeover session lease in Redis for a specific duration.
    */
-  async acquireLease(convId: string, agentId: string, durationMs: number): Promise<void> {
+  async acquireLease(
+    convId: string,
+    agentId: string,
+    durationMs: number,
+    status: Exclude<RoomStatus, "ACTIVE_AI">,
+    isReply = false,
+    maxDurationMs = durationMs
+  ): Promise<{
+    status: Exclude<RoomStatus, "ACTIVE_AI">;
+    agentId: string;
+    startedAt: number;
+    expiresAt: number;
+    maxExpiresAt: number;
+    lastHumanReplyAt: number | null;
+  }> {
     const key = this.getLeaseKey(convId);
-    const expiresAt = Date.now() + durationMs;
-    const value = JSON.stringify({ agentId, expiresAt });
-    const ttlSeconds = Math.max(1, Math.ceil(durationMs / 1000));
+    const now = Date.now();
+    const existingRaw = await this.redis.get(key);
+    let existing: any = null;
+    try {
+      existing = existingRaw ? JSON.parse(existingRaw) : null;
+    } catch {
+      existing = null;
+    }
+
+    const continuingActiveSession = status === "ACTIVE_HUMAN" && existing?.status === "ACTIVE_HUMAN";
+    const startedAt = continuingActiveSession && Number.isFinite(existing?.startedAt)
+      ? existing.startedAt
+      : now;
+    const maxExpiresAt = continuingActiveSession && Number.isFinite(existing?.maxExpiresAt)
+      ? existing.maxExpiresAt
+      : startedAt + maxDurationMs;
+    const expiresAt = Math.min(now + durationMs, maxExpiresAt);
+    const lastHumanReplyAt = isReply
+      ? now
+      : continuingActiveSession
+        ? existing?.lastHumanReplyAt || null
+        : null;
+    const lease = { status, agentId, startedAt, expiresAt, maxExpiresAt, lastHumanReplyAt };
+    const value = JSON.stringify(lease);
+    const ttlSeconds = Math.max(1, Math.ceil((expiresAt - now) / 1000));
     await this.redis.setex(key, ttlSeconds, value);
-    logger.info({ convId, agentId, durationMs, key }, "Acquired takeover lease in Redis");
+    logger.info({ convId, agentId, status, durationMs, expiresAt, maxExpiresAt, key }, "Acquired takeover lease in Redis");
+    return lease;
   }
 
   /**
@@ -47,7 +85,15 @@ export class RedisTakeoverManager {
   /**
    * Checks the current state of a takeover lease lock.
    */
-  async checkLeaseStatus(convId: string): Promise<{ active: boolean; agentId?: string; expiresAt?: number }> {
+  async checkLeaseStatus(convId: string): Promise<{
+    active: boolean;
+    status?: Exclude<RoomStatus, "ACTIVE_AI">;
+    agentId?: string;
+    startedAt?: number;
+    expiresAt?: number;
+    maxExpiresAt?: number;
+    lastHumanReplyAt?: number | null;
+  }> {
     const key = this.getLeaseKey(convId);
     const raw = await this.redis.get(key);
     if (!raw) {
@@ -62,8 +108,12 @@ export class RedisTakeoverManager {
       }
       return {
         active: true,
+        status: data.status === "PENDING_HUMAN" ? "PENDING_HUMAN" : "ACTIVE_HUMAN",
         agentId: data.agentId,
+        startedAt: data.startedAt,
         expiresAt: data.expiresAt,
+        maxExpiresAt: data.maxExpiresAt,
+        lastHumanReplyAt: data.lastHumanReplyAt || null,
       };
     } catch (err: any) {
       logger.warn({ key, error: err.message }, "Failed to parse lease from Redis. Reverting to inactive.");

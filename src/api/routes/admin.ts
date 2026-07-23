@@ -233,8 +233,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const params = request.params as any;
     const result = await humanReplyService.takeover(params.id);
     if (deps.takeoverManager) {
-      const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-      deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
+      const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
+      await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
     }
     return reply.code(200).send(result);
   });
@@ -251,12 +251,23 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       });
     }
 
+    if (deps.takeoverManager) {
+      const takeoverState = await deps.takeoverManager.getTakeoverState(params.id);
+      if (takeoverState.status !== "ACTIVE_HUMAN") {
+        return reply.code(409).send({
+          error: "Takeover required",
+          message: "This conversation is no longer assigned to a human. Claim it again before replying.",
+          status: takeoverState.status,
+        });
+      }
+    }
+
     const rawReplyTo = body.reply_to_message_id || body.replyToMessageId || body.reply_to_id || body.replyToId;
     const replyToId = rawReplyTo ? parseInt(String(rawReplyTo), 10) : undefined;
     const result = await humanReplyService.sendReply(params.id, body.message, replyToId);
     if (deps.takeoverManager) {
-      const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
-      deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
+      const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
+      await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
     }
     return reply.code(200).send(result);
   });
@@ -318,7 +329,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const params = request.params as any;
     try {
       if (deps.takeoverManager) {
-        deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_AI");
+        await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_AI");
       }
 
       const conv = await deps.dbAdapter.getConversation(params.id);

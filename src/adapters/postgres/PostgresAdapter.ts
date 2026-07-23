@@ -889,6 +889,11 @@ export class PostgresAdapter implements DatabaseAdapter {
     const res = await this.executeReadQuery(query, queryParams, fallback);
     return await Promise.all(res.rows.map(async (row) => {
       const takeover = await this.takeoverManager.getTakeoverState(row.id);
+      let handledBy = row.handled_by || "ai";
+      if (handledBy === "human" && takeover.status === "ACTIVE_AI") {
+        await this.updateHandoffState(String(row.id), "ai");
+        handledBy = "ai";
+      }
       
       const priorities = (row.ticket_priorities || '').split(' ');
       const highestPriority = priorities.reduce((max: string, pri: string) => {
@@ -915,7 +920,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         company_name: row.company_name,
         ticket_ids: row.ticket_ids || "",
         message_contents: row.message_contents || "",
-        handled_by: row.handled_by || "ai",
+        handled_by: handledBy,
         takeover_status: takeover?.status || "ACTIVE_AI",
         assigned_pm: takeover?.assignedHumanAgentId || null,
         human_session_started_at: takeover?.human_session_started_at || null,
