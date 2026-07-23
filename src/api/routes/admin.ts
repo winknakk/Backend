@@ -176,6 +176,10 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const conversationId = parseInt(String(params.id), 10);
     const messages = await humanReplyService.getMessages(params.id);
 
+    // Import media service for fresh URL generation
+    const { S3MediaStorageService } = await import("../../media/services/S3MediaStorageService");
+    const mediaService = new S3MediaStorageService({});
+
     const hydratedMessages = await Promise.all(messages.map(async (m: any) => {
       const msgId = m.id || m.Id;
       if (!msgId) return m;
@@ -186,18 +190,37 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
         [msgId]
       );
 
-      return {
-        ...m,
-        messageType: m.message_type || m.messageType || "text",
-        attachments: attRes.rows.map((att: any) => ({
+      // Generate fresh URLs from storage_key (presigned URLs expire after 15 min)
+      const attachments = await Promise.all(attRes.rows.map(async (att: any) => {
+        let fileUrl = att.file_url;
+        let thumbnailUrl = att.thumbnail_url || att.file_url;
+
+        // If storage_key exists, generate fresh presigned URL
+        if (att.storage_key) {
+          try {
+            const freshUrl = await mediaService.generatePresignedUrl(att.storage_key, 3600);
+            fileUrl = freshUrl;
+            thumbnailUrl = freshUrl;
+          } catch (e) {
+            // Fall back to stored URL
+          }
+        }
+
+        return {
           id: att.id,
-          fileUrl: att.file_url,
-          thumbnailUrl: att.thumbnail_url || att.file_url,
+          fileUrl,
+          thumbnailUrl,
           fileName: att.file_name,
           fileType: att.file_type || "image/jpeg",
           fileSize: att.file_size || 0,
           storageKey: att.storage_key
-        }))
+        };
+      }));
+
+      return {
+        ...m,
+        messageType: m.message_type || m.messageType || "text",
+        attachments
       };
     }));
 
@@ -234,6 +257,58 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
       deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
     }
+    return reply.code(200).send(result);
+  });
+
+  // 9.1. POST /api/admin/media/upload (Base64 file upload from Admin UI)
+  fastify.post("/api/admin/media/upload", async (request, reply) => {
+    const body = request.body as any;
+    if (!body || !body.base64Data) {
+      return reply.code(400).send({ error: "Missing base64Data in request body" });
+    }
+
+    try {
+      const base64Str = body.base64Data.replace(/^data:image\/\w+;base64,/, "");
+      const buffer = Buffer.from(base64Str, "base64");
+      const fileName = body.fileName || `admin_upload_${Date.now()}.jpg`;
+      const mimeType = body.fileType || "image/jpeg";
+
+      const { S3MediaStorageService } = await import("../../media/services/S3MediaStorageService");
+      const mediaService = new S3MediaStorageService({});
+      const uploadResult = await mediaService.upload({
+        buffer,
+        fileName,
+        mimeType,
+        folder: "admin_media"
+      });
+
+      return reply.code(200).send({
+        success: true,
+        fileUrl: uploadResult.fileUrl,
+        storageKey: uploadResult.storageKey,
+        fileName: uploadResult.fileName
+      });
+    } catch (err: any) {
+      return reply.code(500).send({ error: "Upload failed", details: err.message });
+    }
+  });
+
+  // 9.2. POST /api/admin/conversations/:id/send-image
+  fastify.post("/api/admin/conversations/:id/send-image", async (request, reply) => {
+    const params = request.params as any;
+    const body = request.body as any;
+    if (!body || !body.imageUrl) {
+      return reply.code(400).send({ error: "Field 'imageUrl' is required" });
+    }
+
+    const replyToId = body.reply_to_message_id ? parseInt(String(body.reply_to_message_id), 10) : undefined;
+    const result = await humanReplyService.sendImageReply(params.id, body.imageUrl, replyToId);
+
+    if (deps.takeoverManager) {
+      const leaseDurationMs = (config.HUMAN_SESSION_TIMEOUT_MINUTES || 480) * 60 * 1000;
+      deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
+    }
+
     return reply.code(200).send(result);
   });
 

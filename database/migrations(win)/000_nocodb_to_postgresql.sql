@@ -61,6 +61,10 @@ CREATE TABLE messages (
     conversation_id INT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     role VARCHAR(50) NOT NULL,
     content TEXT NOT NULL,
+    message_type VARCHAR(50) DEFAULT 'text',
+    external_id VARCHAR(255),
+    reply_to_message_id INT,
+    quote_token TEXT,
     created_at TIMESTAMPTZ,
     query TEXT
 );
