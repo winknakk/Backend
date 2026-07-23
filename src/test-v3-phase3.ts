@@ -45,7 +45,7 @@ async function runPhase3Tests() {
       },
       async () => {
         // Lease key should be project:456:takeover:conv-999
-        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 1500); // 1.5 seconds lease
+        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 1500, "ACTIVE_HUMAN"); // 1.5 seconds lease
         
         const leaseKey = "project:456:takeover:conv-999";
         const rawLock = await redis.get(leaseKey);
@@ -65,7 +65,7 @@ async function runPhase3Tests() {
         assert(expiredStatus.active === false, "Lease must expire automatically in Redis");
 
         // Clean release lease
-        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 5000);
+        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 5000, "ACTIVE_HUMAN");
         await takeoverManager.releaseLease("conv-999");
         const releasedStatus = await takeoverManager.checkLeaseStatus("conv-999");
         assert(releasedStatus.active === false, "Released lease status must be inactive");

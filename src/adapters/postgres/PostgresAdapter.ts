@@ -216,7 +216,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number): Promise<any> {
     if (!this.isValidConversationId(conversationId)) return null;
     try {
-      const typeToSave = messageType || (!content || content.includes('[ระบบตรวจพบรูปภาพ]') ? 'image' : 'text');
+      const typeToSave = messageType || 'text';
       const { rows } = await pool.query(
         `INSERT INTO messages (conversation_id, role, content, message_type, external_id, reply_to_message_id, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())

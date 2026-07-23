@@ -43,7 +43,11 @@ export class MessageAttachment extends BaseEntity<number> {
   constructor(props: MessageAttachmentProps) {
     super(props.id || 0);
 
-    if (!props.messageId) throw new Error("Message ID is required for attachment");
+    // Channel adapters normalize and upload media before the parent message is
+    // persisted, so 0 is the explicit temporary ID for an unpersisted attachment.
+    if (!Number.isInteger(props.messageId) || props.messageId < 0) {
+      throw new Error("Message ID must be a non-negative integer");
+    }
     if (!props.fileUrl) throw new Error("File URL is required for attachment");
     if (!props.fileName) throw new Error("File Name is required for attachment");
 

@@ -48,6 +48,7 @@ import { startTimer } from "../observability/timing";
 import { authHook } from "../middleware/auth";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
+import { SmsNotificationService } from "../services/SmsNotificationService";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { QueueFactory } from "../queue/QueueFactory";
 import { startConfigWatcher } from "../cache/ConfigWatcher";
@@ -99,6 +100,7 @@ const planeService = new PlaneService(dbAdapter);
 const planeWebhookService = new PlaneWebhookService(dbAdapter);
 const planeReverseSyncPoller = new PlaneReverseSyncPoller(planeWebhookService);
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
+const smsNotificationService = new SmsNotificationService(pool);
 
 async function requestHumanTakeover(input: {
   conversationId: string;
@@ -170,7 +172,47 @@ async function requestHumanTakeover(input: {
     })
   );
 
-  return takeoverState;
+  let smsTargetPhone = "0633628242";
+  try {
+    const projAdminResult = await pool.query(
+      `SELECT phone_number FROM operators o
+       JOIN operator_project_access opa ON o.id = opa.operator_id
+       WHERE opa.project_id = $1 AND o.phone_number IS NOT NULL
+       LIMIT 1`,
+      [parseInt(conversationProjectId, 10)]
+    );
+    if (projAdminResult.rows.length > 0 && projAdminResult.rows[0].phone_number) {
+      smsTargetPhone = projAdminResult.rows[0].phone_number;
+    } else {
+      const globalAdminResult = await pool.query(
+        `SELECT phone_number FROM operators WHERE role = 'super_admin' AND phone_number IS NOT NULL LIMIT 1`
+      );
+      if (globalAdminResult.rows.length > 0 && globalAdminResult.rows[0].phone_number) {
+        smsTargetPhone = globalAdminResult.rows[0].phone_number;
+      }
+    }
+  } catch (err: any) {
+    serverLogger.error({ error: err.message }, "Failed to fetch admin phone number from DB");
+  }
+
+  // Clean admin phone number format for THSMS (e.g. 0942415642)
+  let cleanPhone = smsTargetPhone.trim().replace(/\D/g, "");
+  if (cleanPhone.startsWith("66")) {
+    cleanPhone = "0" + cleanPhone.substring(2);
+  }
+
+  const smsProviderUrl = process.env.SMS_PROVIDER_URL || "https://api-v2.thaibulksms.com/sms";
+  const apiKey = process.env.THAIBULKSMS_API_KEY || "";
+  const apiSecret = process.env.THAIBULKSMS_API_SECRET || "";
+  const rawToken = Buffer.from(`${apiKey}:${apiSecret}`).toString("base64");
+  const smsProviderToken = process.env.SMS_PROVIDER_TOKEN || `Basic ${rawToken}`;
+
+  return {
+    ...takeoverState,
+    smsTargetPhone: cleanPhone,
+    smsProviderUrl,
+    smsProviderToken
+  };
 }
 
 const orchestrator = new Orchestrator(memoryService, agentManager, takeoverManager);
@@ -750,7 +792,29 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
     status: state.status,
     suppress_reply: true,
     expires_at: state.leaseExpiresAt,
+    admin_phone_number: (state as any).smsTargetPhone,
+    sms_provider_url: (state as any).smsProviderUrl,
+    sms_provider_token: (state as any).smsProviderToken
   });
+});
+
+fastify.post("/api/v1/internal/notifications/sms", async (request, reply) => {
+  const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
+  const conversationId = payload.conversationId;
+  if (!conversationId) {
+    return reply.code(400).send({ error: "Bad Request", message: "conversationId is required" });
+  }
+
+  const result = await smsNotificationService.sendTakeoverAlert({
+    conversationId: String(conversationId),
+    customerName: payload.customerName,
+    reasonCode: payload.reasonCode || payload.reason_code,
+    reasonDetail: payload.reasonDetail || payload.reason_detail,
+    lastMessage: payload.content,
+  });
+
+  return reply.code(200).send({ success: true, sent: result });
 });
 
 fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {

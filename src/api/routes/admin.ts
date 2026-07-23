@@ -15,6 +15,7 @@ import { TicketInputSchema } from "../../schemas/validation";
 import { TakeoverManager } from "../../human-takeover/TakeoverManager";
 import { ConversationMemoryService } from "../../memory/ConversationMemoryService";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
+import { S3MediaStorageService } from "../../media/services/S3MediaStorageService";
 
 export interface AdminRouteDependencies {
   metricAggregator: MetricAggregator;
@@ -161,6 +162,35 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
   const humanReplyService = new HumanReplyService(deps.dbAdapter);
   const planeService = new PlaneService(deps.dbAdapter);
+  const getMediaStorageService = (req?: any) => {
+    let baseUrl = (config.BACKEND_PUBLIC_URL || "http://localhost:3000").trim();
+    if (req?.headers?.host) {
+      const protocol = req.headers["x-forwarded-proto"] || (req.socket?.encrypted ? "https" : "http");
+      baseUrl = `${protocol}://${req.headers.host}`;
+    }
+    return new S3MediaStorageService({
+      publicCdnBaseUrl: `${baseUrl}/api/v1/media`
+    });
+  };
+
+  const hydrateAttachment = async (att: any, req?: any) => {
+    const storageKey = att.storage_key || "";
+    const mediaStorageService = getMediaStorageService(req);
+    const hasLocalFile = storageKey ? await mediaStorageService.exists(storageKey) : false;
+    const freshFileUrl = hasLocalFile
+      ? await mediaStorageService.generatePresignedUrl(storageKey)
+      : att.file_url;
+
+    return {
+      id: att.id,
+      fileUrl: freshFileUrl,
+      thumbnailUrl: hasLocalFile ? freshFileUrl : (att.thumbnail_url || att.file_url),
+      fileName: att.file_name,
+      fileType: att.file_type || "image/jpeg",
+      fileSize: att.file_size || 0,
+      storageKey
+    };
+  };
 
   // 6. GET /api/admin/conversations
   fastify.get("/api/admin/conversations", async (request, reply) => {
@@ -189,15 +219,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       return {
         ...m,
         messageType: m.message_type || m.messageType || "text",
-        attachments: attRes.rows.map((att: any) => ({
-          id: att.id,
-          fileUrl: att.file_url,
-          thumbnailUrl: att.thumbnail_url || att.file_url,
-          fileName: att.file_name,
-          fileType: att.file_type || "image/jpeg",
-          fileSize: att.file_size || 0,
-          storageKey: att.storage_key
-        }))
+        attachments: await Promise.all(attRes.rows.map((att: any) => hydrateAttachment(att, request)))
       };
     }));
 

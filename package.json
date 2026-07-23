@@ -1,6 +1,7 @@
 {
   "scripts": {
     "test:takeover-policy": "npx tsx src/test-takeover-policy.ts",
+    "test:media-pipeline": "npx tsx src/test-media-pipeline.ts",
     "db:migrate": "npx tsx src/adapters/postgres/run-migrations-cli.ts",
     "db:seed": "npx tsx src/adapters/postgres/run-seeds-cli.ts",
     "plane:sync": "npx tsx src/run-plane-reverse-sync.ts",
