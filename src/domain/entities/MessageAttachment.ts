@@ -43,7 +43,7 @@ export class MessageAttachment extends BaseEntity<number> {
   constructor(props: MessageAttachmentProps) {
     super(props.id || 0);
 
-    if (!props.messageId) throw new Error("Message ID is required for attachment");
+    if (props.messageId === undefined || props.messageId === null) throw new Error("Message ID is required for attachment");
     if (!props.fileUrl) throw new Error("File URL is required for attachment");
     if (!props.fileName) throw new Error("File Name is required for attachment");
 

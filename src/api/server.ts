@@ -64,7 +64,7 @@ import WebChatGateway from "../presentation/http/routes/WebChatGateway";
 import Redis from "ioredis";
 
 const serverLogger = createLogger("server");
-const fastify = Fastify({ loggerInstance: rootLogger as any });
+const fastify = Fastify({ loggerInstance: rootLogger as any, bodyLimit: 50 * 1024 * 1024 }); // 50MB body limit for image uploads
 fastify.register(websocketPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const adminConnections = new Set<any>();
@@ -1202,13 +1202,47 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
   const messageText = payload.messageText || payload.message || "";
   const isMentioned = payload.isMentioned === true || payload.isMentioned === "true";
   
-  // Unify all LINE Gateway / Activepieces / PromptX field aliases
-  const imageId = payload.line_image_id || payload.lineImageId || payload.imageId || payload.line_image || payload.message_id || payload.external_id || payload.event?.message?.id || payload.body?.line_image_id;
-  const rawMessageType = payload.messageType || payload.message_type;
+  // Unify all LINE Gateway / Activepieces / PromptX field aliases (bulletproof deep lookup)
+  const imageId = payload.line_image_id 
+    || payload.lineImageId 
+    || payload.imageId 
+    || payload.line_image 
+    || payload.message_id 
+    || payload.external_id 
+    || payload.event?.message?.id 
+    || payload.body?.line_image_id
+    || payload.body?.message?.id
+    || body.line_image_id
+    || body.message_id
+    || body.external_id
+    || body.event?.message?.id
+    || null;
+
+  const rawMessageType = payload.messageType || payload.message_type || body.messageType || body.message_type;
   const messageType = rawMessageType || (imageId ? "image" : "text");
-  const quoteToken = payload.quoteToken || payload.quote_token || payload.event?.message?.quoteToken || payload.body?.quote_token || null;
-  const replyToken = payload.replyToken || payload.reply_token || payload.event?.replyToken || payload.body?.reply_token || null;
-  const externalId = payload.externalId || payload.external_id || imageId || payload.event?.message?.id || null;
+
+  const quoteToken = payload.quoteToken 
+    || payload.quote_token 
+    || payload.event?.message?.quoteToken 
+    || payload.body?.quote_token 
+    || body.quote_token 
+    || body.event?.message?.quoteToken 
+    || null;
+
+  const replyToken = payload.replyToken 
+    || payload.reply_token 
+    || payload.event?.replyToken 
+    || payload.body?.reply_token 
+    || body.reply_token 
+    || null;
+
+  const externalId = payload.externalId 
+    || payload.external_id 
+    || imageId 
+    || payload.event?.message?.id 
+    || body.external_id 
+    || body.event?.message?.id 
+    || null;
 
   serverLogger.info({ senderId, messageText, messageType, imageId, quoteToken, replyToken, channel }, "[Webhook] Inbound customer message payload received");
 
