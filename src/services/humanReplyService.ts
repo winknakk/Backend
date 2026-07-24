@@ -247,7 +247,7 @@ export class HumanReplyService {
     };
   }
 
-  async sendImageReply(conversationId: string, imageUrl: string, replyToMessageId?: number, storageKey?: string, uploadedFileName?: string): Promise<any> {
+  async sendImageReply(conversationId: string, imageUrl: string, replyToMessageId?: number, storageKey?: string, uploadedFileName?: string, captionText?: string): Promise<any> {
     await this.dbAdapter.updateHandoffState(conversationId, "human");
 
     const ident = await this.dbAdapter.getConversationIdent(conversationId);
@@ -267,33 +267,108 @@ export class HumanReplyService {
 
     if (channel === "line" || channel === "line_group") {
       const token = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
-      await axios.post(
-        "https://api.line.me/v2/bot/message/push",
-        {
-          to: ident.channel_ref,
-          messages: [
-            {
-              type: "image",
-              originalContentUrl: publicUrl,
-              previewImageUrl: publicUrl,
-            },
-          ],
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          timeout: 15000,
+      let quoteToken: string | null = null;
+
+      // Case 1: Explicit reply to a specific message ID
+      if (replyToMessageId) {
+        try {
+          const parentRes = await pool.query(`SELECT quote_token FROM messages WHERE id = $1 LIMIT 1`, [replyToMessageId]);
+          if (parentRes.rows.length > 0 && parentRes.rows[0].quote_token) {
+            quoteToken = parentRes.rows[0].quote_token;
+          }
+        } catch (e) {}
+      }
+
+      // Case 2: Auto-fallback — if no explicit replyToMessageId or its quote_token was null,
+      // try the latest customer message with a non-null quote_token from the last 60 seconds
+      if (!quoteToken) {
+        try {
+          const fallbackRes = await pool.query(
+            `SELECT quote_token FROM messages
+             WHERE conversation_id = $1
+               AND role = 'customer'
+               AND quote_token IS NOT NULL
+               AND created_at > NOW() - INTERVAL '60 seconds'
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [conversationId]
+          );
+          if (fallbackRes.rows.length > 0 && fallbackRes.rows[0].quote_token) {
+            quoteToken = fallbackRes.rows[0].quote_token;
+            console.log(`[HumanReplyService] Auto-resolved quoteToken for image reply from latest customer message`);
+          }
+        } catch (e) {
+          console.warn(`[HumanReplyService] quoteToken auto-fallback query failed:`, e);
         }
-      );
+      }
+
+      const imgObj: any = {
+        type: "image",
+        originalContentUrl: publicUrl,
+        previewImageUrl: publicUrl,
+      };
+
+      // LINE Messaging API requires quoteToken to be attached to a text message object.
+      // If quoteToken and captionText are present, send quoted text message + image message together in push!
+      const lineMessages: any[] = [];
+      if (quoteToken && captionText) {
+        lineMessages.push({
+          type: "text",
+          text: captionText,
+          quoteToken: quoteToken,
+        });
+      } else if (captionText) {
+        lineMessages.push({
+          type: "text",
+          text: captionText,
+        });
+      }
+      lineMessages.push(imgObj);
+
+      try {
+        await axios.post(
+          "https://api.line.me/v2/bot/message/push",
+          {
+            to: ident.channel_ref,
+            messages: lineMessages,
+          },
+          {
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            timeout: 15000,
+          }
+        );
+      } catch (pushErr: any) {
+        // If native quoteToken is expired (>60s), LINE returns HTTP 400. Fall back cleanly to standard image push!
+        if (quoteToken && pushErr.response?.status === 400) {
+          console.log(`[HumanReplyService] quoteToken expired/rejected by LINE for image, falling back to standard image push...`);
+          await axios.post(
+            "https://api.line.me/v2/bot/message/push",
+            {
+              to: ident.channel_ref,
+              messages: [imgObj],
+            },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              timeout: 15000,
+            }
+          );
+        } else {
+          throw pushErr;
+        }
+      }
     }
 
-    // Save to DB
+    // Save to DB (persist captionText so it displays in Admin UI)
     const savedMsg = await this.dbAdapter.saveMessage(
       conversationId,
       "human",
-      "",
+      captionText || "",
       undefined,
       "image",
       replyToMessageId
