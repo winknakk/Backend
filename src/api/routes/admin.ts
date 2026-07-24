@@ -203,56 +203,68 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
   // 7. GET /api/admin/conversations/:id/messages
   fastify.get("/api/admin/conversations/:id/messages", async (request, reply) => {
     const params = request.params as any;
-    const conversationId = parseInt(String(params.id), 10);
-    const messages = await humanReplyService.getMessages(params.id);
+    try {
+      const messages = await humanReplyService.getMessages(params.id);
 
-    // Import media service for fresh URL generation
-    const { S3MediaStorageService } = await import("../../media/services/S3MediaStorageService");
-    const mediaService = new S3MediaStorageService({});
+      // Import media service for fresh URL generation
+      const { S3MediaStorageService } = await import("../../media/services/S3MediaStorageService");
+      const mediaService = new S3MediaStorageService({});
 
-    const hydratedMessages = await Promise.all(messages.map(async (m: any) => {
-      const msgId = m.id || m.Id;
-      if (!msgId) return m;
+      const hydratedMessages = await Promise.all(messages.map(async (m: any) => {
+        const msgId = m.id || m.Id;
+        if (!msgId) return m;
 
-      const attRes = await pool.query(
-        `SELECT id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key 
-         FROM message_attachments WHERE message_id = $1`,
-        [msgId]
-      );
+        let attachments: any[] = [];
+        try {
+          const attRes = await pool.query(
+            `SELECT id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key 
+             FROM message_attachments WHERE message_id = $1`,
+            [msgId]
+          );
 
-      // Generate fresh URLs from storage_key (presigned URLs expire after 15 min)
-      const attachments = await Promise.all(attRes.rows.map(async (att: any) => {
-        let fileUrl = att.file_url;
-        let thumbnailUrl = att.thumbnail_url || att.file_url;
+          // Generate fresh URLs from storage_key (presigned URLs expire after 15 min)
+          attachments = await Promise.all(attRes.rows.map(async (att: any) => {
+            let fileUrl = att.file_url;
+            let thumbnailUrl = att.thumbnail_url || att.file_url;
 
-        // If storage_key exists, generate fresh presigned URL
-        if (att.storage_key) {
-          try {
-            const freshUrl = await mediaService.generatePresignedUrl(att.storage_key, 3600);
-            fileUrl = freshUrl;
-            thumbnailUrl = freshUrl;
-          } catch (e) {
-            // Fall back to stored URL
-          }
+            // If storage_key exists, generate fresh presigned URL
+            if (att.storage_key) {
+              try {
+                const freshUrl = await mediaService.generatePresignedUrl(att.storage_key, 3600);
+                fileUrl = freshUrl;
+                thumbnailUrl = freshUrl;
+              } catch (e) {
+                // Fall back to stored URL
+              }
+            }
+
+            return {
+              id: att.id,
+              fileUrl,
+              thumbnailUrl,
+              fileName: att.file_name,
+              fileType: att.file_type || "image/jpeg",
+              fileSize: att.file_size || 0,
+              storageKey: att.storage_key
+            };
+          }));
+        } catch (attErr: any) {
+          // If message_attachments table doesn't exist or fails, proceed without attachments
         }
 
         return {
           ...m,
           messageType: m.message_type || m.messageType || "text",
-          attachments: attRes.rows.map((att: any) => ({
-            id: att.id,
-            fileUrl: att.file_url,
-            thumbnailUrl: att.thumbnail_url || att.file_url,
-            fileName: att.file_name,
-            fileType: att.file_type || "image/jpeg",
-            fileSize: att.file_size || 0,
-            storageKey: att.storage_key
-          }))
+          attachments
         };
       }));
 
       return reply.code(200).send(hydratedMessages);
-    });
+    } catch (err: any) {
+      console.error("[admin.ts] Error fetching conversation messages:", err.message);
+      return reply.code(500).send({ error: "Failed to fetch conversation messages", message: err.message });
+    }
+  });
 
 
     // 8. POST /api/admin/conversations/:id/takeover
@@ -281,11 +293,10 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       if (deps.takeoverManager) {
         const takeoverState = await deps.takeoverManager.getTakeoverState(params.id);
         if (takeoverState.status !== "ACTIVE_HUMAN") {
-          return reply.code(409).send({
-            error: "Takeover required",
-            message: "This conversation is no longer assigned to a human. Claim it again before replying.",
-            status: takeoverState.status,
-          });
+          // Auto-trigger takeover when human operator replies directly
+          await humanReplyService.takeover(params.id);
+          const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
+          await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
         }
       }
 
@@ -642,13 +653,30 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
         let aiSummary = `Customer ${identity.profile_name} from ${company.name} has opened a new conversation room. No messages have been exchanged yet.`;
         if (messages.length > 0) {
           const customerMsgs = messages.filter((m: any) => m.role === "user" || m.role === "customer" || m.sender === "customer");
-          const firstQuestion = customerMsgs.length > 0 ? customerMsgs[0].content : messages[0].content;
           const lastMsg = messages[messages.length - 1];
 
-          aiSummary = `${identity.profile_name} from ${company.name} reached out regarding: "${firstQuestion.length > 120 ? firstQuestion.substring(0, 120) + '...' : firstQuestion}".`;
+          const getSnippet = (msg: any) => {
+            const text = (msg.content || "").trim();
+            if (text) {
+              return text.length > 120 ? text.substring(0, 120) + '...' : text;
+            }
+            if (msg.attachments && msg.attachments.length > 0) {
+              return '[Attachment]';
+            }
+            if (msg.message_type === 'image' || msg.messageType === 'image') {
+              return '[Image]';
+            }
+            return '(no text content)';
+          };
+
+          const firstMsg = customerMsgs.length > 0 ? customerMsgs[0] : messages[0];
+          const questionText = getSnippet(firstMsg);
+
+          aiSummary = `${identity.profile_name} from ${company.name} reached out regarding: "${questionText}".`;
           if (lastMsg) {
             const senderLabel = lastMsg.role === "user" || lastMsg.role === "customer" || lastMsg.sender === "customer" ? "Customer" : "AI/Operator";
-            aiSummary += ` The latest update was from the ${senderLabel}: "${lastMsg.content.length > 80 ? lastMsg.content.substring(0, 80) + '...' : lastMsg.content}".`;
+            const lastText = getSnippet(lastMsg);
+            aiSummary += ` The latest update was from the ${senderLabel}: "${lastText}".`;
           }
         }
 

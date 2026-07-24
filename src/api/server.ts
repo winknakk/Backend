@@ -1325,13 +1325,19 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
   const rawMessageType = payload.messageType || payload.message_type || body.messageType || body.message_type;
   const messageType = rawMessageType || (imageId ? "image" : "text");
 
-  const quoteToken = payload.quoteToken 
-    || payload.quote_token 
+  const rawQuoteToken = payload.quote_token 
+    || payload.quoteToken 
+    || payload.event?.message?.quote_token
     || payload.event?.message?.quoteToken 
     || payload.body?.quote_token 
+    || payload.body?.quoteToken 
     || body.quote_token 
+    || body.quoteToken 
+    || body.data?.quote_token
+    || body.data?.quoteToken
     || body.event?.message?.quoteToken 
     || null;
+  const quote_token = (rawQuoteToken && String(rawQuoteToken).trim()) ? String(rawQuoteToken).trim() : null;
 
   const replyToken = payload.replyToken 
     || payload.reply_token 
@@ -1348,7 +1354,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     || body.event?.message?.id 
     || null;
 
-  serverLogger.info({ senderId, messageText, messageType, imageId, quoteToken, replyToken, channel }, "[Webhook] Inbound customer message payload received");
+  serverLogger.info({ senderId, messageText, messageType, imageId, quote_token, replyToken, channel }, "[Webhook] Inbound customer message payload received");
 
   if (!senderId) {
     return reply.code(400).send({ error: "Bad Request", message: "Missing senderId" });
@@ -1372,7 +1378,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         externalId || undefined,
         messageType,
         undefined,
-        quoteToken || undefined
+        quote_token || undefined
       );
     }
 
@@ -1389,7 +1395,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         if (targetImageId) {
           const lineEvent = {
             type: "message",
-            message: { type: "image", id: targetImageId, quoteToken },
+            message: { type: "image", id: targetImageId, quote_token },
             source: { userId: senderId },
             timestamp: Date.now()
           };
