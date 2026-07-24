@@ -17,7 +17,7 @@ async function runPhase3Tests() {
   console.log("AutomationX V3 Phase 3 Redis State & Queue Verification Tests");
   console.log("============================================================");
 
-  const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 1 });
+  const redis = new Redis(config.REDIS_URL);
   const takeoverManager = new RedisTakeoverManager();
 
   try {
@@ -45,7 +45,7 @@ async function runPhase3Tests() {
       },
       async () => {
         // Lease key should be project:456:takeover:conv-999
-        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 1500); // 1.5 seconds lease
+        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 1500, "ACTIVE_HUMAN"); // 1.5 seconds lease
         
         const leaseKey = "project:456:takeover:conv-999";
         const rawLock = await redis.get(leaseKey);
@@ -65,7 +65,7 @@ async function runPhase3Tests() {
         assert(expiredStatus.active === false, "Lease must expire automatically in Redis");
 
         // Clean release lease
-        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 5000);
+        await takeoverManager.acquireLease("conv-999", "human_agent_alice", 5000, "ACTIVE_HUMAN");
         await takeoverManager.releaseLease("conv-999");
         const releasedStatus = await takeoverManager.checkLeaseStatus("conv-999");
         assert(releasedStatus.active === false, "Released lease status must be inactive");
@@ -117,6 +117,9 @@ async function runPhase3Tests() {
     const lockVal = await redis.get(lockKey);
     assert(lockVal === "done", "Idempotency token must be set to 'done' in Redis on successful job completion");
 
+    // Close the first worker to prevent competing for DLQ failing jobs
+    await jobQueue.disconnect();
+
     // 3. Verify Dead Letter Queue (DLQ) Fault-Tolerance
     console.log("Testing Dead Letter Queue (DLQ) Fault-Tolerance...");
     const badEventId = `evt-fail-${Date.now()}`;
@@ -162,7 +165,6 @@ async function runPhase3Tests() {
     await redis.del(`processed:event:${eventId}`);
     await redis.del(`processed:event:${badEventId}`);
     await takeoverManager.disconnect();
-    await jobQueue.disconnect();
     await failingQueue.disconnect();
     await redis.quit();
 

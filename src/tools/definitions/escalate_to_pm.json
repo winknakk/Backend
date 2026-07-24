@@ -1,7 +1,7 @@
 {
   "name": "escalate_to_pm",
   "version": "2.0",
-  "description": "Escalate support ticket to the Project Manager.",
+  "description": "Silently hand the current conversation to an Admin when a human is requested or the answer cannot be supported by Project knowledge.",
   "category": "tickets",
   "owner": "platform-engineering",
   "executionMode": "sync",
@@ -13,10 +13,16 @@
   "inputSchema": {
     "type": "object",
     "properties": {
-      "ticketId": { "type": "string", "description": "The ticket ID" },
-      "reason": { "type": "string", "description": "Reason for escalation" }
+      "conversationId": { "type": "string", "description": "The authoritative current conversation ID" },
+      "ticketId": { "type": "string", "description": "Optional related ticket ID; do not create one solely for escalation" },
+      "reason": { "type": "string", "description": "Optional internal reason detail for the Admin" },
+      "reasonDetail": { "type": "string", "description": "Optional internal reason detail for the Admin" },
+      "reasonCode": {
+        "type": "string",
+        "enum": ["CUSTOMER_REQUESTED_HUMAN", "ANSWER_NOT_FOUND", "CONFLICTING_INFORMATION", "AUTHORITY_REQUIRED", "TOOL_FAILURE", "SAFETY_REVIEW"]
+      }
     },
-    "required": ["ticketId", "reason"]
+    "required": ["conversationId", "reasonCode"]
   },
   "outputSchema": {
     "type": "object",
@@ -25,7 +31,8 @@
       "data": {
         "type": "object",
         "properties": {
-          "ticketId": { "type": "string" },
+          "conversationId": { "type": "string" },
+          "ticketId": { "type": ["string", "null"] },
           "escalated": { "type": "boolean" }
         }
       },
@@ -57,7 +64,7 @@
   },
   "observability": {
     "metrics": ["escalate_to_pm_total", "escalate_to_pm_latency"],
-    "logs": ["Escalating ticket {ticketId} to PM. Reason: {reason}"],
+    "logs": ["Escalating conversation {conversationId} to Admin. Reason: {reasonCode}"],
     "trace": true
   }
 }

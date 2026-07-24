@@ -6,7 +6,7 @@
 -- 1. Create WebChat Sessions Table
 CREATE TABLE IF NOT EXISTS webchat_sessions (
   id SERIAL PRIMARY KEY,
-  identity_id VARCHAR(255) NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+  identity_id INTEGER NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
   session_token VARCHAR(512) UNIQUE NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   last_active_at TIMESTAMPTZ DEFAULT NOW()

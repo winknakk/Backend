@@ -39,21 +39,61 @@ export class ConfigLoaderService {
       `SELECT system_instruction, model_name, temperature, max_tokens 
        FROM project_prompts 
        WHERE project_id = $1 
+       ORDER BY id DESC 
        LIMIT 1`,
       [projectId]
     );
 
-    const config: PromptConfig = rows.length > 0 ? {
-      systemInstruction: rows[0].system_instruction,
-      modelName: rows[0].model_name,
-      temperature: parseFloat(rows[0].temperature),
-      maxTokens: rows[0].max_tokens
-    } : {
-      // System defaults if no database config exists
-      systemInstruction: "You are an helpful AI Assistant designed to resolve tickets and support customers.",
-      modelName: "gemini-1.5-pro",
-      temperature: 0.00,
-      maxTokens: 2048
+    let allowedTools: string[] = [];
+    try {
+      const permRes = await pool.query(
+        "SELECT tool_name FROM project_mcp_permissions WHERE project_id = $1::integer",
+        [parseInt(projectId, 10)]
+      );
+      allowedTools = permRes.rows.map((r: any) => r.tool_name);
+    } catch (dbErr: any) {
+      logger.warn({ projectId, error: dbErr.message }, "Failed to query permissions for prompt config compilation");
+      allowedTools = ["search_project_docs", "create_ticket"];
+    }
+
+    let aiProfileContext = "";
+    try {
+      const compRes = await pool.query(
+        `SELECT c.ai_profile_context 
+         FROM projects p 
+         JOIN companies c ON p.company_id = c.id 
+         WHERE p.id = $1::integer 
+         LIMIT 1`,
+        [parseInt(projectId, 10)]
+      );
+      if (compRes.rows.length > 0) {
+        aiProfileContext = compRes.rows[0].ai_profile_context || "";
+      }
+    } catch (err: any) {
+      logger.warn({ projectId, error: err.message }, "Failed to load company ai_profile_context for prompt config compilation");
+    }
+
+    let systemInstruction = rows.length > 0 ? rows[0].system_instruction : "You are an helpful AI Assistant designed to resolve tickets and support customers.";
+    
+    // Interpolate activepieces company context placeholders if present
+    const placeholderRegex = /\{\{\s*step_1\.output\.rows\[0\]\.ai_profile_context\s*\}\}/gi;
+    if (placeholderRegex.test(systemInstruction)) {
+      systemInstruction = systemInstruction.replace(placeholderRegex, aiProfileContext);
+    } else if (aiProfileContext) {
+      // Otherwise append company context as a directive
+      systemInstruction = `${systemInstruction}\n\n[Company Context]\n${aiProfileContext}`;
+    }
+
+    // Append project context scoping and allowed tools
+    const dynamicDirective = `\n\n[System Project Context Scope]\nActive Project ID: ${projectId}\nYou are operating strictly under the scope of Project ${projectId}. You can only view knowledge base documents and create/retrieve tickets that are bound to this active project scope. You are authorized to run the following MCP tools: ${allowedTools.join(", ")}. Any other tools are strictly unauthorized and blocked by the platform security policy engine.`;
+    
+    systemInstruction = systemInstruction + dynamicDirective;
+
+    const config: PromptConfig = {
+      systemInstruction,
+      modelName: rows.length > 0 ? rows[0].model_name : 'gemini-1.5-pro',
+      temperature: rows.length > 0 ? parseFloat(rows[0].temperature) : 0.00,
+      maxTokens: rows.length > 0 ? rows[0].max_tokens : 2048
     };
 
     await this.cache.set(cacheKey, config, 3600); // cache for 1 hour

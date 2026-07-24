@@ -7,7 +7,7 @@ export type Severity = string;
 export const PrioritySchema = z.string().min(1, "Priority is required");
 export type Priority = string;
 
-export const ChannelTypeSchema = z.enum(["LINE", "Email", "WebChat", "Teams"]);
+export const ChannelTypeSchema = z.enum(["LINE", "line", "line_group", "LINE_GROUP", "Email", "WebChat", "Teams"]);
 export type ChannelType = z.infer<typeof ChannelTypeSchema>;
 
 export const InboundMessageSchema = z.object({
@@ -16,14 +16,27 @@ export const InboundMessageSchema = z.object({
   text: z.string().min(1, "Message content cannot be empty"),
   receivedAt: z.string().datetime(),
   companyId: z.string().optional(),
+  externalId: z.string().optional(),
+  isMentioned: z.boolean().optional(),
+  senderRef: z.string().optional(),
 });
 export type InboundMessage = z.infer<typeof InboundMessageSchema>;
 
 export const OutboundMessageSchema = z.object({
   recipientId: z.string().min(1, "Recipient ID cannot be empty"),
   channel: ChannelTypeSchema,
-  text: z.string().min(1, "Response content cannot be empty"),
+  text: z.string(),
   sentAt: z.string().datetime(),
+  externalId: z.string().optional(),
+  suppressReply: z.boolean().optional(),
+}).superRefine((message, context) => {
+  if (!message.suppressReply && message.text.trim().length === 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["text"],
+      message: "Response content cannot be empty unless suppressReply is true",
+    });
+  }
 });
 export type OutboundMessage = z.infer<typeof OutboundMessageSchema>;
 

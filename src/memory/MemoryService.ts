@@ -25,9 +25,13 @@ export class MemoryService implements IMemoryService {
   async appendConversationLog(
     conversationId: string,
     role: "customer" | "ai" | "system",
-    message: string
+    message: string,
+    externalId?: string,
+    messageType?: string,
+    replyToMessageId?: number,
+    quoteToken?: string
   ): Promise<void> {
-    await this.dbAdapter.saveMessage(conversationId, role, message);
+    await this.dbAdapter.saveMessage(conversationId, role, message, externalId, messageType, replyToMessageId, quoteToken);
   }
 
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
@@ -51,5 +55,9 @@ export class MemoryService implements IMemoryService {
       content: m.content || "",
       timestamp: m.timestamp || m.created_at || new Date().toISOString(),
     }));
+  }
+
+  getDatabaseAdapter(): DatabaseAdapter {
+    return this.dbAdapter;
   }
 }

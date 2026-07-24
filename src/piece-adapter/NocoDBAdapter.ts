@@ -229,7 +229,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
     }
   }
 
-  async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number, quoteToken?: string): Promise<any> {
     const messageData = {
       conversation_id: Number(conversationId) || conversationId,
       role,
@@ -257,6 +257,10 @@ export class NocoDBAdapter implements DatabaseAdapter {
       }
       return { id: "mock-msg-id", id1: "mock-msg-id", ...messageData };
     }
+  }
+
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    return null;
   }
 
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
@@ -458,7 +462,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
     return field;
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
     const now = Date.now();
     // Cache for 8 seconds to prevent excessive NocoDB calls when no conversation filter is applied
     if (!conversationId && !projectId && this.cachedTicketsList.length > 0 && (now - this.lastTicketsFetch) < 8000) {
@@ -1019,6 +1023,43 @@ export class NocoDBAdapter implements DatabaseAdapter {
     } catch (e: any) {
       console.error("[NocoDBAdapter] updateTicketPlaneIssue failed:", e.message);
     }
+  }
+
+  async syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean> {
+    if (!this.apiToken) throw new Error("NocoDB token missing");
+
+    const rows = await this.getRows(this.tableTickets, {
+      limit: 1,
+      where: `(plane_issue_id,eq,${planeIssueId})`,
+    });
+    const ticket = rows[0];
+    if (!ticket) return false;
+
+    const ticketId = ticket.Id || ticket.id || ticket.id1;
+    const patch: Record<string, string> = {};
+    if (changes.status) patch.status = changes.status;
+    if (changes.priority) patch.priority = changes.priority;
+    if (Object.keys(patch).length === 0) return false;
+
+    await this.requestWithRetry(() =>
+      axios.patch(
+        `${this.baseUrl}/api/v1/db/data/v1/${this.baseId}/${this.tableTickets}/${ticketId}`,
+        patch,
+        {
+          headers: {
+            "xc-token": this.apiToken,
+            "Content-Type": "application/json",
+          },
+          timeout: 5000,
+        }
+      )
+    );
+    this.cachedTicketsList = [];
+    this.cachedTickets = null;
+    return true;
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {

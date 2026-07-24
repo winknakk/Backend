@@ -9,6 +9,7 @@ import { TransactionManager } from "../shared/repositories/TransactionManager";
 import { UnitOfWork } from "../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../infrastructure/db/PostgresTicketRepository";
 import { AdapterFactory } from "../adapters/AdapterFactory";
+import { PlaneService, PlaneTicketClosureResult } from "../services/planeService";
 
 // V2 Tool Contract Schema
 export const McpToolRegistryV2Schema = z.object({
@@ -226,12 +227,19 @@ export class FindTicketTool implements ITool {
     projectId: z.string().optional(),
     status: z.string().optional(),
     conversationId: z.string().optional(),
+    profileId: z.string().optional(),
+    identityId: z.string().optional(),
   });
   readonly outputSchema = ExecutionResultSchema;
 
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const dbAdapter = AdapterFactory.getAdapter();
-    const tickets = await dbAdapter.listAllTickets(params.conversationId, params.projectId);
+    const tickets = await dbAdapter.listAllTickets(
+      params.conversationId,
+      params.projectId,
+      params.profileId,
+      params.identityId
+    );
     let filtered = tickets;
     if (params.status) {
       filtered = tickets.filter(
@@ -305,6 +313,8 @@ export class CloseTicketTool implements ITool {
   });
   readonly outputSchema = ExecutionResultSchema;
 
+  constructor(private readonly planeService?: Pick<PlaneService, "syncTicketClosureToPlane">) {}
+
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
@@ -312,6 +322,13 @@ export class CloseTicketTool implements ITool {
     const ticketRepo = new PostgresTicketRepository(txManager);
 
     let alreadyClosed = false;
+    let planeSync: PlaneTicketClosureResult | undefined;
+
+    // Update Plane first. If it fails, PostgreSQL remains unchanged instead of
+    // being reopened by the Plane-to-PostgreSQL reconciliation poller.
+    if (this.planeService) {
+      planeSync = await this.planeService.syncTicketClosureToPlane(ticketIdStr);
+    }
 
     await uow.execute(async () => {
       let ticket = await ticketRepo.findByTicketId(ticketIdStr);
@@ -331,7 +348,7 @@ export class CloseTicketTool implements ITool {
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, status: "closed", alreadyClosed },
+      data: { ticketId: ticketIdStr, status: "closed", alreadyClosed, planeSync },
       error: null,
       source: "local",
       executionId: require("crypto").randomUUID(),
@@ -386,18 +403,37 @@ export class EscalateToPmTool implements ITool {
   definition!: McpToolDefinition;
   readonly name = "escalate_to_pm";
   readonly inputSchema = z.object({
-    ticketId: z.string().min(1),
-    reason: z.string().min(1),
+    conversationId: z.string().min(1),
+    ticketId: z.string().min(1).optional(),
+    reason: z.string().min(1).optional(),
+    reasonDetail: z.string().min(1).optional(),
+    reasonCode: z.enum([
+      "CUSTOMER_REQUESTED_HUMAN",
+      "ANSWER_NOT_FOUND",
+      "CONFLICTING_INFORMATION",
+      "AUTHORITY_REQUIRED",
+      "TOOL_FAILURE",
+      "SAFETY_REVIEW",
+    ]),
   });
   readonly outputSchema = ExecutionResultSchema;
 
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
-    const ticketIdStr = String(params.ticketId);
-    const txManager = new TransactionManager();
-    const ticketRepo = new PostgresTicketRepository(txManager);
-    let ticket = await ticketRepo.findByTicketId(ticketIdStr);
-    if (!ticket && /^\d+$/.test(ticketIdStr)) ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
-    if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
+    const conversationIdStr = String(params.conversationId);
+    const ticketIdStr = params.ticketId ? String(params.ticketId) : undefined;
+    const reasonDetail = params.reasonDetail || params.reason || params.reasonCode;
+    let ticket: any = null;
+
+    if (ticketIdStr) {
+      const txManager = new TransactionManager();
+      const ticketRepo = new PostgresTicketRepository(txManager);
+      ticket = await ticketRepo.findByTicketId(ticketIdStr);
+      if (!ticket && /^\d+$/.test(ticketIdStr)) ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
+      if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
+      if (String(ticket.conversationId) !== conversationIdStr) {
+        throw new Error(`Ticket ${ticketIdStr} does not belong to conversation ${conversationIdStr}`);
+      }
+    }
 
     try {
       const axios = require("axios");
@@ -415,13 +451,18 @@ export class EscalateToPmTool implements ITool {
       }
 
       await axios.post(
-        `${config.PROMPTX_FLOW_WEBHOOK_URL || "http://localhost:3000"}/api/v1/webhooks/human_notify`,
+        `${config.BACKEND_PUBLIC_URL || "http://localhost:3000"}/api/v1/webhooks/human_notify`,
         {
-          conversationId: ticket.conversationId,
+          conversationId: conversationIdStr,
           role: "system",
-          content: `Ticket ${ticket.ticketId} escalated to PM: ${params.reason}. AI Title: ${
-            ticket.title || "Pending"
-          }. Running Summary: ${ticket.runningSummary || "Pending"}`,
+          content: ticket
+            ? `Ticket ${ticket.ticketId} escalated to Admin: ${reasonDetail}. AI Title: ${
+                ticket.title || "Pending"
+              }. Running Summary: ${ticket.runningSummary || "Pending"}`
+            : `Conversation ${conversationIdStr} escalated to Admin: ${reasonDetail}`,
+          reasonCode: params.reasonCode,
+          reasonDetail,
+          source: "local-agent",
         },
         {
           headers,
@@ -430,11 +471,18 @@ export class EscalateToPmTool implements ITool {
       );
     } catch (err: any) {
       console.error("Failed to post human notification for escalation:", err.message);
+      throw new Error(`Human escalation notification failed: ${err.message}`);
     }
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, escalated: true },
+      data: {
+        conversationId: conversationIdStr,
+        ticketId: ticketIdStr || null,
+        escalated: true,
+        suppressReply: true,
+        reasonCode: params.reasonCode,
+      },
       error: null,
       source: "local",
       executionId: require("crypto").randomUUID(),
@@ -525,6 +573,12 @@ export class ToolRegistry implements IToolRegistry {
   }
 
   getTool(name: string): ITool | undefined {
+    // Look for remote namespaced PromptX tool first to ensure runtime flow execution
+    for (const toolKey of this.tools.keys()) {
+      if (toolKey.startsWith(`promptx.${name}_`)) {
+        return this.tools.get(toolKey);
+      }
+    }
     return this.tools.get(name);
   }
 

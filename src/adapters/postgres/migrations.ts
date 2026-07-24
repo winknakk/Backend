@@ -5,6 +5,13 @@ import { createLogger } from "../../observability/logger";
 
 const logger = createLogger("postgres-migrations");
 
+// Migration 000 was renamed after it had already been applied to development
+// databases. Keep the historical ledger name as an alias so the destructive
+// baseline migration is never replayed solely because of the filename change.
+const legacyMigrationAliases: Record<string, string[]> = {
+  "000_nocodb_to_postgresql.sql": ["nocodb_to_postgresql.sql"],
+};
+
 export async function runMigrations(pool: pg.Pool): Promise<void> {
   logger.info("Starting database migrations check...");
 
@@ -40,6 +47,26 @@ export async function runMigrations(pool: pg.Pool): Promise<void> {
     if (rows.length > 0) {
       logger.debug({ file }, "Migration already executed, skipping");
       continue;
+    }
+
+    const aliases = legacyMigrationAliases[file] ?? [];
+    if (aliases.length > 0) {
+      const legacyResult = await pool.query(
+        "SELECT version FROM schema_migrations WHERE version = ANY($1::varchar[])",
+        [aliases]
+      );
+
+      if (legacyResult.rows.length > 0) {
+        await pool.query(
+          "INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
+          [file]
+        );
+        logger.info(
+          { file, legacyVersion: legacyResult.rows[0].version },
+          "Recorded renamed migration alias without replaying migration"
+        );
+        continue;
+      }
     }
 
     logger.info({ file }, "Executing migration");

@@ -7,6 +7,7 @@ import { ExecutionResult } from "../schemas/validation";
 import { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
 import { MetricsService } from "../observability/MetricsService";
+import { IssueSessionResolver } from "../runtime/IssueSessionResolver";
 
 const logger = createLogger("McpToolRouter");
 
@@ -30,6 +31,51 @@ export class McpToolRouter implements IMcpToolRouter {
       userRole: "customer",
     };
     const agentId = sessionContext.activeAgentId || "unknown-agent";
+
+    // 0. Enforce local capability-based IssueSession flags checks
+    const activeSession = IssueSessionResolver.current();
+    if (activeSession) {
+      if (!activeSession.canExecuteTool(toolName)) {
+        const reason = `Tool execution blocked by active IssueSession flags (state: ${activeSession.state}, allowToolExecution: ${activeSession.flags.allowToolExecution})`;
+        const denyTraceId = await this.executionTraceService.startTrace({
+          sessionId: sessionContext.sessionId,
+          agentId,
+          toolName,
+          reason,
+          arguments: {
+            agentId,
+            toolName,
+            reason,
+            params,
+          },
+          requestId: sessionContext.requestId,
+          conversationId: sessionContext.conversationId,
+          parentTraceId: sessionContext.parentTraceId,
+        });
+        await this.executionTraceService.failTrace(denyTraceId, reason);
+
+        logger.warn(
+          {
+            requestId: sessionContext.requestId,
+            conversationId: sessionContext.conversationId,
+            traceId: denyTraceId,
+            agentId,
+            toolName,
+            reason,
+            component: "McpToolRouter",
+            durationMs: timer(),
+          },
+          `Tool call '${toolName}' rejected by IssueSession flags. Reason: ${reason}`
+        );
+        return {
+          success: false,
+          data: null,
+          error: reason,
+          source: "policy_engine",
+          executionId: denyTraceId,
+        };
+      }
+    }
 
     // 1. Authorize Tool Call through Policy Engine
     const authResponse = await this.policyEngine.authorizeToolCall(toolName, params, policyContext);
@@ -132,7 +178,13 @@ export class McpToolRouter implements IMcpToolRouter {
           `Running tool '${toolName}' (attempt ${attempts}/${maxAttempts})`
         );
 
-        result = await tool.execute(authResponse.sanitizedParams || params, toolContext);
+        let mappedParams = authResponse.sanitizedParams || params;
+        if (tool.definition && tool.definition.inputSchema) {
+          mappedParams = this.mapParamsDynamically(mappedParams, tool.definition.inputSchema);
+        }
+
+        result = await tool.execute(mappedParams, toolContext);
+        result = this.normalizeOutputDynamically(result);
         success = true;
         break;
       } catch (e: any) {
@@ -278,6 +330,62 @@ export class McpToolRouter implements IMcpToolRouter {
       message,
       retryable: false,
       correlationId
+    };
+  }
+
+  private mapParamsDynamically(inputParams: Record<string, any>, inputSchema: any): Record<string, any> {
+    if (!inputSchema || typeof inputSchema !== "object") return inputParams;
+
+    const expectedProperties = inputSchema.properties 
+      ? Object.keys(inputSchema.properties) 
+      : (inputSchema.type === "object" && typeof inputSchema.properties === "object" 
+          ? Object.keys(inputSchema.properties) 
+          : []);
+
+    if (expectedProperties.length === 0) return inputParams;
+
+    const normalizedExpectedMap = new Map<string, string>();
+    for (const prop of expectedProperties) {
+      const normalized = prop.toLowerCase().replace(/_/g, "");
+      normalizedExpectedMap.set(normalized, prop);
+    }
+
+    const mapped: Record<string, any> = {};
+    for (const [key, value] of Object.entries(inputParams)) {
+      const keyNormalized = key.toLowerCase().replace(/_/g, "");
+      if (normalizedExpectedMap.has(keyNormalized)) {
+        const targetKey = normalizedExpectedMap.get(keyNormalized)!;
+        mapped[targetKey] = value;
+      } else {
+        mapped[key] = value;
+      }
+    }
+
+    return mapped;
+  }
+
+  private normalizeOutputDynamically(result: any): any {
+    if (!result || typeof result !== "object") {
+      return { success: true, data: result, error: null, source: "remote" };
+    }
+
+    if ("success" in result && ("data" in result || "error" in result)) {
+      return result;
+    }
+
+    let success = true;
+    let error = null;
+
+    if (result.status === "error" || result.success === false) {
+      success = false;
+      error = result.error || result.message || "Execution failed";
+    }
+
+    return {
+      success,
+      data: result.data !== undefined ? result.data : result,
+      error,
+      source: "remote",
     };
   }
 }

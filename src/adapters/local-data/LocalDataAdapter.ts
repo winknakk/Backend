@@ -85,7 +85,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return conversations.find((c) => c.id1 === conversationId);
   }
 
-  async saveMessage(conversationId: string, role: string, content: string): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number, quoteToken?: string): Promise<any> {
     const messages = this.readTable<any>("Messages", DbMessageSchema);
 
     const maxId = messages.reduce((max, m) => {
@@ -105,6 +105,11 @@ export class LocalDataAdapter implements DatabaseAdapter {
     messages.push(newMessage);
     this.writeTable("Messages", messages);
     return newMessage;
+  }
+
+  async getLatestTicketForConversation(conversationId: string): Promise<any> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    return tickets.find((t) => String(t.conversation_id) === conversationId && t.status !== "Closed") || null;
   }
 
   async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult> {
@@ -437,7 +442,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return this.readTable<AuditLog>("Traces", AuditLogSchema);
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
     try {
       let tickets = this.readTable<any>("Tickets", DbTicketSchema);
       if (conversationId) {
@@ -445,6 +450,18 @@ export class LocalDataAdapter implements DatabaseAdapter {
       }
       if (projectId) {
         tickets = tickets.filter((t) => String(t.project_id || 1) === String(projectId));
+      }
+      if (identityId) {
+        const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+        const matchingConvIds = conversations.filter(c => String(c.identity_id) === String(identityId)).map(c => String(c.id));
+        tickets = tickets.filter(t => matchingConvIds.includes(String(t.conversation_id)));
+      }
+      if (profileId) {
+        const identities = this.readTable<any>("Identities", DbIdentitySchema);
+        const matchingIdentIds = identities.filter(i => String(i.profile_id) === String(profileId)).map(i => String(i.id));
+        const conversations = this.readTable<any>("Conversations", DbConversationSchema);
+        const matchingConvIds = conversations.filter(c => matchingIdentIds.includes(String(c.identity_id))).map(c => String(c.id));
+        tickets = tickets.filter(t => matchingConvIds.includes(String(t.conversation_id)));
       }
       return tickets;
     } catch {
@@ -472,6 +489,10 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
       const cid = String(c.id1);
       const takeover = await this.takeoverManager.getTakeoverState(cid);
+      if (String(c.handled_by || "ai") === "human" && takeover.status === "ACTIVE_AI") {
+        await this.updateHandoffState(cid, "ai");
+        c.handled_by = "ai";
+      }
 
       let profileName = "Nattapong";
       let avatarUrl: string | null = null;
@@ -571,6 +592,20 @@ export class LocalDataAdapter implements DatabaseAdapter {
       tickets[idx].status = "In Progress";
       this.writeTable("Tickets", tickets);
     }
+  }
+
+  async syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean> {
+    const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+    const idx = tickets.findIndex((ticket) => String(ticket.plane_issue_id) === String(planeIssueId));
+    if (idx === -1) return false;
+
+    if (changes.status) tickets[idx].status = changes.status;
+    if (changes.priority) tickets[idx].priority = changes.priority;
+    this.writeTable("Tickets", tickets);
+    return true;
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {

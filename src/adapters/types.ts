@@ -20,7 +20,12 @@ export interface DatabaseAdapter {
   /**
    * Saves a message log to the conversation.
    */
-  saveMessage(conversationId: string, role: string, content: string): Promise<any>;
+  saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number, quoteToken?: string): Promise<any>;
+
+  /**
+   * Retrieves the latest active ticket for a given conversation.
+   */
+  getLatestTicketForConversation(conversationId: string): Promise<any>;
 
   /**
    * Finds an active conversation or creates one if it doesn't exist.
@@ -72,7 +77,7 @@ export interface DatabaseAdapter {
   /**
    * Lists all tickets globally or filtered by conversation and project.
    */
-  listAllTickets(conversationId?: string, projectId?: string): Promise<any[]>;
+  listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]>;
 
   /**
    * Lists all conversations globally or filtered by project.
@@ -93,6 +98,15 @@ export interface DatabaseAdapter {
    * Updates plane issue ID and status for a ticket.
    */
   updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void>;
+
+  /**
+   * Applies Plane-originated status/priority changes to a linked ticket.
+   * Returns false when no ticket is linked to the supplied Plane issue ID.
+   */
+  syncTicketFromPlane(
+    planeIssueId: string,
+    changes: { status?: string; priority?: string }
+  ): Promise<boolean>;
 
   /**
    * Retrieves ticket details along with company context.

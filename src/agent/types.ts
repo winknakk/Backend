@@ -46,7 +46,7 @@ export interface IAgentManager {
   /**
    * Retrieves an existing session or initializes a new one for a given customer.
    */
-  getOrCreateSession(senderId: string, companyId: string): Promise<IAgentSession>;
+  getOrCreateSession(senderId: string, companyId: string, channel?: string): Promise<IAgentSession>;
 
   /**
    * Force closes a session, archiving state to database.
