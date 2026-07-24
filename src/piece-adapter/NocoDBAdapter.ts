@@ -229,7 +229,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
     }
   }
 
-  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number, quoteToken?: string): Promise<any> {
     const messageData = {
       conversation_id: Number(conversationId) || conversationId,
       role,

@@ -123,7 +123,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           await profileRepo.save(guestProfile);
 
           const nextIdentIdRes = await pool.query(
-            "SELECT COALESCE(MAX(id::integer), 0) + 1 AS next_id FROM identities WHERE id ~ '^[0-9]+$'"
+            "SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM identities"
           );
           const nextIdentId = String(nextIdentIdRes.rows[0].next_id);
 
@@ -161,7 +161,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           }
 
           const nextIdentIdRes = await pool.query(
-            "SELECT COALESCE(MAX(id::integer), 0) + 1 AS next_id FROM identities WHERE id ~ '^[0-9]+$'"
+            "SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM identities"
           );
           const nextIdentId = String(nextIdentIdRes.rows[0].next_id);
 

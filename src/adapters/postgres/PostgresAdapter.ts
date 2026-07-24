@@ -213,16 +213,21 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   // ─── Messages ──────────────────────────────────────────────
 
-  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number): Promise<any> {
+  async saveMessage(conversationId: string, role: string, content: string, externalId?: string, messageType?: string, replyToMessageId?: number, quoteToken?: string): Promise<any> {
     if (!this.isValidConversationId(conversationId)) return null;
     try {
       const typeToSave = messageType || 'text';
       const { rows } = await pool.query(
-        `INSERT INTO messages (conversation_id, role, content, message_type, external_id, reply_to_message_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())
-         ON CONFLICT (conversation_id, external_id) DO UPDATE SET content = EXCLUDED.content, message_type = EXCLUDED.message_type
+        `INSERT INTO messages (conversation_id, role, content, message_type, external_id, reply_to_message_id, quote_token, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+         ON CONFLICT (conversation_id, external_id) DO UPDATE SET
+           content = EXCLUDED.content,
+           message_type = EXCLUDED.message_type,
+           quote_token = COALESCE(EXCLUDED.quote_token, messages.quote_token),
+           reply_to_message_id = COALESCE(EXCLUDED.reply_to_message_id, messages.reply_to_message_id),
+           created_at = COALESCE(messages.created_at, EXCLUDED.created_at)
          RETURNING *`,
-        [conversationId, role, content, typeToSave, externalId || null, replyToMessageId || null]
+        [conversationId, role, content, typeToSave, externalId || null, replyToMessageId || null, quoteToken || null]
       );
 
       const msgRow = rows[0];
@@ -933,7 +938,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   async getMessages(conversationId: string): Promise<any[]> {
     if (!this.isValidConversationId(conversationId)) return [];
     const query = `
-      SELECT id, conversation_id, role, content, message_type, created_at AS timestamp
+      SELECT id, conversation_id, role, content, message_type, reply_to_message_id, delivery_status, reactions, is_pinned, quote_token, created_at AS timestamp
       FROM messages
       WHERE conversation_id = $1::integer
       ORDER BY created_at ASC
@@ -945,6 +950,11 @@ export class PostgresAdapter implements DatabaseAdapter {
       role: r.role,
       content: r.content,
       message_type: r.message_type || "text",
+      reply_to_message_id: r.reply_to_message_id,
+      delivery_status: r.delivery_status || "delivered",
+      reactions: r.reactions || {},
+      is_pinned: r.is_pinned || false,
+      quote_token: r.quote_token || null,
       timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
     }));
   }

@@ -65,7 +65,7 @@ import WebChatGateway from "../presentation/http/routes/WebChatGateway";
 import Redis from "ioredis";
 
 const serverLogger = createLogger("server");
-const fastify = Fastify({ loggerInstance: rootLogger as any });
+const fastify = Fastify({ loggerInstance: rootLogger as any, bodyLimit: 50 * 1024 * 1024 }); // 50MB body limit for image uploads
 fastify.register(websocketPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const adminConnections = new Map<any, string>();
@@ -860,7 +860,9 @@ fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
       status: currentTakeover.status,
     });
   }
-  const result = await humanReplyService.sendReply(body.conversationId, body.message);
+  const rawReplyTo = body.replyToMessageId || body.reply_to_message_id || body.reply_to_id || body.replyToId;
+  const replyToId = rawReplyTo ? parseInt(String(rawReplyTo), 10) : undefined;
+  const result = await humanReplyService.sendReply(body.conversationId, body.message, replyToId);
   if (takeoverManager) {
     const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
     await takeoverManager.setTakeoverState(body.conversationId, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
@@ -880,7 +882,10 @@ fastify.post("/api/v1/internal/messages", async (request, reply) => {
     body.conversationId,
     body.role || "human",
     body.content,
-    body.externalId || body.external_id
+    body.externalId || body.external_id,
+    body.messageType || body.message_type,
+    body.replyToMessageId || body.reply_to_message_id,
+    body.quoteToken || body.quote_token
   );
   return reply.code(200).send({ success: true });
 });
@@ -1300,9 +1305,50 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
   const channel = payload.channel || "LINE";
   const messageText = payload.messageText || payload.message || "";
   const isMentioned = payload.isMentioned === true || payload.isMentioned === "true";
-  const messageType = payload.messageType || "text";
-  const imageId = payload.imageId || payload.lineImageId;
+  
+  // Unify all LINE Gateway / Activepieces / PromptX field aliases (bulletproof deep lookup)
+  const imageId = payload.line_image_id 
+    || payload.lineImageId 
+    || payload.imageId 
+    || payload.line_image 
+    || payload.message_id 
+    || payload.external_id 
+    || payload.event?.message?.id 
+    || payload.body?.line_image_id
+    || payload.body?.message?.id
+    || body.line_image_id
+    || body.message_id
+    || body.external_id
+    || body.event?.message?.id
+    || null;
 
+  const rawMessageType = payload.messageType || payload.message_type || body.messageType || body.message_type;
+  const messageType = rawMessageType || (imageId ? "image" : "text");
+
+  const quoteToken = payload.quoteToken 
+    || payload.quote_token 
+    || payload.event?.message?.quoteToken 
+    || payload.body?.quote_token 
+    || body.quote_token 
+    || body.event?.message?.quoteToken 
+    || null;
+
+  const replyToken = payload.replyToken 
+    || payload.reply_token 
+    || payload.event?.replyToken 
+    || payload.body?.reply_token 
+    || body.reply_token 
+    || null;
+
+  const externalId = payload.externalId 
+    || payload.external_id 
+    || imageId 
+    || payload.event?.message?.id 
+    || body.external_id 
+    || body.event?.message?.id 
+    || null;
+
+  serverLogger.info({ senderId, messageText, messageType, imageId, quoteToken, replyToken, channel }, "[Webhook] Inbound customer message payload received");
 
   if (!senderId) {
     return reply.code(400).send({ error: "Bad Request", message: "Missing senderId" });
@@ -1316,7 +1362,21 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     const sessionContext = await memoryService.loadSessionContext(senderId, channel);
     const conversationId = sessionContext.conversationId;
 
-    // Auto-ingest LINE image if imageId is provided in webhook payload
+    // Save or update customer message in DB if not created yet by gateway
+    let currentMsgRecord: any = null;
+    if (conversationId) {
+      currentMsgRecord = await dbAdapter.saveMessage(
+        conversationId,
+        "customer",
+        messageText,
+        externalId || undefined,
+        messageType,
+        undefined,
+        quoteToken || undefined
+      );
+    }
+
+    // Auto-ingest LINE image if imageId is provided or messageType is image
     if (imageId || messageType === "image") {
       try {
         const { LINEAdapter } = await import("../presentation/http/adapters/LINEAdapter");
@@ -1325,59 +1385,56 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         const lineToken = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
         const lineAdapter = new LINEAdapter(mediaStorage, lineToken);
 
-        const lineEvent = {
-          type: "message",
-          message: { type: "image", id: imageId || `msg_${Date.now()}` },
-          source: { userId: senderId },
-          timestamp: Date.now()
-        };
+        const targetImageId = imageId || (externalId && !externalId.startsWith("msg_") ? externalId : null);
+        if (targetImageId) {
+          const lineEvent = {
+            type: "message",
+            message: { type: "image", id: targetImageId, quoteToken },
+            source: { userId: senderId },
+            timestamp: Date.now()
+          };
 
-        const normalized = await lineAdapter.adaptEvent(lineEvent);
-        if (normalized && normalized.attachments.length > 0) {
-          const att = normalized.attachments[0];
+          const normalized = await lineAdapter.adaptEvent(lineEvent);
+          if (normalized && normalized.attachments.length > 0) {
+            const att = normalized.attachments[0];
 
-          // Find the latest image message in this conversation that has NO attachment yet
-          // (the normal flow already created a message record before this runs)
-          const existingMsgResult = await pool.query(
-            `SELECT m.id FROM messages m
-             LEFT JOIN message_attachments ma ON ma.message_id = m.id
-             WHERE m.conversation_id = $1
-               AND m.message_type = 'image'
-               AND ma.id IS NULL
-             ORDER BY m.id DESC
-             LIMIT 1`,
-            [String(conversationId)]
-          );
+            let messageId = currentMsgRecord?.id ? parseInt(String(currentMsgRecord.id), 10) : null;
+            if (!messageId) {
+              const existingMsgResult = await pool.query(
+                `SELECT m.id FROM messages m
+                 LEFT JOIN message_attachments ma ON ma.message_id = m.id
+                 WHERE m.conversation_id = $1
+                   AND m.message_type = 'image'
+                   AND ma.id IS NULL
+                 ORDER BY m.id DESC
+                 LIMIT 1`,
+                [String(conversationId)]
+              );
+              if (existingMsgResult.rows.length > 0) {
+                messageId = existingMsgResult.rows[0].id;
+              }
+            }
 
-          let messageId: number;
-          if (existingMsgResult.rows.length > 0) {
-            // Attach to the existing orphan image message
-            messageId = existingMsgResult.rows[0].id;
-          } else {
-            // No orphan found — create a new message record
-            const savedMsg = await dbAdapter.saveMessage(conversationId, "customer", messageText, normalized.externalMessageId, "image");
-            messageId = parseInt(savedMsg?.id, 10);
-          }
-
-          if (messageId) {
-            await pool.query(
-              `INSERT INTO message_attachments 
-                (message_id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key, attachment_status, metadata)
-               VALUES 
-                ($1, $2, $3, $4, $5, $6, $7, 'READY', $8)
-               ON CONFLICT DO NOTHING`,
-              [
-                messageId,
-                att.fileUrl,
-                att.thumbnailUrl || att.fileUrl,
-                att.fileName,
-                att.fileType,
-                att.fileSize,
-                att.storageKey,
-                JSON.stringify(att.metadata || {})
-              ]
-            );
-            serverLogger.info({ messageId, storageKey: att.storageKey, imageId }, "[LINEAdapter] Image attachment saved to DB successfully");
+            if (messageId) {
+              await pool.query(
+                `INSERT INTO message_attachments 
+                  (message_id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key, attachment_status, metadata)
+                 VALUES 
+                  ($1, $2, $3, $4, $5, $6, $7, 'READY', $8)
+                 ON CONFLICT DO NOTHING`,
+                [
+                  messageId,
+                  att.fileUrl,
+                  att.thumbnailUrl || att.fileUrl,
+                  att.fileName,
+                  att.fileType,
+                  att.fileSize,
+                  att.storageKey,
+                  JSON.stringify(att.metadata || { sourceChannel: "line", lineImageId: targetImageId })
+                ]
+              );
+              serverLogger.info({ messageId, storageKey: att.storageKey, targetImageId }, "[LINEAdapter] Image attachment saved to DB successfully");
+            }
           }
         }
       } catch (mediaErr: any) {

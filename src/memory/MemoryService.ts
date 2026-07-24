@@ -26,9 +26,12 @@ export class MemoryService implements IMemoryService {
     conversationId: string,
     role: "customer" | "ai" | "system",
     message: string,
-    externalId?: string
+    externalId?: string,
+    messageType?: string,
+    replyToMessageId?: number,
+    quoteToken?: string
   ): Promise<void> {
-    await this.dbAdapter.saveMessage(conversationId, role, message, externalId);
+    await this.dbAdapter.saveMessage(conversationId, role, message, externalId, messageType, replyToMessageId, quoteToken);
   }
 
   async ensureConversation(senderId: string, companyId: string, channel: string): Promise<string> {
