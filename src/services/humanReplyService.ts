@@ -247,7 +247,7 @@ export class HumanReplyService {
     };
   }
 
-  async sendImageReply(conversationId: string, imageUrl: string, replyToMessageId?: number): Promise<any> {
+  async sendImageReply(conversationId: string, imageUrl: string, replyToMessageId?: number, storageKey?: string, uploadedFileName?: string): Promise<any> {
     await this.dbAdapter.updateHandoffState(conversationId, "human");
 
     const ident = await this.dbAdapter.getConversationIdent(conversationId);
@@ -301,7 +301,23 @@ export class HumanReplyService {
 
     const messageId = parseInt(savedMsg?.id, 10);
     if (messageId) {
-      const fileName = path.basename(imageUrl.split("?")[0]) || "operator_image.jpg";
+      // Resolve storageKey: prefer explicitly passed key, else parse from URL ?key= param
+      let resolvedStorageKey = storageKey || "";
+      if (!resolvedStorageKey) {
+        try {
+          const parsedUrl = new URL(imageUrl);
+          const keyParam = parsedUrl.searchParams.get("key");
+          if (keyParam) resolvedStorageKey = keyParam;
+        } catch {
+          // fallback: extract from path (last resort)
+          resolvedStorageKey = `admin_media/${path.basename(imageUrl.split("?")[0]) || "operator_image.jpg"}`;
+        }
+      }
+
+      // Resolve fileName: from explicit param, or derive from storage key
+      const fileName = uploadedFileName
+        || (resolvedStorageKey ? path.basename(resolvedStorageKey) : "operator_image.jpg");
+
       await pool.query(
         `INSERT INTO message_attachments 
           (message_id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key, attachment_status, metadata)
@@ -313,7 +329,7 @@ export class HumanReplyService {
           imageUrl,
           imageUrl,
           fileName,
-          `admin_media/${fileName}`,
+          resolvedStorageKey,
           JSON.stringify({ sourceChannel: "admin_ui" })
         ]
       );
