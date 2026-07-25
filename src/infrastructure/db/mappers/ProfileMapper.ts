@@ -6,6 +6,8 @@ export class ProfileMapper {
       id: String(raw.id),
       companyId: raw.company_id ? String(raw.company_id) : null,
       name: raw.name || null,
+      email: raw.email || null,
+      phone: raw.phone || null,
       createdAt: raw.created_at ? new Date(raw.created_at) : undefined
     });
   }
@@ -15,6 +17,8 @@ export class ProfileMapper {
       id: parseInt(domain.id),
       company_id: domain.companyId ? parseInt(domain.companyId) : null,
       name: domain.name || null,
+      email: domain.email || null,
+      phone: domain.phone || null,
       created_at: domain.createdAt ? domain.createdAt.toISOString() : null
     };
   }

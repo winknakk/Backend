@@ -4,6 +4,8 @@ export interface ProfileProps {
   id: string;
   companyId?: string | null;
   name?: string | null;
+  email?: string | null;
+  phone?: string | null;
   createdAt?: Date;
   metadata?: Record<string, any>;
 }
@@ -11,6 +13,8 @@ export interface ProfileProps {
 export class Profile extends BaseEntity<string> {
   public readonly companyId: string | null;
   public readonly name: string | null;
+  public readonly email: string | null;
+  public readonly phone: string | null;
   public readonly createdAt: Date;
   public readonly metadata: Record<string, any>;
 
@@ -19,6 +23,8 @@ export class Profile extends BaseEntity<string> {
 
     this.companyId = props.companyId || null;
     this.name = props.name || null;
+    this.email = props.email || null;
+    this.phone = props.phone || null;
     this.createdAt = props.createdAt || new Date();
     this.metadata = props.metadata || {};
   }

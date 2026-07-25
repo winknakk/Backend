@@ -562,7 +562,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
               const idents = await adapter.getRows(adapter.tableIdentities, { where: `(Id,eq,${identityId})`, limit: 1 });
               if (idents.length > 0) {
                 const ident = idents[0];
-                identity.channel_ref = ident.channel_ref || "unknown";
+                identity.channel_ref = ident.channel_ref || "-";
                 identity.channel = ident.channel || "line";
 
                 const profileId = adapter.extractId(ident.profile_id);
@@ -570,17 +570,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
                   const profs = await adapter.getRows(adapter.tableProfiles, { where: `(Id,eq,${profileId})`, limit: 1 });
                   if (profs.length > 0) {
                     const prof = profs[0];
-                    identity.profile_name = prof.display_name || prof.name || "Nattapong";
-                    identity.email = prof.email || "nattapong@orbitretail.com";
-                    identity.phone = prof.phone || "081-234-5678";
+                    identity.profile_name = prof.display_name || prof.name || "-";
+                    identity.email = prof.email || "-";
+                    identity.phone = prof.phone || "-";
                     identity.avatar_url = prof.avatar_url || null;
 
                     const compId = adapter.extractId(prof.company_id || prof.company);
                     if (compId) {
                       const comps = await adapter.getRows(adapter.tableCompanies, { where: `(Id,eq,${compId})`, limit: 1 });
                       if (comps.length > 0) {
-                        company.name = comps[0].name || "Orbit Retail";
-                        company.industry = comps[0].industry || "Retail & E-commerce";
+                        company.name = comps[0].name || "-";
+                        company.industry = comps[0].industry || "-";
                       }
                     }
                   }
@@ -598,6 +598,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
               `SELECT 
               i.channel_ref, i.channel, 
               p.name AS profile_name,
+              p.email AS profile_email,
+              p.phone AS profile_phone,
               p.id AS profile_id,
               co.name AS company_name
              FROM conversations c
@@ -609,24 +611,47 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
             );
             if (res.rows.length > 0) {
               const row = res.rows[0];
-              identity.channel_ref = row.channel_ref || "unknown";
+              identity.channel_ref = row.channel_ref || "-";
               identity.channel = row.channel || "line";
-              identity.profile_name = row.profile_name || "Nattapong";
-              identity.email = "nattapong@orbitretail.com";
-              identity.phone = "081-234-5678";
+              identity.profile_name = row.profile_name || "-";
+              identity.email = row.profile_email || "-";
+              identity.phone = row.profile_phone || "-";
               identity.avatar_url = null;
-              company.name = row.company_name || "Orbit Retail";
+              company.name = row.company_name || "-";
             }
           } catch (dbErr: any) {
             console.error("[admin.ts] Failed to query full Postgres profile path:", dbErr.message);
           }
         }
 
-        if (identity.channel_ref === "unknown") {
-          identity.channel_ref = conv.customer || "U6256f0c1dbb64edacf9cca92904e49b1";
+        if (identity.channel_ref === "unknown" || !identity.channel_ref) {
+          identity.channel_ref = conv.customer || "-";
         }
-        if (identity.profile_name === "unknown") {
-          identity.profile_name = "Nattapong"; // fallback display name
+        if (identity.profile_name === "unknown" || !identity.profile_name) {
+          identity.profile_name = "-";
+        }
+
+        // Dynamically fetch real LINE user profile (avatar & display name) via LINE Messaging API
+        if ((identity.channel === "line" || identity.channel === "line_group") && identity.channel_ref && identity.channel_ref.startsWith("U")) {
+          try {
+            const lineToken = config.LINE_CHANNEL_ACCESS_TOKEN;
+            if (lineToken) {
+              const lineRes = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(identity.channel_ref)}`, {
+                headers: { Authorization: `Bearer ${lineToken}` },
+              });
+              if (lineRes.ok) {
+                const lineData = (await lineRes.json()) as any;
+                if (lineData.pictureUrl) {
+                  identity.avatar_url = lineData.pictureUrl;
+                }
+                if (lineData.displayName && (identity.profile_name === "-" || identity.profile_name === "unknown" || !identity.profile_name)) {
+                  identity.profile_name = lineData.displayName;
+                }
+              }
+            }
+          } catch (lineErr: any) {
+            console.error("[admin.ts] Failed to fetch LINE user profile:", lineErr.message);
+          }
         }
 
         // 4. Calculate stats
