@@ -4,7 +4,7 @@ export class TicketMapper {
   static toDomain(raw: any): Ticket {
     return new Ticket({
       id: raw.id,
-      ticketId: raw.ticket_id,
+      ticketId: raw.ticket_number || raw.ticket_id || String(raw.id),
       conversationId: raw.conversation_id,
       projectId: raw.project_id ? Number(raw.project_id) : null,
       subject: raw.subject,

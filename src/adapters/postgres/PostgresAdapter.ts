@@ -818,8 +818,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       return {
         id: String(r.id),
         id1: String(r.id),
-        ticketId: String(r.ticket_id || r.id),
-        ticket_id: String(r.ticket_id || r.id),
+        ticketId: String(r.ticket_number || r.ticket_id || r.id),
+        ticket_id: String(r.ticket_number || r.ticket_id || r.id),
         conversationId: String(r.conversation_id),
         subject: r.subject,
         summary: r.summary,
@@ -979,10 +979,15 @@ export class PostgresAdapter implements DatabaseAdapter {
   }
 
   async updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void> {
-    await pool.query(
-      "UPDATE tickets SET plane_issue_id = $1, status = 'In Progress' WHERE ticket_id = $2",
+    const result = await pool.query(
+      `UPDATE tickets
+       SET plane_issue_id = $1, updated_at = NOW()
+       WHERE ticket_number = $2 OR ticket_id = $2 OR id::text = $2`,
       [planeIssueId, ticketId]
     );
+    if ((result.rowCount || 0) === 0) {
+      throw new Error(`Ticket not found while linking Plane work item: ${ticketId}`);
+    }
   }
 
   async syncTicketFromPlane(
@@ -1004,10 +1009,29 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     values.push(planeIssueId);
     const result = await pool.query(
-      `UPDATE tickets SET ${assignments.join(", ")} WHERE plane_issue_id = $${values.length}`,
+      `UPDATE tickets SET ${assignments.join(", ")}, updated_at = NOW() WHERE plane_issue_id = $${values.length}`,
       values
     );
     return (result.rowCount || 0) > 0;
+  }
+
+  async deleteTicketFromPlane(planeIssueId: string): Promise<boolean> {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SET LOCAL ticketx.skip_plane_delete = 'on'");
+      const result = await client.query(
+        "DELETE FROM tickets WHERE plane_issue_id = $1",
+        [planeIssueId]
+      );
+      await client.query("COMMIT");
+      return (result.rowCount || 0) > 0;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
@@ -1016,7 +1040,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     if (isNumeric) {
       ticketRes = await pool.query("SELECT * FROM tickets WHERE id = $1 LIMIT 1", [parseInt(ticketId, 10)]);
     } else {
-      ticketRes = await pool.query("SELECT * FROM tickets WHERE ticket_id = $1 LIMIT 1", [ticketId]);
+      ticketRes = await pool.query(
+        "SELECT * FROM tickets WHERE ticket_number = $1 OR ticket_id = $1 LIMIT 1",
+        [ticketId]
+      );
     }
     
     let ticket: any = null;
@@ -1024,7 +1051,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       ticket = {
         ...ticketRes.rows[0],
         id1: String(ticketRes.rows[0].id),
-        ticket_id: String(ticketRes.rows[0].ticket_id),
+        ticket_id: String(ticketRes.rows[0].ticket_number || ticketRes.rows[0].ticket_id || ticketRes.rows[0].id),
         conversation_id: String(ticketRes.rows[0].conversation_id),
       };
     }
@@ -1044,9 +1071,9 @@ export class PostgresAdapter implements DatabaseAdapter {
          JOIN identities i ON i.id = conv.identity_id
          JOIN profiles p ON p.id = i.profile_id
          JOIN companies c ON c.id = p.company_id
-         WHERE t.ticket_id = $1`;
+         WHERE t.ticket_number = $1::text OR t.ticket_id = $1::text OR t.id::text = $1::text`;
          
-    const companyRes = await pool.query(companyQuery, [isNumeric ? parseInt(ticketId, 10) : ticketId]);
+    const companyRes = await pool.query(companyQuery, [ticketId]);
     if (companyRes.rows.length > 0) {
       companyName = companyRes.rows[0].company_name;
     }

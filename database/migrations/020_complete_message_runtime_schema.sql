@@ -5,7 +5,7 @@
 -- conversation timeline, and the media attachment repository. Keep this
 -- migration forward-only and idempotent so it is safe on newer databases too.
 
-ALTER TABLE public.messages
+ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS reply_to_message_id INTEGER NULL;
 
 DO $$
@@ -13,20 +13,20 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint
-    WHERE conrelid = 'public.messages'::regclass
+    WHERE conrelid = 'messages'::regclass
       AND conname = 'messages_reply_to_message_id_fkey'
   ) THEN
-    ALTER TABLE public.messages
+    ALTER TABLE messages
       ADD CONSTRAINT messages_reply_to_message_id_fkey
       FOREIGN KEY (reply_to_message_id)
-      REFERENCES public.messages(id)
+      REFERENCES messages(id)
       ON DELETE SET NULL;
   END IF;
 END
 $$;
 
 CREATE INDEX IF NOT EXISTS idx_messages_reply_to_message_id
-  ON public.messages (reply_to_message_id)
+  ON messages (reply_to_message_id)
   WHERE reply_to_message_id IS NOT NULL;
 
 DO $$
@@ -43,15 +43,15 @@ EXCEPTION
 END
 $$;
 
-ALTER TABLE public.message_attachments
+ALTER TABLE message_attachments
   ADD COLUMN IF NOT EXISTS storage_key VARCHAR(500) NULL,
   ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(2048) NULL,
   ADD COLUMN IF NOT EXISTS attachment_status attachment_status NOT NULL DEFAULT 'READY',
   ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id
-  ON public.message_attachments (message_id);
+  ON message_attachments (message_id);
 
 CREATE INDEX IF NOT EXISTS idx_message_attachments_storage_key
-  ON public.message_attachments (storage_key)
+  ON message_attachments (storage_key)
   WHERE storage_key IS NOT NULL;

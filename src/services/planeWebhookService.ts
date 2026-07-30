@@ -22,6 +22,7 @@ export interface PlaneWebhookPayload {
 export interface PlaneWebhookSyncResult {
   processed: boolean;
   matched: boolean;
+  deleted?: boolean;
   reason?: string;
   planeIssueId?: string;
   status?: string;
@@ -31,6 +32,7 @@ export interface PlaneWebhookSyncResult {
 export interface PlaneReverseSyncSummary {
   checked: number;
   updated: number;
+  deleted: number;
   unlinked: number;
   failed: number;
 }
@@ -97,12 +99,18 @@ export function verifyPlaneWebhookSignature(
 }
 
 export class PlaneWebhookService {
-  constructor(private readonly dbAdapter: DatabaseAdapter) {}
+  constructor(
+    private readonly dbAdapter: DatabaseAdapter,
+    private readonly httpClient: Pick<typeof axios, "get"> = axios
+  ) {}
 
   async sync(payload: PlaneWebhookPayload): Promise<PlaneWebhookSyncResult> {
     const event = payload.event?.toLowerCase();
     const action = payload.action?.toLowerCase();
-    if ((event !== "issue" && event !== "work_item") || (action !== "update" && action !== "create")) {
+    if (
+      (event !== "issue" && event !== "work_item") ||
+      (action !== "update" && action !== "create" && action !== "delete")
+    ) {
       return { processed: false, matched: false, reason: "unsupported_event" };
     }
 
@@ -121,6 +129,26 @@ export class PlaneWebhookService {
       payloadProjectId !== configuredProjectId
     ) {
       return { processed: false, matched: false, reason: "project_mismatch", planeIssueId };
+    }
+
+    if (action === "delete") {
+      if (!this.dbAdapter.deleteTicketFromPlane) {
+        return {
+          processed: false,
+          matched: false,
+          deleted: false,
+          reason: "delete_not_supported",
+          planeIssueId,
+        };
+      }
+      const deleted = await this.dbAdapter.deleteTicketFromPlane(planeIssueId);
+      return {
+        processed: true,
+        matched: deleted,
+        deleted,
+        reason: deleted ? undefined : "ticket_not_linked",
+        planeIssueId,
+      };
     }
 
     const state = await this.resolveState(data, payloadProjectId || configuredProjectId);
@@ -162,12 +190,12 @@ export class PlaneWebhookService {
       )
     ).slice(0, batchSize);
 
-    const summary: PlaneReverseSyncSummary = { checked: 0, updated: 0, unlinked: 0, failed: 0 };
+    const summary: PlaneReverseSyncSummary = { checked: 0, updated: 0, deleted: 0, unlinked: 0, failed: 0 };
     for (const planeIssueId of linkedIssueIds) {
       summary.checked += 1;
       try {
         const url = `${config.PLANE_API_URL}/api/v1/workspaces/${config.PLANE_WORKSPACE_SLUG}/projects/${config.PLANE_PROJECT_ID}/work-items/${planeIssueId}/`;
-        const response = await axios.get(url, {
+        const response = await this.httpClient.get(url, {
           headers: { "X-API-Key": config.PLANE_API_KEY },
           params: { expand: "state" },
           timeout: 5000,
@@ -180,8 +208,18 @@ export class PlaneWebhookService {
         });
         if (result.matched) summary.updated += 1;
         else summary.unlinked += 1;
-      } catch {
-        summary.failed += 1;
+      } catch (error: any) {
+        if (error?.response?.status === 404 && this.dbAdapter.deleteTicketFromPlane) {
+          try {
+            const deleted = await this.dbAdapter.deleteTicketFromPlane(planeIssueId);
+            if (deleted) summary.deleted += 1;
+            else summary.unlinked += 1;
+          } catch {
+            summary.failed += 1;
+          }
+        } else {
+          summary.failed += 1;
+        }
       }
     }
     return summary;
@@ -210,7 +248,7 @@ export class PlaneWebhookService {
     }
 
     const url = `${config.PLANE_API_URL}/api/v1/workspaces/${config.PLANE_WORKSPACE_SLUG}/projects/${projectId}/states/${data.state}/`;
-    const response = await axios.get(url, {
+    const response = await this.httpClient.get(url, {
       headers: { "X-API-Key": config.PLANE_API_KEY },
       timeout: 5000,
     });

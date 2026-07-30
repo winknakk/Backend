@@ -4,5 +4,5 @@
 -- predate the rich-message migration while the backend already writes this
 -- column for every inbound and outbound message.
 
-ALTER TABLE public.messages
+ALTER TABLE messages
   ADD COLUMN IF NOT EXISTS message_type VARCHAR(50) NOT NULL DEFAULT 'text';

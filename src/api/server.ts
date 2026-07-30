@@ -1175,14 +1175,23 @@ fastify.get("/api/v1/internal/config/prompts", async (request, reply) => {
 fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   const query = request.query as any;
   const identityId = query.identityId || query.identity_id;
+  const conversationId = query.conversationId || query.conversation_id;
+  const subject = typeof query.subject === "string" ? query.subject.trim() : "";
   const status = query.status || "open";
   const projectId = query.projectId || request.headers["x-project-id"];
 
   let res;
-  const isPromptXId = String(identityId).startsWith("convo_") ||
-    /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(identityId));
+  const parsedConversationId = parseInt(String(conversationId), 10);
+  if (conversationId && Number.isInteger(parsedConversationId) && parsedConversationId > 0) {
+    res = await pool.query(
+      `SELECT * FROM conversations WHERE id = $1 AND status = $2 LIMIT 1`,
+      [parsedConversationId, status]
+    );
+  } else {
+    const isPromptXId = String(identityId).startsWith("convo_") ||
+      /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(identityId));
 
-  if (isPromptXId) {
+    if (isPromptXId) {
     res = await pool.query(
       `SELECT * FROM conversations WHERE promptx_conversation_id = $1 LIMIT 1`,
       [identityId]
@@ -1200,17 +1209,18 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
         res = fallbackRes;
       }
     }
-  } else {
-    if (projectId) {
-      res = await pool.query(
-        `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
-        [identityId, status, parseInt(String(projectId), 10) || null]
-      );
     } else {
-      res = await pool.query(
-        `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
-        [identityId, status]
-      );
+      if (projectId) {
+        res = await pool.query(
+          `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
+          [identityId, status, parseInt(String(projectId), 10) || null]
+        );
+      } else {
+        res = await pool.query(
+          `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
+          [identityId, status]
+        );
+      }
     }
   }
 
@@ -1219,6 +1229,29 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   }
 
   const conv = res.rows[0];
+  let tickets: Array<{ id: number; fields: Record<string, unknown> }> = [];
+  if (subject) {
+    const ticketRes = await pool.query(
+      `SELECT id, ticket_number, ticket_id, status, due_date
+       FROM tickets
+       WHERE conversation_id = $1
+         AND LOWER(status) NOT IN ('closed', 'resolved', 'merged', 'cancelled', 'canceled')
+         AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
+             = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [conv.id, subject]
+    );
+    tickets = ticketRes.rows.map((ticket: any) => ({
+      id: ticket.id,
+      fields: {
+        id1: ticket.ticket_number || ticket.ticket_id || String(ticket.id),
+        status: ticket.status,
+        due_date: ticket.due_date,
+      },
+    }));
+  }
+
   return reply.code(200).send([
     {
       id: conv.id,
@@ -1229,7 +1262,8 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
         channel: conv.channel,
         status: conv.status,
         handled_by: conv.handled_by,
-        assigned_pm: conv.assigned_pm
+        assigned_pm: conv.assigned_pm,
+        Tickets: tickets,
       }
     }
   ]);

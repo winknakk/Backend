@@ -10,6 +10,7 @@ import {
 
 async function run(): Promise<void> {
   assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Done", group: "completed" }), "closed");
+  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Todo", group: "unstarted" }), "Todo");
   assert.strictEqual(mapPlaneStateToTicketStatus({ group: "started" }), "In Progress");
   assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Cancelled" }), "closed");
   assert.strictEqual(mapPlanePriorityToTicketPriority("urgent"), "P1");
@@ -32,13 +33,19 @@ async function run(): Promise<void> {
   assert.strictEqual(verifyPlaneWebhookSignature(payload, "invalid", secret), false);
 
   let captured: any;
+  let deletedPlaneIssueId: string | undefined;
   const adapter = {
     async syncTicketFromPlane(planeIssueId: string, changes: { status?: string; priority?: string }) {
       captured = { planeIssueId, changes };
       return true;
     },
+    async deleteTicketFromPlane(planeIssueId: string) {
+      deletedPlaneIssueId = planeIssueId;
+      return true;
+    },
   } as DatabaseAdapter;
-  const result = await new PlaneWebhookService(adapter).sync(payload);
+  const service = new PlaneWebhookService(adapter);
+  const result = await service.sync(payload);
 
   assert.deepStrictEqual(captured, {
     planeIssueId: "plane-issue-1",
@@ -46,6 +53,16 @@ async function run(): Promise<void> {
   });
   assert.strictEqual(result.processed, true);
   assert.strictEqual(result.matched, true);
+
+  const deleteResult = await service.sync({
+    event: "issue",
+    action: "delete",
+    data: { id: "plane-issue-1" },
+  });
+  assert.strictEqual(deletedPlaneIssueId, "plane-issue-1");
+  assert.strictEqual(deleteResult.processed, true);
+  assert.strictEqual(deleteResult.matched, true);
+  assert.strictEqual(deleteResult.deleted, true);
 
   console.log("Plane webhook reverse-sync tests passed");
 }

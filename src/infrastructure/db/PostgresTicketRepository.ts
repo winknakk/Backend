@@ -14,7 +14,7 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
 
   async findByTicketId(ticketId: string): Promise<Ticket | null> {
     const { rows } = await this.db.query(
-      "SELECT * FROM tickets WHERE ticket_id = $1 LIMIT 1",
+      "SELECT * FROM tickets WHERE ticket_number = $1 OR ticket_id = $1 LIMIT 1",
       [ticketId]
     );
     if (rows.length === 0) return null;

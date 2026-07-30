@@ -1,6 +1,7 @@
 import { PostgresOutboxRepository } from "./PostgresOutboxRepository";
 import { BullMQJobQueue } from "../queue/BullMQJobQueue";
 import { createLogger } from "../../observability/logger";
+import { deletePlaneWorkItem } from "../../services/planeDeletionService";
 
 const logger = createLogger("OutboxProcessor");
 
@@ -76,6 +77,12 @@ export class OutboxProcessor {
                 requestId: String(id),
               },
             });
+          } else if (event_type === "PlaneWorkItemDeleteRequested") {
+            const planeIssueId = payload.planeIssueId;
+            if (!planeIssueId) throw new Error("Plane work-item ID is missing in outbox payload");
+
+            logger.info({ planeIssueId, outboxId: id }, "Deleting Plane work item from Ticket deletion event");
+            await deletePlaneWorkItem(String(planeIssueId));
           } else {
             logger.warn({ event_type }, "Unsupported outbox event type, skipping");
           }

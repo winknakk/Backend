@@ -109,6 +109,12 @@ export interface DatabaseAdapter {
   ): Promise<boolean>;
 
   /**
+   * Deletes the local Ticket linked to a Plane work item without queueing a
+   * second deletion back to Plane. Optional for non-PostgreSQL providers.
+   */
+  deleteTicketFromPlane?(planeIssueId: string): Promise<boolean>;
+
+  /**
    * Retrieves ticket details along with company context.
    */
   getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }>;
