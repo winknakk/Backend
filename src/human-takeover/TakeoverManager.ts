@@ -5,7 +5,8 @@ import * as fs from "fs";
 import * as path from "path";
 
 export class TakeoverManager {
-  private localStates = new Map<string, TakeoverState>();
+  private static localStateStores = new Map<string, Map<string, TakeoverState>>();
+  private localStates: Map<string, TakeoverState>;
   private filePath: string;
   private defaultLeaseDurationMs: number;
   private redisManager: RedisTakeoverManager | null = null;
@@ -16,10 +17,18 @@ export class TakeoverManager {
   ) {
     this.filePath = filePath;
     this.defaultLeaseDurationMs = defaultLeaseDurationMs;
-    
+
+    const existingStore = TakeoverManager.localStateStores.get(this.filePath);
+    if (existingStore) {
+      this.localStates = existingStore;
+    } else {
+      this.localStates = new Map<string, TakeoverState>();
+      TakeoverManager.localStateStores.set(this.filePath, this.localStates);
+    }
+
     if (config.CACHE_PROVIDER === "redis") {
       this.redisManager = new RedisTakeoverManager();
-    } else {
+    } else if (!existingStore) {
       this.loadState();
     }
   }

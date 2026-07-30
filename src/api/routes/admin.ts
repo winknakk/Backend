@@ -27,6 +27,53 @@ export interface AdminRouteDependencies {
 }
 
 export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminRouteDependencies) {
+  const lineProfileCache = new Map<string, {
+    value: { pictureUrl?: string; displayName?: string } | null;
+    expiresAt: number;
+  }>();
+
+  const getLineProfile = async (userId: string) => {
+    const cached = lineProfileCache.get(userId);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+    try {
+      const response = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(userId)}`, {
+        headers: { Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}` },
+        signal: AbortSignal.timeout(3000),
+      });
+      const value = response.ok ? await response.json() as { pictureUrl?: string; displayName?: string } : null;
+      // Keep successful avatars warm for the inbox refresh cycle; retry unavailable profiles sooner.
+      lineProfileCache.set(userId, {
+        value,
+        expiresAt: Date.now() + (value ? 60 * 60 * 1000 : 5 * 60 * 1000),
+      });
+      return value;
+    } catch (error: any) {
+      console.error("[admin.ts] Failed to fetch LINE user profile:", error.message);
+      lineProfileCache.set(userId, { value: null, expiresAt: Date.now() + 5 * 60 * 1000 });
+      return null;
+    }
+  };
+
+  const hydrateLineAvatars = async (conversations: any[]) => Promise.all(conversations.map(async (conversation) => {
+    const channel = String(conversation.channel || "").toLowerCase();
+    const userId = String(conversation.customer || "");
+    if ((channel !== "line" && channel !== "line_group") || !userId.startsWith("U")) return conversation;
+
+    const profile = await getLineProfile(userId);
+    if (!profile) return conversation;
+
+    const hydrated = { ...conversation };
+    if (profile.pictureUrl) hydrated.avatar_url = profile.pictureUrl;
+    if (
+      profile.displayName
+      && (!hydrated.profile_name || ["-", "unknown"].includes(String(hydrated.profile_name).toLowerCase()))
+    ) {
+      hydrated.profile_name = profile.displayName;
+    }
+    return hydrated;
+  }));
+
   // Add authentication hook for all admin endpoints
   fastify.addHook("onRequest", authHook);
 
@@ -197,7 +244,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const query = request.query as any;
     const projectId = query?.projectId ? String(query.projectId) : undefined;
     const list = await humanReplyService.listConversations(projectId);
-    return reply.code(200).send(list);
+    return reply.code(200).send(await hydrateLineAvatars(list));
   });
 
   // 7. GET /api/admin/conversations/:id/messages
@@ -271,11 +318,22 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     fastify.post("/api/admin/conversations/:id/takeover", async (request, reply) => {
       const params = request.params as any;
       const result = await humanReplyService.takeover(params.id);
+      let takeoverState;
       if (deps.takeoverManager) {
         const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
-        await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs);
+        takeoverState = await deps.takeoverManager.setTakeoverState(
+          params.id,
+          "ACTIVE_HUMAN",
+          "human_agent_admin",
+          leaseDurationMs
+        );
       }
-      return reply.code(200).send(result);
+      return reply.code(200).send({
+        ...result,
+        takeover_status: takeoverState?.status || "ACTIVE_HUMAN",
+        human_session_started_at: takeoverState?.human_session_started_at || null,
+        human_session_expire_at: takeoverState?.human_session_expire_at || null,
+      });
     });
 
     // 9. POST /api/admin/conversations/:id/reply
@@ -367,13 +425,21 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     fastify.post("/api/admin/conversations/:id/release", async (request, reply) => {
       const params = request.params as any;
       try {
+        let takeoverState;
         if (deps.takeoverManager) {
-          await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_AI");
+          takeoverState = await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_AI");
         }
 
         const conv = await deps.dbAdapter.getConversation(params.id);
         if (conv && conv.handled_by !== "human") {
-          return reply.code(200).send({ success: true, handled_by: conv.handled_by });
+          return reply.code(200).send({
+            success: true,
+            handled_by: conv.handled_by,
+            takeover_status: takeoverState?.status || "ACTIVE_AI",
+            human_session_started_at: null,
+            human_session_expire_at: null,
+            last_human_reply_at: null,
+          });
         }
 
         // Generate AI closing summary in the background using existing memory service
@@ -394,7 +460,14 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
         });
 
         await deps.dbAdapter.updateHandoffState(params.id, "ai");
-        return reply.code(200).send({ success: true, handled_by: "ai" });
+        return reply.code(200).send({
+          success: true,
+          handled_by: "ai",
+          takeover_status: takeoverState?.status || "ACTIVE_AI",
+          human_session_started_at: null,
+          human_session_expire_at: null,
+          last_human_reply_at: null,
+        });
       } catch (e: any) {
         return reply.code(500).send({ error: "Failed to release conversation", message: e.message });
       }
@@ -633,24 +706,12 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
         // Dynamically fetch real LINE user profile (avatar & display name) via LINE Messaging API
         if ((identity.channel === "line" || identity.channel === "line_group") && identity.channel_ref && identity.channel_ref.startsWith("U")) {
-          try {
-            const lineToken = config.LINE_CHANNEL_ACCESS_TOKEN;
-            if (lineToken) {
-              const lineRes = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(identity.channel_ref)}`, {
-                headers: { Authorization: `Bearer ${lineToken}` },
-              });
-              if (lineRes.ok) {
-                const lineData = (await lineRes.json()) as any;
-                if (lineData.pictureUrl) {
-                  identity.avatar_url = lineData.pictureUrl;
-                }
-                if (lineData.displayName && (identity.profile_name === "-" || identity.profile_name === "unknown" || !identity.profile_name)) {
-                  identity.profile_name = lineData.displayName;
-                }
-              }
-            }
-          } catch (lineErr: any) {
-            console.error("[admin.ts] Failed to fetch LINE user profile:", lineErr.message);
+          const lineData = await getLineProfile(identity.channel_ref);
+          if (lineData?.pictureUrl) {
+            identity.avatar_url = lineData.pictureUrl;
+          }
+          if (lineData?.displayName && (identity.profile_name === "-" || identity.profile_name === "unknown" || !identity.profile_name)) {
+            identity.profile_name = lineData.displayName;
           }
         }
 
