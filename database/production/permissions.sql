@@ -1,3 +1,7 @@
+-- Target Schema Setup
+CREATE SCHEMA IF NOT EXISTS cs_tickets;
+SET search_path TO cs_tickets, public;
+
 -- ============================================================================
 -- AutomationX V3 Platform — Production Permissions & Roles
 -- Target Database: PostgreSQL 16+
