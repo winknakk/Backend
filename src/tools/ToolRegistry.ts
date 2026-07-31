@@ -336,7 +336,7 @@ export class CloseTicketTool implements ITool {
       if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
 
       // Idempotency check
-      if (ticket.status === "closed") {
+      if (["closed", "done", "cancelled", "canceled"].includes(ticket.status.toLowerCase())) {
         alreadyClosed = true;
         return;
       }
@@ -348,7 +348,7 @@ export class CloseTicketTool implements ITool {
 
     return {
       success: true,
-      data: { ticketId: ticketIdStr, status: "closed", alreadyClosed, planeSync },
+      data: { ticketId: ticketIdStr, status: planeSync?.stateName || "Done", alreadyClosed, planeSync },
       error: null,
       source: "local",
       executionId: require("crypto").randomUUID(),
@@ -579,6 +579,17 @@ export class ToolRegistry implements IToolRegistry {
         return this.tools.get(toolKey);
       }
     }
+    return this.tools.get(name);
+  }
+
+  /**
+   * Returns only the exact local implementation.
+   *
+   * Internal HTTP endpoints are called by PromptX workflows and must not
+   * resolve back to the remote PromptX tool, otherwise the request recursively
+   * re-enters the same workflow.
+   */
+  getLocalTool(name: string): ITool | undefined {
     return this.tools.get(name);
   }
 

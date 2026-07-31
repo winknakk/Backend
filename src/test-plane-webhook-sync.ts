@@ -3,20 +3,25 @@ import crypto from "crypto";
 import { DatabaseAdapter } from "./adapters/types";
 import {
   mapPlanePriorityToTicketPriority,
+  mapTicketPriorityToPlanePriority,
   mapPlaneStateToTicketStatus,
   PlaneWebhookService,
   verifyPlaneWebhookSignature,
 } from "./services/planeWebhookService";
 
 async function run(): Promise<void> {
-  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Done", group: "completed" }), "closed");
+  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Backlog", group: "backlog" }), "Backlog");
+  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Done", group: "completed" }), "Done");
   assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Todo", group: "unstarted" }), "Todo");
   assert.strictEqual(mapPlaneStateToTicketStatus({ group: "started" }), "In Progress");
-  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Cancelled" }), "closed");
-  assert.strictEqual(mapPlanePriorityToTicketPriority("urgent"), "P1");
-  assert.strictEqual(mapPlanePriorityToTicketPriority("high"), "P2");
-  assert.strictEqual(mapPlanePriorityToTicketPriority("medium"), "P3");
-  assert.strictEqual(mapPlanePriorityToTicketPriority("low"), "P4");
+  assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Cancelled" }), "Cancelled");
+  assert.strictEqual(mapPlanePriorityToTicketPriority("urgent"), "Urgent");
+  assert.strictEqual(mapPlanePriorityToTicketPriority("high"), "High");
+  assert.strictEqual(mapPlanePriorityToTicketPriority("medium"), "Medium");
+  assert.strictEqual(mapPlanePriorityToTicketPriority("low"), "Low");
+  assert.strictEqual(mapPlanePriorityToTicketPriority("none"), "None");
+  assert.strictEqual(mapTicketPriorityToPlanePriority("P1"), "urgent");
+  assert.strictEqual(mapTicketPriorityToPlanePriority("Medium"), "medium");
 
   const payload = {
     event: "issue",
@@ -49,10 +54,24 @@ async function run(): Promise<void> {
 
   assert.deepStrictEqual(captured, {
     planeIssueId: "plane-issue-1",
-    changes: { status: "closed", priority: "P2" },
+    changes: { status: "Done", priority: "High" },
   });
   assert.strictEqual(result.processed, true);
   assert.strictEqual(result.matched, true);
+
+  await service.sync({
+    event: "issue",
+    action: "update",
+    data: {
+      id: "plane-issue-1",
+      completed_at: "2026-07-31T00:00:00.000Z",
+      state_detail: { name: "Cancelled", group: "cancelled" },
+    },
+  });
+  assert.deepStrictEqual(captured, {
+    planeIssueId: "plane-issue-1",
+    changes: { status: "Cancelled", priority: undefined },
+  });
 
   const deleteResult = await service.sync({
     event: "issue",

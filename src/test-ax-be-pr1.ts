@@ -72,7 +72,7 @@ async function runTests() {
     conversationId: 1,
     projectId: 1,
     subject: "Active Directory Account Lockout",
-    status: "open",
+    status: "Backlog",
     priority: "P2",
     createdVia: "ai",
   });
@@ -92,10 +92,10 @@ async function runTests() {
   // D. Invalid status transitions
   let threwTransitionError = false;
   try {
-    ticket.changeStatus("resolved"); // open -> resolved is valid
-    ticket.changeStatus("open");     // resolved -> open is valid
-    ticket.changeStatus("closed");   // open -> closed is valid
-    ticket.changeStatus("open");     // closed -> open is invalid
+    ticket.changeStatus("Todo");     // Backlog -> Todo is valid
+    ticket.changeStatus("Backlog");  // Todo -> Backlog is valid
+    ticket.changeStatus("Done");     // Backlog -> Done is valid
+    ticket.changeStatus("Backlog");  // Done -> Backlog is invalid
   } catch (err: any) {
     if (err.message.includes("Closed tickets cannot transition status")) {
       threwTransitionError = true;

@@ -113,7 +113,7 @@ async function runTests() {
     ticketId: ticketReadableId
   }, sessionContext);
   assert(closeResult.success === true, `Close failed: ${closeResult.error}`);
-  assert(closeResult.data.status === "closed", "Status should be closed");
+  assert(closeResult.data.status === "Done", "Status should be Done");
 
   console.log("\nAll MCP Tool Contract Tests Passed!");
 }

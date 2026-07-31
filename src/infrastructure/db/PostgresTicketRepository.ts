@@ -21,9 +21,17 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
     return TicketMapper.toDomain(rows[0]);
   }
 
-  async findByConversationAndSubject(conversationId: number, subject: string): Promise<Ticket | null> {
+  async findActiveByConversationAndSubject(conversationId: number, subject: string): Promise<Ticket | null> {
     const { rows } = await this.db.query(
-      "SELECT * FROM tickets WHERE conversation_id = $1 AND subject = $2 LIMIT 1",
+      `SELECT *
+       FROM tickets
+       WHERE conversation_id = $1
+         AND deleted_at IS NULL
+         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'merged', 'cancelled', 'canceled')
+         AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
+             = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
+       ORDER BY created_at DESC
+       LIMIT 1`,
       [conversationId, subject]
     );
     if (rows.length === 0) return null;
@@ -35,7 +43,8 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
       `SELECT * FROM tickets 
        WHERE project_id = $1 
          AND conversation_id IS NOT NULL
-         AND LOWER(status) NOT IN ('closed', 'merged')`,
+         AND deleted_at IS NULL
+         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'cancelled', 'canceled', 'merged')`,
       [projectId]
     );
     return rows.map((r: any) => TicketMapper.toDomain(r));

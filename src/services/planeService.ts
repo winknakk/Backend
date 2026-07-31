@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { DatabaseAdapter } from "../adapters/types";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
+import { mapTicketPriorityToPlanePriority } from "./planeWebhookService";
 
 export interface PlaneStateSummary {
   id?: string;
@@ -19,6 +20,84 @@ export interface PlaneTicketClosureResult {
   stateId?: string;
   stateName?: string;
   stateGroup?: string;
+}
+
+export interface PlaneWorkItemPayload {
+  name: string;
+  description_html: string;
+  priority: string;
+  external_source: "TicketX";
+  external_id: string;
+  target_date?: string;
+}
+
+function escapePlaneHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizePlaneTargetDate(value: unknown): string | undefined {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined;
+
+  const datePrefix = raw.match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
+  if (datePrefix) return datePrefix;
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString().slice(0, 10);
+}
+
+export function buildPlaneWorkItemPayload(
+  ticket: Record<string, any>,
+  companyName = "Unknown"
+): PlaneWorkItemPayload {
+  const ticketNumber = String(
+    ticket.ticket_number || ticket.ticket_id || ticket.id1 || ticket.id || "UNKNOWN"
+  ).trim();
+  const subject = String(ticket.subject || ticket.title || "No Subject").trim();
+  const visibleTitle = subject.includes(ticketNumber) ? subject : `[${ticketNumber}] ${subject}`;
+  const source = String(ticket.channel || ticket.created_via || "TicketX").trim();
+  const conversationId = String(ticket.conversation_id || "").trim();
+  const severity = String(ticket.severity || "").trim();
+  const priority = mapTicketPriorityToPlanePriority(ticket.priority) || "none";
+  const dueDate = normalizePlaneTargetDate(ticket.due_date || ticket.dueDate);
+  const summary = String(ticket.summary || "No Summary").trim();
+  const httpStatus = `${subject} ${summary}`.match(/\b[1-5]\d{2}\b/)?.[0];
+
+  const metadata = [
+    ["TicketX ID", ticketNumber],
+    ["Conversation", conversationId ? `#${conversationId}` : ""],
+    ["Source", source],
+    ["Customer / Company", companyName === "Unknown" ? "" : companyName],
+    ["Severity", severity],
+    ["Priority", String(ticket.priority || priority)],
+    ["HTTP status", httpStatus || ""],
+    ["SLA target", dueDate || ""],
+  ].filter(([, value]) => value);
+
+  const metadataHtml = metadata
+    .map(
+      ([label, value]) =>
+        `<li><strong>${escapePlaneHtml(label)}:</strong> ${escapePlaneHtml(value)}</li>`
+    )
+    .join("");
+
+  return {
+    name: visibleTitle,
+    description_html:
+      `<h3>TicketX support incident</h3>` +
+      `<ul>${metadataHtml}</ul>` +
+      `<h3>Customer report</h3>` +
+      `<p>${escapePlaneHtml(summary).replace(/\r?\n/g, "<br>")}</p>`,
+    priority,
+    external_source: "TicketX",
+    external_id: ticketNumber,
+    ...(dueDate ? { target_date: dueDate } : {}),
+  };
 }
 
 export function selectPlaneTerminalState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
@@ -231,6 +310,20 @@ export class PlaneService {
       throw new Error(`Ticket not found: ${ticketId}`);
     }
 
+    let ticketWithSource = ticket;
+    if (ticket.conversation_id) {
+      try {
+        const identity = await this.dbAdapter.getConversationIdent(String(ticket.conversation_id));
+        ticketWithSource = {
+          ...ticket,
+          channel: identity?.channel || ticket.channel,
+        };
+      } catch {
+        // Source enrichment is optional; Ticket creation must not fail when
+        // an older record has no resolvable conversation identity.
+      }
+    }
+
     let planeIssueId = `mock-issue-${randomUUID()}`;
     let webhookTriggered = false;
 
@@ -274,14 +367,11 @@ export class PlaneService {
       if (!useMockMode) {
         try {
           console.log(`[PlaneService] Promoting ticket ${ticketId} to Plane API...`);
-          const url = `${config.PLANE_API_URL}/api/v1/workspaces/${config.PLANE_WORKSPACE_SLUG}/projects/${config.PLANE_PROJECT_ID}/issues/`;
+          const url = `${this.getProjectBaseUrl()}/work-items/`;
+          const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
           const res = await this.httpClient.post(
             url,
-            {
-              name: ticket.subject || "No Subject",
-              description: `${ticket.summary || "No Summary"}\n\n[Customer Company: ${companyName}]`,
-              priority: ticket.priority ? ticket.priority.toLowerCase() : "medium",
-            },
+            payload,
             {
               headers: {
                 "Content-Type": "application/json",

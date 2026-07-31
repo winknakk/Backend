@@ -53,7 +53,7 @@ export type TicketInput = z.infer<typeof TicketInputSchema>;
 
 export const TicketSchema = TicketInputSchema.extend({
   ticketId: z.string(), // e.g. TCK-2026-0001
-  status: z.enum(["Open", "In Progress", "Pending", "Resolved"]),
+  status: z.enum(["Backlog", "Todo", "In Progress", "Done", "Cancelled"]),
   startDate: z.string().datetime(),
   dueDate: z.string().datetime(),
   createdBy: z.string(),

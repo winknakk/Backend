@@ -1,7 +1,7 @@
 {
   "name": "create_ticket",
   "version": "2.0",
-  "description": "Create a support ticket in NocoDB database for human operator resolution.",
+  "description": "Create a PostgreSQL support Ticket for every newly reported incident; exact normalized-subject idempotency is handled by this tool.",
   "category": "tickets",
   "owner": "platform-engineering",
   "executionMode": "async",
@@ -66,7 +66,7 @@
     "nextEvents": ["TicketCreated"]
   },
   "agentX": {
-    "reasoningHints": ["Use this tool when a customer reports an issue that requires human engineer attention or operator support."],
+    "reasoningHints": ["Use this tool for every newly reported current failure. Different error codes, systems/modules, primary symptoms, or impacts require separate Tickets. Do not use update_summary for fuzzy deduplication."],
     "memoryUsage": "conversational",
     "requiresEnrichedTicket": false
   },

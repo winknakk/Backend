@@ -9,6 +9,7 @@ import { BullMQEventPublisher } from "../infrastructure/queue/BullMQEventPublish
 import { TicketInput, ExecutionResult } from "../schemas/validation";
 import { DatabaseAdapter } from "../adapters/types";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
+import { mapPlanePriorityToTicketPriority } from "../services/planeWebhookService";
 
 export class TicketService {
   private dbAdapter: DatabaseAdapter;
@@ -42,8 +43,9 @@ export class TicketService {
         }
       }
 
-      // Check for existing duplicate (idempotency check)
-      const existing = await this.ticketRepo.findByConversationAndSubject(conversationIdNum, input.subject);
+      // Only an active row can satisfy idempotency. A missing, deleted, or terminal
+      // ticket represents a completed incident and must not block a new ticket.
+      const existing = await this.ticketRepo.findActiveByConversationAndSubject(conversationIdNum, input.subject);
       if (existing) {
         return {
           success: true,
@@ -97,8 +99,8 @@ export class TicketService {
         projectId: projectIdNum,
         subject: input.subject,
         summary: input.summary,
-        status: "Open",
-        priority: input.priority,
+        status: "Backlog",
+        priority: mapPlanePriorityToTicketPriority(input.priority) || input.priority,
         severity: input.severity,
         dueDate,
         createdAt: startDate,

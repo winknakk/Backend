@@ -1,7 +1,7 @@
 {
   "name": "update_summary",
   "version": "2.0",
-  "description": "Manually update the ticket AI summary override (agent manual corrections).",
+  "description": "Update a Ticket only for an explicitly identified same-incident follow-up; never append a newly reported failure.",
   "category": "tickets",
   "owner": "platform-engineering",
   "executionMode": "sync",
@@ -43,7 +43,7 @@
     "nextEvents": ["TicketSummaryUpdated"]
   },
   "agentX": {
-    "reasoningHints": ["Use this tool when you have manual adjustments or corrections to the ticket's running summary or AI generated summary."],
+    "reasoningHints": ["Use only when the customer explicitly identifies the same existing Ticket. Different error codes, systems/modules, primary symptoms, or impacts require create_ticket."],
     "memoryUsage": "conversational",
     "requiresEnrichedTicket": false
   },

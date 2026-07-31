@@ -47,13 +47,13 @@ function canonicalStatusName(name: string): string {
     unstarted: "Todo",
     started: "In Progress",
     "in progress": "In Progress",
-    completed: "closed",
-    complete: "closed",
-    done: "closed",
-    resolved: "closed",
-    closed: "closed",
-    cancelled: "closed",
-    canceled: "closed",
+    completed: "Done",
+    complete: "Done",
+    done: "Done",
+    resolved: "Done",
+    closed: "Done",
+    cancelled: "Cancelled",
+    canceled: "Cancelled",
   };
   return known[normalized] || name.trim();
 }
@@ -66,9 +66,9 @@ export function mapPlaneStateToTicketStatus(state?: { name?: string; group?: str
     backlog: "Backlog",
     unstarted: "Todo",
     started: "In Progress",
-    completed: "closed",
-    cancelled: "closed",
-    canceled: "closed",
+    completed: "Done",
+    cancelled: "Cancelled",
+    canceled: "Cancelled",
   };
   return state.group ? groupMap[state.group.trim().toLowerCase()] : undefined;
 }
@@ -76,11 +76,27 @@ export function mapPlaneStateToTicketStatus(state?: { name?: string; group?: str
 export function mapPlanePriorityToTicketPriority(priority?: string | null): string | undefined {
   if (!priority) return undefined;
   const priorityMap: Record<string, string> = {
-    urgent: "P1",
-    high: "P2",
-    medium: "P3",
-    low: "P4",
-    none: "P4",
+    urgent: "Urgent",
+    high: "High",
+    medium: "Medium",
+    low: "Low",
+    none: "None",
+  };
+  return priorityMap[priority.trim().toLowerCase()];
+}
+
+export function mapTicketPriorityToPlanePriority(priority?: string | null): string | undefined {
+  if (!priority) return undefined;
+  const priorityMap: Record<string, string> = {
+    p1: "urgent",
+    urgent: "urgent",
+    p2: "high",
+    high: "high",
+    p3: "medium",
+    medium: "medium",
+    p4: "low",
+    low: "low",
+    none: "none",
   };
   return priorityMap[priority.trim().toLowerCase()];
 }
@@ -152,7 +168,9 @@ export class PlaneWebhookService {
     }
 
     const state = await this.resolveState(data, payloadProjectId || configuredProjectId);
-    const status = data.completed_at ? "closed" : mapPlaneStateToTicketStatus(state);
+    // Plane can set completed_at on a cancelled work item too. Prefer the
+    // explicit state so Cancelled never gets flattened into Done.
+    const status = mapPlaneStateToTicketStatus(state) || (data.completed_at ? "Done" : undefined);
     const priority = mapPlanePriorityToTicketPriority(data.priority);
     if (!status && !priority) {
       return { processed: false, matched: false, reason: "no_supported_changes", planeIssueId };

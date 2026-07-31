@@ -2,9 +2,12 @@
   "scripts": {
     "test:takeover-policy": "npx tsx src/test-takeover-policy.ts",
     "test:media-pipeline": "npx tsx src/test-media-pipeline.ts",
+    "test:plane-payload": "npx tsx src/test-plane-work-item-payload.ts",
+    "test:local-tool-routing": "npx tsx src/test-local-tool-routing.ts",
     "db:migrate": "npx tsx src/adapters/postgres/run-migrations-cli.ts",
     "db:seed": "npx tsx src/adapters/postgres/run-seeds-cli.ts",
     "plane:sync": "npx tsx src/run-plane-reverse-sync.ts",
+    "plane:backfill-metadata": "npx tsx src/backfill-plane-work-item-metadata.ts",
     "build": "npx tsc",
     "lint": "npx eslint \"src/**/*.ts\"",
     "format": "npx prettier --check \"src/**/*.ts\"",

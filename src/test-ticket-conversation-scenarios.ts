@@ -19,6 +19,18 @@ class ScenarioRouter implements IMcpToolRouter {
     }
 
     if (toolName === "create_ticket") {
+      const normalizedSubject = String(params.subject || "").trim().replace(/\s+/g, " ").toLowerCase();
+      const existing = this.tickets.find(
+        (ticket) =>
+          !["closed", "done", "cancelled", "canceled", "resolved", "merged"].includes(
+            String(ticket.status || "").toLowerCase()
+          ) &&
+          String(ticket.subject || "").trim().replace(/\s+/g, " ").toLowerCase() === normalizedSubject
+      );
+      if (existing) {
+        return { success: true, data: existing, error: null, source: "test_idempotent", executionId: randomUUID() };
+      }
+
       const ticket = {
         id: this.tickets.length + 1,
         ticketId: this.nextTicketId,
@@ -104,8 +116,8 @@ async function run() {
 
   let result = await agent.handle(msg("เปิดเรื่อง printer พิมพ์ไม่ได้"), sessionContext);
   assert(result.text.includes("TCK-2026-90001"), "created ticket number should be returned");
-  assert(router.calls[0].toolName === "find_ticket", "create flow should check find_ticket before create_ticket");
-  assert(router.lastCall("create_ticket"), "create flow should call create_ticket when no duplicate exists");
+  assert(router.calls[0].toolName === "create_ticket", "new incidents should go directly to create_ticket");
+  assert(!router.lastCall("find_ticket"), "new incidents should not use fuzzy preflight lookup");
 
   result = await agent.handle(msg("เลขอะไรนะ"), sessionContext);
   assert(result.text.includes("TCK-2026-90001"), "number follow-up should remember the last created ticket");
@@ -118,25 +130,61 @@ async function run() {
   result = await agent.handle(msg("เปิดใหม่ printer ยังพิมพ์ไม่ได้"), sessionContext);
   assert(result.text.includes("TCK-2026-90002"), "open again after close should create a new ticket");
 
-  const duplicateRouter = new ScenarioRouter();
-  duplicateRouter.tickets = [
+  const terminalRouter = new ScenarioRouter();
+  terminalRouter.nextTicketId = "TCK-2026-90003";
+  terminalRouter.tickets = [
+    { id: 10, ticketId: "TCK-2026-80001", subject: "405 Method Not Allowed", status: "Done" },
+    { id: 11, ticketId: "TCK-2026-80002", subject: "405 Method Not Allowed", status: "Cancelled" },
+  ];
+  const terminalAgent = new TicketAgent(terminalRouter);
+  result = await terminalAgent.handle(
+    msg("ระบบล่มขึ้น 405 Method Not Allowed เข้าไม่ได้เลย"),
+    { ...sessionContext, history: [{ content: "เรื่องนี้เคยมี TCK-2026-80001 แต่ปิดแล้ว" }] }
+  );
+  assert(result.text.includes("TCK-2026-90003"), "terminal tickets and stale history must not block a new ticket");
+  assert(terminalRouter.lastCall("create_ticket"), "a new incident must create when only terminal tickets exist");
+
+  const distinctRouter = new ScenarioRouter();
+  distinctRouter.nextTicketId = "TCK-2026-90004";
+  distinctRouter.tickets = [
     {
       id: 2,
       ticketId: "TCK-2026-11111",
-      subject: "IT support requested: printer พิมพ์ไม่ได้",
-      summary: "printer พิมพ์ไม่ได้",
-      runningSummary: "printer พิมพ์ไม่ได้",
-      status: "open",
+      subject: "IT support requested: ระบบล่มขึ้น 405 Method Not Allowed เข้าไม่ได้เลย",
+      summary: "ระบบล่มขึ้น 405 Method Not Allowed เข้าไม่ได้เลย",
+      runningSummary: "ระบบล่มขึ้น 405 Method Not Allowed เข้าไม่ได้เลย",
+      status: "Backlog",
     },
   ];
-  const duplicateAgent = new TicketAgent(duplicateRouter);
-  result = await duplicateAgent.handle(msg("เปิดเรื่อง printer พิมพ์ไม่ได้อีกแล้ว"), sessionContext);
-  assert(result.text.includes("อัปเดตใบนี้แทนไหม"), "probable duplicate should ask before creating another ticket");
-  assert(!duplicateRouter.lastCall("create_ticket"), "duplicate prompt should not create a ticket yet");
+  const distinctAgent = new TicketAgent(distinctRouter);
+  result = await distinctAgent.handle(msg("ระบบล่มขึ้น 444 เข้าไม่ได้เลย ด่วน"), sessionContext);
+  assert(result.text.includes("TCK-2026-90004"), "a different error code must create a separate ticket");
+  assert(distinctRouter.lastCall("create_ticket"), "a new incident must always go through create_ticket");
+  assert(!distinctRouter.lastCall("update_summary"), "a new incident must never be appended through update_summary");
 
-  result = await duplicateAgent.handle(msg("ใช่"), sessionContext);
-  assert(result.text.includes("TCK-2026-11111"), "confirmation should update the duplicate ticket");
-  assert(duplicateRouter.lastCall("update_summary")?.params.ticketId === "TCK-2026-11111", "confirmation should call update_summary");
+  distinctRouter.nextTicketId = "TCK-2026-90005";
+  result = await distinctAgent.handle(msg("อัปเดตหน่อย ระบบล่มขึ้น 500 เข้าไม่ได้เลย"), sessionContext);
+  assert(result.text.includes("TCK-2026-90005"), "generic update wording with a new failure must create a separate ticket");
+  assert(
+    distinctRouter.lastCall("create_ticket")?.params.subject.includes("500"),
+    "the newly reported error code must be sent to create_ticket"
+  );
+
+  const retryRouter = new ScenarioRouter();
+  retryRouter.tickets = [
+    {
+      id: 3,
+      ticketId: "TCK-2026-22221",
+      subject: "IT support requested: printer พิมพ์ไม่ได้",
+      summary: "printer พิมพ์ไม่ได้",
+      status: "Backlog",
+    },
+  ];
+  const retryAgent = new TicketAgent(retryRouter);
+  result = await retryAgent.handle(msg("printer พิมพ์ไม่ได้"), sessionContext);
+  assert(result.text.includes("TCK-2026-22221"), "an exact active incident retry should remain idempotent");
+  assert(retryRouter.lastCall("create_ticket"), "exact retry idempotency should be owned by create_ticket");
+  assert(!retryRouter.lastCall("update_summary"), "exact retry must not mutate the existing summary");
 
   const singleRouter = new ScenarioRouter();
   singleRouter.tickets = [

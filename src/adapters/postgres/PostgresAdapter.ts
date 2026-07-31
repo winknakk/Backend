@@ -8,6 +8,7 @@ import { createLogger } from "../../observability/logger";
 import { CacheService } from "../../cache/CacheService";
 import { BackupManager } from "./BackupManager";
 import { TakeoverManager } from "../../human-takeover/TakeoverManager";
+import { mapPlanePriorityToTicketPriority } from "../../services/planeWebhookService";
 
 const logger = createLogger("PostgresAdapter");
 
@@ -119,8 +120,8 @@ export class PostgresAdapter implements DatabaseAdapter {
           parsedConvId,
           input.subject,
           input.summary,
-          "Open",
-          input.priority,
+          "Backlog",
+          mapPlanePriorityToTicketPriority(input.priority) || input.priority,
           parsedProjectId,
           input.severity,
           slaDueDate,
@@ -864,6 +865,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       JOIN identities i ON i.id = c.identity_id
       LEFT JOIN profiles p ON p.id = i.profile_id
       LEFT JOIN companies co ON co.id = p.company_id
+      WHERE c.deleted_at IS NULL
+        AND c.status = 'open'
     `;
     
     const queryParams: any[] = [];
@@ -872,7 +875,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       if (isNaN(parsedProjectId)) {
         return [];
       }
-      query += ` WHERE c.project_id = $1 `;
+      query += ` AND c.project_id = $1 `;
       queryParams.push(parsedProjectId);
     }
     

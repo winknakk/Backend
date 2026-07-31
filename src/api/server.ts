@@ -964,7 +964,7 @@ fastify.post("/api/v1/webhooks/plane", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getTool("close_ticket");
+  const tool = toolRegistry.getLocalTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
@@ -978,7 +978,7 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getTool("assign_ticket");
+  const tool = toolRegistry.getLocalTool("assign_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool assign_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
@@ -992,7 +992,7 @@ fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getTool("merge_ticket");
+  const tool = toolRegistry.getLocalTool("merge_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool merge_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
@@ -1006,7 +1006,7 @@ fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets/update-summary", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getTool("update_summary");
+  const tool = toolRegistry.getLocalTool("update_summary");
   if (!tool) return reply.code(500).send({ error: "Tool update_summary not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
@@ -1235,7 +1235,7 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
       `SELECT id, ticket_number, ticket_id, status, due_date
        FROM tickets
        WHERE conversation_id = $1
-         AND LOWER(status) NOT IN ('closed', 'resolved', 'merged', 'cancelled', 'canceled')
+         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'merged', 'cancelled', 'canceled')
          AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
              = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
        ORDER BY created_at DESC
@@ -1572,18 +1572,29 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     const history = await memoryService.getConversationHistory(conversationId, 10);
     const historySummary = history.map(h => `${h.role === 'customer' ? 'Customer' : h.role === 'ai' ? 'Assistant' : 'Support'}: ${h.content}`).join("\n");
 
-    // Notify all connected Admin UI WebSockets that a new message/image has arrived
+    const projectResult = await pool.query(
+      `SELECT project_id
+       FROM conversations
+       WHERE id = $1::integer
+         AND deleted_at IS NULL
+       LIMIT 1`,
+      [conversationId]
+    );
+    const conversationProjectId = String(projectResult.rows[0]?.project_id || "");
+
+    // Notify only Admin UI WebSockets connected to the conversation's project.
     const notifyPayload = JSON.stringify({
       event: "NEW_MESSAGE",
       data: {
         conversationId: String(conversationId),
+        projectId: conversationProjectId,
         channel,
         customerName: profileName,
         messageType
       }
     });
-    for (const adminSocket of adminConnections.keys()) {
-      if (adminSocket.readyState === 1) {
+    for (const [adminSocket, projectId] of adminConnections) {
+      if (projectId === conversationProjectId && adminSocket.readyState === 1) {
         adminSocket.send(notifyPayload);
       }
     }

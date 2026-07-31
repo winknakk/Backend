@@ -109,6 +109,30 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
           });
         }
       }
+
+      if (
+        routeUrl.includes("/api/admin/conversations/:id")
+        && params?.id !== undefined
+        && !isNaN(parsed)
+        && parsed > 0
+      ) {
+        const conversationId = parseInt(String(params.id), 10);
+        const scopedConversation = await pool.query(
+          `SELECT 1
+           FROM conversations
+           WHERE id = $1
+             AND project_id = $2
+             AND deleted_at IS NULL
+           LIMIT 1`,
+          [conversationId, parsed]
+        );
+        if (scopedConversation.rowCount === 0) {
+          return reply.code(404).send({
+            error: "Not Found",
+            message: `Conversation ${conversationId} does not belong to project ${parsed}`,
+          });
+        }
+      }
     }
   });
 

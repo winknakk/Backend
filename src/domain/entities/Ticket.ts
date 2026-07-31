@@ -159,6 +159,10 @@ export class Ticket extends BaseAggregate<number> {
 
   // Domain Actions
 
+  private isTerminalStatus(): boolean {
+    return ["closed", "done", "cancelled", "canceled"].includes(this._status.toLowerCase());
+  }
+
   private normalizeEnrichmentState(state?: string): EnrichmentState {
     return EnrichmentStates.includes(state as EnrichmentState) ? (state as EnrichmentState) : "PENDING";
   }
@@ -191,7 +195,7 @@ export class Ticket extends BaseAggregate<number> {
   }
 
   public updateAiTitle(title: string, confidence: number): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot update title on a closed ticket");
     }
     this._title = title;
@@ -207,7 +211,7 @@ export class Ticket extends BaseAggregate<number> {
     lastAiSummary: string,
     confidence: number
   ): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot update summary on a closed ticket");
     }
     this._runningSummary = runningSummary;
@@ -221,7 +225,7 @@ export class Ticket extends BaseAggregate<number> {
   }
 
   public updateSummary(runningSummary: string, lastAiSummary: string): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot update summary on a closed ticket");
     }
     this._runningSummary = runningSummary;
@@ -233,7 +237,7 @@ export class Ticket extends BaseAggregate<number> {
     if (this.id !== 0 && duplicateOfTicketId === this.id) {
       throw new Error("A ticket cannot be a duplicate of itself");
     }
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Closed tickets cannot be marked as duplicate");
     }
     this._duplicateOfTicketId = duplicateOfTicketId;
@@ -249,7 +253,7 @@ export class Ticket extends BaseAggregate<number> {
   }
 
   public recordDuplicateCheckCompleted(confidence: number): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot update duplicate check on a closed ticket");
     }
     this._aiConfidenceMetrics = {
@@ -263,7 +267,7 @@ export class Ticket extends BaseAggregate<number> {
     if (this.id !== 0 && primaryTicketId === this.id) {
       throw new Error("Cannot merge a ticket into itself");
     }
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot merge closed tickets");
     }
     this._duplicateOfTicketId = primaryTicketId;
@@ -272,7 +276,7 @@ export class Ticket extends BaseAggregate<number> {
   }
 
   public assign(agentId: string): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot assign closed ticket");
     }
     this._assignedPm = agentId;
@@ -280,10 +284,10 @@ export class Ticket extends BaseAggregate<number> {
   }
 
   public close(): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Ticket is already closed");
     }
-    this._status = "closed";
+    this._status = "Done";
     this.addDomainEvent(new TicketClosedEvent(this.id));
   }
 
@@ -291,19 +295,22 @@ export class Ticket extends BaseAggregate<number> {
     const current = this._status.toLowerCase();
     const target = newStatus.toLowerCase();
 
-    if (current === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Closed tickets cannot transition status");
     }
 
     // Validate state transitions
     const allowedTransitions: Record<string, string[]> = {
-      new: ["open", "closed"],
-      open: ["in_progress", "waiting_customer", "waiting_agent", "resolved", "closed", "merged"],
-      in_progress: ["waiting_customer", "waiting_agent", "resolved", "closed"],
-      waiting_customer: ["open", "resolved", "closed"],
-      waiting_agent: ["open", "in_progress", "resolved", "closed"],
-      resolved: ["open", "closed"],
-      merged: ["open", "closed"],
+      new: ["backlog", "done", "cancelled"],
+      backlog: ["todo", "in progress", "done", "cancelled", "merged"],
+      todo: ["backlog", "in progress", "done", "cancelled"],
+      "in progress": ["backlog", "todo", "done", "cancelled"],
+      open: ["backlog", "todo", "in progress", "done", "cancelled", "merged"],
+      in_progress: ["backlog", "todo", "in progress", "done", "cancelled"],
+      waiting_customer: ["backlog", "todo", "in progress", "done", "cancelled"],
+      waiting_agent: ["backlog", "todo", "in progress", "done", "cancelled"],
+      resolved: ["backlog", "done"],
+      merged: ["backlog", "done"],
     };
 
     const allowed = allowedTransitions[current] || [];
@@ -317,7 +324,7 @@ export class Ticket extends BaseAggregate<number> {
   }
 
   public updatePriority(priority: string, resolveHours: number): void {
-    if (this._status.toLowerCase() === "closed") {
+    if (this.isTerminalStatus()) {
       throw new Error("Cannot update priority on a closed ticket");
     }
     this._priority = priority;

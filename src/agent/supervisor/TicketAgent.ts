@@ -19,17 +19,12 @@ type RememberedTicket = {
   status?: string;
 };
 
-type PendingDuplicate = {
-  ticket: RememberedTicket;
-  messageText: string;
-};
-
 type TicketResolution =
   | { kind: "resolved"; ticket: RememberedTicket; confidence: number }
   | { kind: "ambiguous"; tickets: RememberedTicket[] }
   | { kind: "none" };
 
-const CLOSED_STATUSES = new Set(["closed", "merged", "resolved"]);
+const CLOSED_STATUSES = new Set(["closed", "done", "cancelled", "canceled", "merged", "resolved"]);
 const LOW_SIGNAL_REFERENCES = [
   "เลขอะไรนะ",
   "ปิดอันนี้",
@@ -54,7 +49,6 @@ export class TicketAgent implements IAgent {
   private mcpToolRouter: IMcpToolRouter;
   private lastCreatedTicket: RememberedTicket | null = null;
   private lastReferencedTicket: RememberedTicket | null = null;
-  private pendingDuplicate: PendingDuplicate | null = null;
 
   constructor(mcpToolRouter: IMcpToolRouter) {
     this.mcpToolRouter = mcpToolRouter;
@@ -78,15 +72,6 @@ export class TicketAgent implements IAgent {
       { requestId: reqId, conversationId, intent, component: "TicketAgent" },
       `Ticket Agent intent classified: "${intent}"`
     );
-
-    if (this.pendingDuplicate && this.isConfirmation(message.text)) {
-      return this.updateExistingDuplicate(message, sessionContext);
-    }
-    if (this.pendingDuplicate && this.isRejection(message.text)) {
-      const pending = this.pendingDuplicate;
-      this.pendingDuplicate = null;
-      return this.createTicketFromText(pending.messageText, message, sessionContext, projectId);
-    }
 
     switch (intent) {
       case "status":
@@ -141,11 +126,11 @@ export class TicketAgent implements IAgent {
     }
 
     if (
+      hasTicketId ||
       lower.includes("อัปเดตอันเดิม") ||
       lower.includes("อัพเดตอันเดิม") ||
-      lower.includes("อัปเดต") ||
-      lower.includes("อัพเดต") ||
-      lower.includes("update_summary") ||
+      lower.includes("ข้อมูลเพิ่มของเรื่องเดิม") ||
+      lower.includes("ข้อมูลเพิ่มเติมของเรื่องเดิม") ||
       lower.includes("update existing")
     ) {
       return "update_summary";
@@ -175,15 +160,9 @@ export class TicketAgent implements IAgent {
     sessionContext: any,
     projectId: string
   ): Promise<AgentResult> {
-    const duplicate = await this.findProbableDuplicate(message.text, sessionContext, projectId);
-    if (duplicate) {
-      this.pendingDuplicate = { ticket: duplicate, messageText: message.text };
-      this.rememberReferencedTicket(duplicate);
-      return {
-        text: `เหมือนมีตั๋วที่เปิดอยู่แล้วคือ ${duplicate.ticketId}: ${duplicate.subject || "-"} ต้องการให้อัปเดตใบนี้แทนไหมคะ/ครับ`,
-      };
-    }
-
+    // Every newly reported incident goes through create_ticket. The persistence
+    // layer owns exact normalized-subject idempotency; fuzzy conversation-memory
+    // matching must never append a distinct failure to an existing ticket.
     return this.createTicketFromText(message.text, message, sessionContext, projectId);
   }
 
@@ -228,7 +207,6 @@ export class TicketAgent implements IAgent {
 
     const ticket = this.normalizeTicket(ticketResult.data);
     this.rememberCreatedTicket(ticket);
-    this.pendingDuplicate = null;
     return {
       text: `สร้างตั๋วใบงานเรียบร้อยแล้วค่ะ/ครับ หมายเลขตั๋ว: ${ticket.ticketId} ทีมซัพพอร์ตจะติดต่อกลับโดยเร็วที่สุดค่ะ/ครับ`,
     };
@@ -309,7 +287,7 @@ export class TicketAgent implements IAgent {
       return { text: `ขออภัยค่ะ/ครับ ไม่สามารถปิดตั๋ว ${ticketId} ได้: ${result.error}` };
     }
 
-    this.rememberReferencedTicket({ ...resolution.ticket, status: "closed" });
+    this.rememberReferencedTicket({ ...resolution.ticket, status: "Done" });
     return { text: `ปิดตั๋ว ${ticketId} เรียบร้อยแล้วค่ะ/ครับ` };
   }
 
@@ -404,30 +382,7 @@ export class TicketAgent implements IAgent {
     }
 
     this.rememberReferencedTicket({ ...resolution.ticket, runningSummary });
-    this.pendingDuplicate = null;
     return { text: `อัปเดตตั๋ว ${ticketId} เรียบร้อยแล้วค่ะ/ครับ` };
-  }
-
-  private async updateExistingDuplicate(message: InboundMessage, sessionContext: any): Promise<AgentResult> {
-    if (!this.pendingDuplicate) {
-      return { text: "ยังไม่มีตั๋วที่รอการยืนยันค่ะ/ครับ" };
-    }
-
-    const ticket = this.pendingDuplicate.ticket;
-    const runningSummary = this.mergeSummary(ticket, this.pendingDuplicate.messageText);
-    const result = await this.mcpToolRouter.callTool(
-      "update_summary",
-      { ticketId: ticket.ticketId, runningSummary, lastAiSummary: this.pendingDuplicate.messageText },
-      sessionContext
-    );
-
-    this.pendingDuplicate = null;
-    if (!result.success) {
-      return { text: `ขออภัยค่ะ/ครับ ไม่สามารถอัปเดตตั๋ว ${ticket.ticketId} ได้: ${result.error}` };
-    }
-
-    this.rememberReferencedTicket({ ...ticket, runningSummary });
-    return { text: `อัปเดตตั๋ว ${ticket.ticketId} เรียบร้อยแล้วค่ะ/ครับ` };
   }
 
   private async resolveTicket(text: string, sessionContext: any, projectId: string): Promise<TicketResolution> {
@@ -480,20 +435,6 @@ export class TicketAgent implements IAgent {
 
     const tickets = Array.isArray(result.data) ? result.data : result.data.tickets || [result.data];
     return tickets.map((ticket: any) => this.normalizeTicket(ticket)).filter((ticket: RememberedTicket) => this.isActive(ticket));
-  }
-
-  private async findProbableDuplicate(
-    text: string,
-    sessionContext: any,
-    projectId: string
-  ): Promise<RememberedTicket | null> {
-    const tickets = await this.findActiveTickets(sessionContext, projectId);
-    if (tickets.length === 0) return null;
-
-    const scored = this.bestTicketMatch(text, tickets);
-    if (scored.score >= 0.5) return scored.ticket;
-
-    return null;
   }
 
   private bestTicketMatch(text: string, tickets: RememberedTicket[]): { ticket: RememberedTicket; score: number; secondScore: number } {
@@ -607,15 +548,4 @@ export class TicketAgent implements IAgent {
     return current ? `${current}\nFollow-up: ${text}` : text;
   }
 
-  private isConfirmation(text: string): boolean {
-    const lower = text.toLowerCase().trim();
-    return ["ใช่", "ได้", "โอเค", "ok", "yes", "y", "อัปเดต", "อัพเดต", "อัปเดตอันเดิม", "อัพเดตอันเดิม"].some((word) =>
-      lower.includes(word)
-    );
-  }
-
-  private isRejection(text: string): boolean {
-    const lower = text.toLowerCase().trim();
-    return ["ไม่", "สร้างใหม่", "เปิดใหม่", "no", "new"].some((word) => lower.includes(word));
-  }
 }
