@@ -23,7 +23,7 @@ async function runMasterDataTest() {
   // 2. Test Get Projects Endpoint
   const projectsRes = await fastify.inject({
     method: "GET",
-    url: "/api/v1/admin/projects",
+    url: "/api/v1/admin/master-data/projects",
   });
   console.log("Projects Status:", projectsRes.statusCode);
   console.log("Projects Count:", JSON.parse(projectsRes.body).projects?.length);
@@ -31,7 +31,7 @@ async function runMasterDataTest() {
   // 3. Test Get Customers Endpoint
   const customersRes = await fastify.inject({
     method: "GET",
-    url: "/api/v1/admin/customers",
+    url: "/api/v1/admin/master-data/customers",
   });
   console.log("Customers Status:", customersRes.statusCode);
   console.log("Customers Count:", JSON.parse(customersRes.body).customers?.length);
@@ -39,7 +39,7 @@ async function runMasterDataTest() {
   // 4. Test Get LINE Identities Endpoint
   const identitiesRes = await fastify.inject({
     method: "GET",
-    url: "/api/v1/admin/identities",
+    url: "/api/v1/admin/master-data/identities",
   });
   console.log("Identities Status:", identitiesRes.statusCode);
   console.log("Identities Count:", JSON.parse(identitiesRes.body).identities?.length);

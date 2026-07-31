@@ -3,9 +3,9 @@ import { pool } from "../../adapters/postgres/PostgresAdapter";
 
 export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   // ----------------------------------------------------
-  // Projects & Plans Routes
+  // Master Data Projects & Plans Routes
   // ----------------------------------------------------
-  fastify.get("/api/v1/admin/projects", async (request, reply) => {
+  fastify.get("/api/v1/admin/master-data/projects", async (request, reply) => {
     try {
       const client = await pool.connect();
       try {
@@ -31,7 +31,7 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
     }
   });
 
-  fastify.post("/api/v1/admin/projects", async (request, reply) => {
+  fastify.post("/api/v1/admin/master-data/projects", async (request, reply) => {
     const { id, name, code, plan_status } = request.body as any;
     try {
       const client = await pool.connect();
@@ -58,9 +58,9 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   });
 
   // ----------------------------------------------------
-  // Customers Routes
+  // Master Data Customers Routes
   // ----------------------------------------------------
-  fastify.get("/api/v1/admin/customers", async (request, reply) => {
+  fastify.get("/api/v1/admin/master-data/customers", async (request, reply) => {
     try {
       const client = await pool.connect();
       try {
@@ -88,7 +88,7 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
     }
   });
 
-  fastify.post("/api/v1/admin/customers", async (request, reply) => {
+  fastify.post("/api/v1/admin/master-data/customers", async (request, reply) => {
     const { id, project_id, company_name, contact_name, email, phone } = request.body as any;
     try {
       const client = await pool.connect();
@@ -115,9 +115,9 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   });
 
   // ----------------------------------------------------
-  // LINE Identity Mappings Routes
+  // Master Data LINE Identity Mappings Routes
   // ----------------------------------------------------
-  fastify.get("/api/v1/admin/identities", async (request, reply) => {
+  fastify.get("/api/v1/admin/master-data/identities", async (request, reply) => {
     try {
       const client = await pool.connect();
       try {
@@ -145,7 +145,7 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
     }
   });
 
-  fastify.post("/api/v1/admin/identities", async (request, reply) => {
+  fastify.post("/api/v1/admin/master-data/identities", async (request, reply) => {
     const { line_user_id, customer_id, project_id } = request.body as any;
     try {
       const client = await pool.connect();
@@ -167,7 +167,7 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
     }
   });
 
-  fastify.delete("/api/v1/admin/identities/:id", async (request, reply) => {
+  fastify.delete("/api/v1/admin/master-data/identities/:id", async (request, reply) => {
     const { id } = request.params as any;
     try {
       const client = await pool.connect();
