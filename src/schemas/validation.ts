@@ -17,6 +17,9 @@ export const InboundMessageSchema = z.object({
   receivedAt: z.string().datetime(),
   companyId: z.string().optional(),
   externalId: z.string().optional(),
+  replyToMessageId: z.union([z.string(), z.number()]).optional(),
+  quotedMessageId: z.union([z.string(), z.number()]).optional(),
+  quoteToken: z.string().optional(),
   isMentioned: z.boolean().optional(),
   senderRef: z.string().optional(),
 });

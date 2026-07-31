@@ -78,8 +78,30 @@ export class AgentRuntime implements IAgentSession {
 
     logger.info({ requestId: reqId, conversationId, component: "AgentRuntime" }, "Start chat processing");
 
+    let replyToId: number | undefined = undefined;
+    if (message.quotedMessageId || message.replyToMessageId) {
+      const rawRef = message.quotedMessageId || message.replyToMessageId;
+      try {
+        const res = await (this.memoryService as any).dbAdapter.pool?.query(
+          `SELECT id FROM messages WHERE external_id = $1 LIMIT 1`,
+          [String(rawRef)]
+        );
+        if (res && res.rows.length > 0) {
+          replyToId = res.rows[0].id;
+        }
+      } catch (e) {}
+    }
+
     // Append customer log
-    await this.memoryService.appendConversationLog(conversationId, "customer", sanitizedInput, message.externalId);
+    await this.memoryService.appendConversationLog(
+      conversationId, 
+      "customer", 
+      sanitizedInput, 
+      message.externalId, 
+      "text", 
+      replyToId, 
+      message.quoteToken
+    );
 
     // Get full message history with Ids for memory tracking
     const fullHistory = await this.memoryService.getFullConversationHistory(conversationId);
