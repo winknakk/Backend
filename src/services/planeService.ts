@@ -22,6 +22,12 @@ export interface PlaneTicketClosureResult {
   stateGroup?: string;
 }
 
+export interface PlaneTicketSummaryResult {
+  synced: boolean;
+  reason?: "not_linked";
+  planeIssueId?: string;
+}
+
 export interface PlaneWorkItemPayload {
   name: string;
   description_html: string;
@@ -66,6 +72,8 @@ export function buildPlaneWorkItemPayload(
   const priority = mapTicketPriorityToPlanePriority(ticket.priority) || "none";
   const dueDate = normalizePlaneTargetDate(ticket.due_date || ticket.dueDate);
   const summary = String(ticket.summary || "No Summary").trim();
+  const runningSummary = String(ticket.running_summary || ticket.runningSummary || "").trim();
+  const lastAiSummary = String(ticket.last_ai_summary || ticket.lastAiSummary || "").trim();
   const httpStatus = `${subject} ${summary}`.match(/\b[1-5]\d{2}\b/)?.[0];
 
   const metadata = [
@@ -86,13 +94,22 @@ export function buildPlaneWorkItemPayload(
     )
     .join("");
 
+  const summarySections = [
+    `<h3>Customer report</h3><p>${escapePlaneHtml(summary).replace(/\r?\n/g, "<br>")}</p>`,
+    runningSummary
+      ? `<h3>Current running summary</h3><p>${escapePlaneHtml(runningSummary).replace(/\r?\n/g, "<br>")}</p>`
+      : "",
+    lastAiSummary
+      ? `<h3>Latest customer update</h3><p>${escapePlaneHtml(lastAiSummary).replace(/\r?\n/g, "<br>")}</p>`
+      : "",
+  ].join("");
+
   return {
     name: visibleTitle,
     description_html:
       `<h3>TicketX support incident</h3>` +
       `<ul>${metadataHtml}</ul>` +
-      `<h3>Customer report</h3>` +
-      `<p>${escapePlaneHtml(summary).replace(/\r?\n/g, "<br>")}</p>`,
+      summarySections,
     priority,
     external_source: "TicketX",
     external_id: ticketNumber,
@@ -254,6 +271,42 @@ export class PlaneService {
       stateName: terminalState.name,
       stateGroup: terminalState.group,
     };
+  }
+
+  async syncTicketSummaryToPlane(ticketId: string): Promise<PlaneTicketSummaryResult> {
+    const { ticket, companyName } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+    if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
+
+    const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+    if (!planeIssueId || String(planeIssueId).startsWith("mock-")) {
+      return { synced: false, reason: "not_linked" };
+    }
+
+    this.assertPlaneConfigured();
+
+    const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
+    if (resolvedPlaneIssueId !== String(planeIssueId)) {
+      await this.dbAdapter.updateTicketPlaneIssue(ticketId, resolvedPlaneIssueId);
+    }
+
+    let ticketWithSource = ticket;
+    if (ticket.conversation_id) {
+      try {
+        const identity = await this.dbAdapter.getConversationIdent(String(ticket.conversation_id));
+        ticketWithSource = { ...ticket, channel: identity?.channel || ticket.channel };
+      } catch {
+        // Channel enrichment is optional for older tickets.
+      }
+    }
+
+    const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
+    await this.httpClient.patch(
+      `${this.getProjectBaseUrl()}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
+      payload,
+      this.getPlaneRequestConfig()
+    );
+
+    return { synced: true, planeIssueId: resolvedPlaneIssueId };
   }
 
   private getFilePath(tableName: string): string {

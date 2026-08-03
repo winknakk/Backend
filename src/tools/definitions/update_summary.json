@@ -27,7 +27,10 @@
         "type": "object",
         "properties": {
           "ticketId": { "type": "string" },
-          "updated": { "type": "boolean" }
+          "updated": { "type": "boolean" },
+          "planeSynced": { "type": "boolean", "description": "True when the linked Plane work item was updated" },
+          "planeIssueId": { "type": "string", "description": "Linked Plane work item ID when synchronized" },
+          "planeSyncReason": { "type": "string", "enum": ["not_linked"], "description": "Why Plane was not updated" }
         }
       },
       "error": { "type": "null" }
@@ -43,7 +46,7 @@
     "nextEvents": ["TicketSummaryUpdated"]
   },
   "agentX": {
-    "reasoningHints": ["Use only when the customer explicitly identifies the same existing Ticket. Different error codes, systems/modules, primary symptoms, or impacts require create_ticket."],
+    "reasoningHints": ["Use only when the customer explicitly identifies the same existing Ticket. Different error codes, systems/modules, primary symptoms, or impacts require create_ticket.", "A linked Plane work item is updated after the TicketX summary is saved; inspect planeSynced in the result."],
     "memoryUsage": "conversational",
     "requiresEnrichedTicket": false
   },

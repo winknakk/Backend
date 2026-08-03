@@ -314,7 +314,7 @@ async function bootstrap() {
   toolRegistry.registerTool(searchDocsTool);
   toolRegistry.registerTool(new GetTicketTool());
   toolRegistry.registerTool(new GetTicketStatusTool());
-  toolRegistry.registerTool(new UpdateSummaryTool());
+  toolRegistry.registerTool(new UpdateSummaryTool(planeService));
   toolRegistry.registerTool(new FindTicketTool());
   toolRegistry.registerTool(new MergeTicketTool());
   toolRegistry.registerTool(new CloseTicketTool(planeService));
