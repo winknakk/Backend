@@ -149,11 +149,28 @@ export class Orchestrator {
             "Human takeover active: bypassing AgentRuntime reasoning loop."
           );
 
+          let replyToId: number | undefined = undefined;
+          if (message.quotedMessageId || message.replyToMessageId) {
+            const rawRef = message.quotedMessageId || message.replyToMessageId;
+            try {
+              const res = await (this.memoryService as any).dbAdapter.pool?.query(
+                `SELECT id FROM messages WHERE external_id = $1 LIMIT 1`,
+                [String(rawRef)]
+              );
+              if (res && res.rows.length > 0) {
+                replyToId = res.rows[0].id;
+              }
+            } catch (e) {}
+          }
+
           await this.memoryService.appendConversationLog(
             sessionContext.conversationId,
             "customer",
             message.text,
-            message.externalId
+            message.externalId,
+            "text",
+            replyToId,
+            message.quoteToken
           );
 
           const durationMs = timer();

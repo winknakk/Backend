@@ -1375,6 +1375,29 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     || null;
   const quote_token = (rawQuoteToken && String(rawQuoteToken).trim()) ? String(rawQuoteToken).trim() : null;
 
+  // LINE's quotedMessageId identifies the original message the user replied to (LINE Messaging API feature)
+  const rawQuotedMessageId = payload.quotedMessageId
+    || payload.quoted_message_id
+    || payload.event?.message?.quotedMessageId
+    || payload.event?.message?.quoted_message_id
+    || payload.message?.quotedMessageId
+    || payload.message?.quoted_message_id
+    || payload.body?.quotedMessageId
+    || payload.body?.quoted_message_id
+    || payload.body?.message?.quotedMessageId
+    || payload.body?.event?.message?.quotedMessageId
+    || body.quotedMessageId
+    || body.quoted_message_id
+    || body.event?.message?.quotedMessageId
+    || body.event?.message?.quoted_message_id
+    || body.message?.quotedMessageId
+    || body.message?.quoted_message_id
+    || body.data?.quotedMessageId
+    || body.data?.quoted_message_id
+    || body.data?.message?.quotedMessageId
+    || null;
+  const quotedMessageId = rawQuotedMessageId ? String(rawQuotedMessageId).trim() : null;
+
   const replyToken = payload.replyToken 
     || payload.reply_token 
     || payload.event?.replyToken 
@@ -1390,7 +1413,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     || body.event?.message?.id 
     || null;
 
-  serverLogger.info({ senderId, messageText, messageType, imageId, quote_token, replyToken, channel }, "[Webhook] Inbound customer message payload received");
+  serverLogger.info({ senderId, messageText, messageType, imageId, quote_token, quotedMessageId, replyToken, channel }, "[Webhook] Inbound customer message payload received");
 
   if (!senderId) {
     return reply.code(400).send({ error: "Bad Request", message: "Missing senderId" });
@@ -1407,13 +1430,32 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     // Save or update customer message in DB if not created yet by gateway
     let currentMsgRecord: any = null;
     if (conversationId) {
+      // Resolve reply_to_message_id from quotedMessageId (LINE reply feature)
+      let replyToMessageId: number | undefined = undefined;
+      if (quotedMessageId) {
+        try {
+          const quotedRes = await pool.query(
+            `SELECT id FROM messages WHERE external_id = $1 ORDER BY id DESC LIMIT 1`,
+            [quotedMessageId]
+          );
+          if (quotedRes.rows.length > 0) {
+            replyToMessageId = parseInt(String(quotedRes.rows[0].id), 10) || undefined;
+            serverLogger.info({ quotedMessageId, replyToMessageId }, "[Webhook] Resolved quotedMessageId -> reply_to_message_id");
+          } else {
+            serverLogger.warn({ quotedMessageId }, "[Webhook] Could not find parent message for quotedMessageId");
+          }
+        } catch (e: any) {
+          serverLogger.warn({ quotedMessageId, err: e.message }, "[Webhook] Failed to resolve quotedMessageId");
+        }
+      }
+
       currentMsgRecord = await dbAdapter.saveMessage(
         conversationId,
         "customer",
         messageText,
         externalId || undefined,
         messageType,
-        undefined,
+        replyToMessageId,
         quote_token || undefined
       );
     }

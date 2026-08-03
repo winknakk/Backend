@@ -86,6 +86,8 @@ export class HumanReplyService {
 
     const channel = String(ident.channel).toLowerCase();
     let delivery: DeliveryResult;
+    let sentMsgId: string | undefined = undefined;
+    let sentQuoteToken: string | undefined = undefined;
 
     // 2. Deliver LINE replies directly so a successful response means LINE accepted the push.
     // Workflow webhook endpoints acknowledge before their internal steps finish, so their 2xx
@@ -141,7 +143,7 @@ export class HumanReplyService {
           const token = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
 
           try {
-            await axios.post(
+            const pushRes = await axios.post(
               "https://api.line.me/v2/bot/message/push",
               {
                 to: ident.channel_ref,
@@ -155,31 +157,41 @@ export class HumanReplyService {
                 timeout: 15000,
               }
             );
+            const sentMsg = pushRes.data?.sentMessages?.[0];
+            if (sentMsg) {
+              sentMsgId = sentMsg.id;
+              sentQuoteToken = sentMsg.quoteToken;
+            }
           } catch (pushErr: any) {
-          // If native quoteToken is expired (>60s), LINE returns HTTP 400. Fall back cleanly to text push!
-          if (quoteToken && pushErr.response?.status === 400) {
-            console.log(`[HumanReplyService] quoteToken expired/rejected by LINE, falling back to standard text push...`);
-            await axios.post(
-              "https://api.line.me/v2/bot/message/push",
-              {
-                to: ident.channel_ref,
-                messages: [{ type: "text", text: message }],
-              },
-              {
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: `Bearer ${token}`,
+            // If native quoteToken is expired (>60s), LINE returns HTTP 400. Fall back cleanly to text push!
+            if (quoteToken && pushErr.response?.status === 400) {
+              console.log(`[HumanReplyService] quoteToken expired/rejected by LINE, falling back to standard text push...`);
+              const fallbackRes = await axios.post(
+                "https://api.line.me/v2/bot/message/push",
+                {
+                  to: ident.channel_ref,
+                  messages: [{ type: "text", text: message }],
                 },
-                timeout: 15000,
+                {
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                  },
+                  timeout: 15000,
+                }
+              );
+              const sentMsg = fallbackRes.data?.sentMessages?.[0];
+              if (sentMsg) {
+                sentMsgId = sentMsg.id;
+                sentQuoteToken = sentMsg.quoteToken;
               }
-            );
-          } else {
-            throw pushErr;
+            } else {
+              throw pushErr;
+            }
           }
-        }
 
-        console.log(`[HumanReplyService] LINE Push accepted.`);
-        delivery = { delivered: true, channel, method: "line_push" };
+          console.log(`[HumanReplyService] LINE Push accepted. sentMsgId=${sentMsgId}`);
+          delivery = { delivered: true, channel, method: "line_push" };
         }
       } catch (error: any) {
         const errorMsg = error.response?.data?.message || error.message;
@@ -232,7 +244,7 @@ export class HumanReplyService {
     // 3. Persistence is a separate boundary.
     let persisted = false;
     try {
-      await this.dbAdapter.saveMessage(conversationId, "human", message, undefined, undefined, replyToMessageId);
+      await this.dbAdapter.saveMessage(conversationId, "human", message, sentMsgId, undefined, replyToMessageId, sentQuoteToken);
       persisted = true;
     } catch (error: any) {
       console.error(`[HumanReplyService] Reply delivered but history persistence failed:`, error.message);
@@ -258,6 +270,8 @@ export class HumanReplyService {
     }
 
     const channel = String(ident.channel).toLowerCase();
+    let sentMsgId: string | undefined = undefined;
+    let sentQuoteToken: string | undefined = undefined;
     const backendPublicUrl = process.env.BACKEND_PUBLIC_URL || config.BACKEND_PUBLIC_URL || "https://armed-amperage-covenant.ngrok-free.dev";
     let publicUrl = imageUrl;
 
@@ -326,7 +340,7 @@ export class HumanReplyService {
       lineMessages.push(imgObj);
 
       try {
-        await axios.post(
+        const pushRes = await axios.post(
           "https://api.line.me/v2/bot/message/push",
           {
             to: ident.channel_ref,
@@ -340,11 +354,16 @@ export class HumanReplyService {
             timeout: 15000,
           }
         );
+        const sentMsg = pushRes.data?.sentMessages?.find((m: any) => m.quoteToken) || pushRes.data?.sentMessages?.[0];
+        if (sentMsg) {
+          sentMsgId = sentMsg.id;
+          sentQuoteToken = sentMsg.quoteToken;
+        }
       } catch (pushErr: any) {
         // If native quoteToken is expired (>60s), LINE returns HTTP 400. Fall back cleanly to standard image push!
         if (quoteToken && pushErr.response?.status === 400) {
           console.log(`[HumanReplyService] quoteToken expired/rejected by LINE for image, falling back to standard image push...`);
-          await axios.post(
+          const fallbackRes = await axios.post(
             "https://api.line.me/v2/bot/message/push",
             {
               to: ident.channel_ref,
@@ -358,6 +377,11 @@ export class HumanReplyService {
               timeout: 15000,
             }
           );
+          const sentMsg = fallbackRes.data?.sentMessages?.[0];
+          if (sentMsg) {
+            sentMsgId = sentMsg.id;
+            sentQuoteToken = sentMsg.quoteToken;
+          }
         } else {
           throw pushErr;
         }
@@ -369,9 +393,10 @@ export class HumanReplyService {
       conversationId,
       "human",
       captionText || "",
-      undefined,
+      sentMsgId,
       "image",
-      replyToMessageId
+      replyToMessageId,
+      sentQuoteToken
     );
 
     const messageId = parseInt(savedMsg?.id, 10);
