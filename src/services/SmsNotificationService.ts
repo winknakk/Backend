@@ -145,7 +145,7 @@ export class SmsNotificationService {
 
     let successCount = 0;
     for (const admin of recipients) {
-      const messageText = `[TicketX Alert] เรียน ${admin.displayName}: มีคำขอโอนสายจาก ${params.customerName || "Customer #" + params.conversationId} (เหตุผล: ${params.reasonCode || "HUMAN_REQUEST"}) กรุณาตรวจสอบในระบบ`;
+      const messageText = `[TicketX Alert] เรียน ${admin.displayName}: มีคำขอคุยกับแอดมินจาก ${params.customerName || "Customer #" + params.conversationId} (เหตุผล: ${params.reasonCode || "HUMAN_REQUEST"}) กรุณาตรวจสอบในระบบ`;
 
       if (isMock) {
         // Print rich simulated SMS console alert for local testing
