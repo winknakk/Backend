@@ -385,11 +385,20 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       const rawReplyTo = body.reply_to_message_id || body.replyToMessageId || body.reply_to_id || body.replyToId;
       const replyToId = rawReplyTo ? parseInt(String(rawReplyTo), 10) : undefined;
       const result = await humanReplyService.sendReply(params.id, body.message, replyToId);
+      let humanSessionExpireAt: string | null = null;
       if (deps.takeoverManager) {
         const leaseDurationMs = config.HUMAN_ACTIVE_TIMEOUT_MINUTES * 60 * 1000;
         await deps.takeoverManager.setTakeoverState(params.id, "ACTIVE_HUMAN", "human_agent_admin", leaseDurationMs, true);
+        // Return updated session info immediately so frontend timer starts without waiting for a poll cycle
+        const updatedState = await deps.takeoverManager.getTakeoverState(params.id);
+        humanSessionExpireAt = (updatedState as any)?.human_session_expire_at || null;
       }
-      return reply.code(200).send(result);
+      return reply.code(200).send({
+        ...result,
+        handled_by: "human",
+        takeover_status: "ACTIVE_HUMAN",
+        human_session_expire_at: humanSessionExpireAt,
+      });
     });
 
     // 9.1. POST /api/admin/media/upload (Base64 file upload from Admin UI)
