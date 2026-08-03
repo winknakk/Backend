@@ -698,7 +698,6 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
               p.email AS profile_email,
               p.phone AS profile_phone,
               p.id AS profile_id,
-              p.avatar_url AS avatar_url,
               co.name AS company_name
              FROM conversations c
              JOIN identities i ON i.id = c.identity_id
@@ -714,7 +713,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
               identity.profile_name = row.profile_name || "-";
               identity.email = row.profile_email || "-";
               identity.phone = row.profile_phone || "-";
-              identity.avatar_url = row.avatar_url || null;
+              identity.avatar_url = null;
               company.name = row.company_name || "-";
             }
           } catch (dbErr: any) {

@@ -850,7 +850,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         c.status,
         c.handled_by,
         p.name AS profile_name,
-        p.avatar_url AS avatar_url,
+        NULL::text AS avatar_url,
         COALESCE(p.id::text, 'unknown') AS profile_id,
         p.email AS profile_email,
         p.phone AS profile_phone,
