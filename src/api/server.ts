@@ -156,8 +156,10 @@ async function requestHumanTakeover(input: {
       expiresAt: takeoverState.leaseExpiresAt,
     },
   });
-  for (const [adminSocket, projectId] of adminConnections) {
-    if (projectId === conversationProjectId && adminSocket.readyState === 1) adminSocket.send(notification);
+  for (const [adminSocket] of adminConnections) {
+    if (adminSocket.readyState === 1) {
+      adminSocket.send(notification);
+    }
   }
 
   await redisPub.publish(
