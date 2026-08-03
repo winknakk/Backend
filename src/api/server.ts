@@ -31,6 +31,8 @@ import { MetricAggregator } from "../aiops/dashboard/MetricAggregator";
 import { IngestionService } from "../aiops/ragops/IngestionService";
 import { EvalTestRunner } from "../aiops/llmops/EvalTestRunner";
 import { registerAdminRoutes } from "./routes/admin";
+import { registerAuthRoutes } from "./routes/auth";
+import { registerMasterDataRoutes } from "./routes/masterData";
 import { PolicyEngine } from "../policy/PolicyEngine";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { ExecutionTraceService } from "../execution/ExecutionTrace";
@@ -1677,6 +1679,10 @@ registerAdminRoutes(fastify, {
 
 // Register WebChat Gateway and WebSockets
 fastify.register(WebChatGateway);
+
+// Register Auth & Master Data Routes
+fastify.register(registerAuthRoutes);
+fastify.register(registerMasterDataRoutes);
 
 const start = async () => {
   try {
