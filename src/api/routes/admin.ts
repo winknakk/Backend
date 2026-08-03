@@ -714,7 +714,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
               identity.profile_name = row.profile_name || "-";
               identity.email = row.profile_email || "-";
               identity.phone = row.profile_phone || "-";
-              identity.avatar_url = row.avatar_url || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=256";
+              identity.avatar_url = row.avatar_url || null;
               company.name = row.company_name || "-";
             }
           } catch (dbErr: any) {
