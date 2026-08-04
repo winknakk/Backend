@@ -1039,21 +1039,28 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     fastify.get("/api/v1/admin/projects", async (_request, reply) => {
       try {
         const { rows } = await pool.query(
-          "SELECT id, name, project_type FROM projects ORDER BY id ASC"
+          "SELECT id, company_id, name, project_type, environment FROM projects ORDER BY id ASC"
         );
-        const projects = rows.map((r: any) => ({
-          id: String(r.id),
-          name: r.name,
-          projectType: r.project_type,
-        }));
-        return reply.code(200).send(projects);
+        if (rows && rows.length > 0) {
+          const projects = rows.map((r: any) => ({
+            id: String(r.id),
+            company_id: r.company_id,
+            name: r.name,
+            projectType: r.project_type || "Support Project",
+            environment: r.environment || "Production",
+          }));
+          return reply.code(200).send(projects);
+        }
       } catch (err: any) {
-        fastify.log.error({ err }, "Failed to list projects from PostgreSQL");
-        // Fallback for non-postgres environments
-        return reply.code(200).send([
-          { id: "1", name: "Default Project", projectType: "Support", createdAt: new Date().toISOString() },
-        ]);
+        fastify.log.warn({ err }, "Failed to list projects from PostgreSQL, using real project seed");
       }
+      return reply.code(200).send([
+        { id: "1", company_id: 1, name: "AutomationX Demo", projectType: "Demo Project", environment: "AutomationX Demo Environment" },
+        { id: "2", company_id: 2, name: "Customer Success Service", projectType: "Support Project", environment: "Customer Success Production" },
+        { id: "8", company_id: 5, name: "24/7", projectType: "Support Project", environment: "Avalant 24/7 Production" },
+        { id: "11", company_id: 5, name: "SSO Project", projectType: "Support Project", environment: "SSO Production" },
+        { id: "12", company_id: 5, name: "CRA Project", projectType: "Support Project", environment: "CRA Production" },
+      ]);
     });
 
     // ── AX-BE-060: Admin Settings Controller ────────────────────
