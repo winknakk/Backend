@@ -291,6 +291,15 @@ export class Ticket extends BaseAggregate<number> {
     this.addDomainEvent(new TicketClosedEvent(this.id));
   }
 
+  public reopen(): void {
+    if (!["closed", "done", "resolved", "cancelled", "canceled"].includes(this._status.toLowerCase())) {
+      return;
+    }
+    const oldStatus = this._status;
+    this._status = "Backlog";
+    this.addDomainEvent(new TicketStatusChangedEvent(this.id, oldStatus, "Backlog"));
+  }
+
   public changeStatus(newStatus: string): void {
     const current = this._status.toLowerCase();
     const target = newStatus.toLowerCase();

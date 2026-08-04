@@ -14,8 +14,8 @@
     "type": "object",
     "properties": {
       "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID" },
-      "runningSummary": { "type": "string", "description": "Cumulative incident summary preserving prior facts and including the newest customer detail" },
-      "lastAiSummary": { "type": "string", "description": "Only the newest customer-provided detail from this follow-up" }
+      "runningSummary": { "type": "string", "description": "Compatibility context only. The backend preserves the stored history and never replaces it with this value." },
+      "lastAiSummary": { "type": "string", "description": "Only the newest customer-provided detail from this follow-up. The backend appends it as one history bullet and ignores duplicate retries." }
     },
     "required": ["ticketId", "runningSummary", "lastAiSummary"]
   },

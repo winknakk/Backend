@@ -6,6 +6,7 @@ import { DatabaseAdapter } from "../adapters/types";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { mapTicketPriorityToPlanePriority } from "./planeWebhookService";
+import { parseSummaryHistory } from "../shared/summaryHistory";
 
 export interface PlaneStateSummary {
   id?: string;
@@ -27,6 +28,17 @@ export interface PlaneTicketSummaryResult {
   reason?: "not_linked";
   planeIssueId?: string;
 }
+
+export interface PlaneTicketReopenResult {
+  synced: boolean;
+  reason?: "not_linked";
+  planeIssueId?: string;
+  stateId?: string;
+  stateName?: string;
+  stateGroup?: string;
+}
+
+export type PlaneTicketMergeResult = PlaneTicketReopenResult;
 
 export interface PlaneWorkItemPayload {
   name: string;
@@ -94,10 +106,15 @@ export function buildPlaneWorkItemPayload(
     )
     .join("");
 
+  const runningSummaryItems = parseSummaryHistory(runningSummary);
+  const runningSummaryHtml = runningSummaryItems
+    .map((item) => `<li>${escapePlaneHtml(item)}</li>`)
+    .join("");
+
   const summarySections = [
     `<h3>Customer report</h3><p>${escapePlaneHtml(summary).replace(/\r?\n/g, "<br>")}</p>`,
     runningSummary
-      ? `<h3>Current running summary</h3><p>${escapePlaneHtml(runningSummary).replace(/\r?\n/g, "<br>")}</p>`
+      ? `<h3>Customer update history</h3><ul>${runningSummaryHtml}</ul>`
       : "",
     lastAiSummary
       ? `<h3>Latest customer update</h3><p>${escapePlaneHtml(lastAiSummary).replace(/\r?\n/g, "<br>")}</p>`
@@ -134,6 +151,23 @@ export function selectPlaneTerminalState(states: PlaneStateSummary[]): PlaneStat
   return (
     pickPreferred(completed, ["done", "completed", "closed", "resolved"]) ||
     pickPreferred(cancelled, ["cancelled", "canceled"])
+  );
+}
+
+export function selectPlaneBacklogState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
+  const candidates = states.filter((state) => state.id);
+  return (
+    candidates.find((state) => state.name?.trim().toLowerCase() === "backlog") ||
+    candidates.find((state) => state.group?.trim().toLowerCase() === "backlog") ||
+    candidates.find((state) => state.group?.trim().toLowerCase() === "unstarted")
+  );
+}
+
+export function selectPlaneCancelledState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
+  const candidates = states.filter((state) => state.id);
+  return (
+    candidates.find((state) => ["cancelled", "canceled"].includes(state.name?.trim().toLowerCase() || "")) ||
+    candidates.find((state) => state.group?.trim().toLowerCase() === "cancelled")
   );
 }
 
@@ -270,6 +304,81 @@ export class PlaneService {
       stateId: terminalState.id,
       stateName: terminalState.name,
       stateGroup: terminalState.group,
+    };
+  }
+
+  async syncTicketReopenToPlane(ticketId: string): Promise<PlaneTicketReopenResult> {
+    const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+    if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
+
+    const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+    if (!planeIssueId || String(planeIssueId).startsWith("mock-")) {
+      return { synced: false, reason: "not_linked" };
+    }
+
+    this.assertPlaneConfigured();
+    const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
+    if (resolvedPlaneIssueId !== String(planeIssueId)) {
+      await this.dbAdapter.updateTicketPlaneIssue(ticketId, resolvedPlaneIssueId);
+    }
+
+    const projectBaseUrl = this.getProjectBaseUrl();
+    const requestConfig = this.getPlaneRequestConfig();
+    const statesResponse = await this.httpClient.get(`${projectBaseUrl}/states/`, requestConfig);
+    const states = Array.isArray(statesResponse.data)
+      ? statesResponse.data
+      : Array.isArray(statesResponse.data?.results)
+        ? statesResponse.data.results
+        : [];
+    const backlogState = selectPlaneBacklogState(states);
+    if (!backlogState?.id) throw new Error("Cannot reopen linked Plane work item: project has no Backlog state");
+
+    await this.httpClient.patch(
+      `${projectBaseUrl}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
+      { state: backlogState.id },
+      requestConfig
+    );
+
+    return {
+      synced: true,
+      planeIssueId: resolvedPlaneIssueId,
+      stateId: backlogState.id,
+      stateName: backlogState.name,
+      stateGroup: backlogState.group,
+    };
+  }
+
+  async syncMergedTicketToPlane(ticketId: string): Promise<PlaneTicketMergeResult> {
+    const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+    if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
+    const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+    if (!planeIssueId || String(planeIssueId).startsWith("mock-")) {
+      return { synced: false, reason: "not_linked" };
+    }
+
+    this.assertPlaneConfigured();
+    const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
+    const projectBaseUrl = this.getProjectBaseUrl();
+    const requestConfig = this.getPlaneRequestConfig();
+    const statesResponse = await this.httpClient.get(`${projectBaseUrl}/states/`, requestConfig);
+    const states = Array.isArray(statesResponse.data)
+      ? statesResponse.data
+      : Array.isArray(statesResponse.data?.results)
+        ? statesResponse.data.results
+        : [];
+    const cancelledState = selectPlaneCancelledState(states);
+    if (!cancelledState?.id) throw new Error("Cannot synchronize merged Plane work item: project has no Cancelled state");
+    await this.httpClient.patch(
+      `${projectBaseUrl}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
+      { state: cancelledState.id },
+      requestConfig
+    );
+    return {
+      synced: true,
+      planeIssueId: resolvedPlaneIssueId,
+      stateId: cancelledState.id,
+      stateName: cancelledState.name,
+      stateGroup: cancelledState.group,
     };
   }
 

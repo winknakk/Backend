@@ -1,0 +1,50 @@
+{
+  "name": "reopen_ticket",
+  "version": "2.0",
+  "description": "Reopen a matching terminal ticket as Backlog before appending a repeated incident update.",
+  "category": "tickets",
+  "owner": "platform-engineering",
+  "executionMode": "sync",
+  "requiredPermissions": ["reopen_ticket"],
+  "backend": {
+    "method": "POST",
+    "endpoint": "/api/v1/internal/tickets/reopen"
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ticketId": { "type": "string", "description": "The terminal Ticket number or database ID to reopen" }
+    },
+    "required": ["ticketId"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "data": {
+        "type": "object",
+        "properties": {
+          "ticketId": { "type": "string" },
+          "status": { "type": "string" },
+          "alreadyActive": { "type": "boolean" },
+          "planeSynced": { "type": "boolean" }
+        }
+      },
+      "error": { "type": "null" }
+    }
+  },
+  "events": { "publish": ["TicketStatusChanged"], "subscribe": [] },
+  "automationX": { "flow": "ticket-reopen", "waitForEvents": [], "nextEvents": ["TicketStatusChanged"] },
+  "agentX": {
+    "reasoningHints": ["Use only after find_ticket identifies the same incident in Done, Closed, Resolved, or Cancelled state."],
+    "memoryUsage": "ticket-context",
+    "requiresEnrichedTicket": false
+  },
+  "retryPolicy": { "enabled": true, "maxAttempts": 3, "backoff": "exponential" },
+  "idempotency": { "enabled": true, "key": "ticketId" },
+  "observability": {
+    "metrics": ["reopen_ticket_total", "reopen_ticket_latency"],
+    "logs": ["Reopening ticket {ticketId}"],
+    "trace": true
+  }
+}

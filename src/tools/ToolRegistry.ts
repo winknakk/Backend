@@ -12,8 +12,11 @@ import { AdapterFactory } from "../adapters/AdapterFactory";
 import {
   PlaneService,
   PlaneTicketClosureResult,
+  PlaneTicketReopenResult,
+  PlaneTicketMergeResult,
   PlaneTicketSummaryResult,
 } from "../services/planeService";
+import { appendSummaryHistory } from "../shared/summaryHistory";
 
 // V2 Tool Contract Schema
 export const McpToolRegistryV2Schema = z.object({
@@ -203,15 +206,27 @@ export class UpdateSummaryTool implements ITool {
     const txManager = new TransactionManager();
     const uow = new UnitOfWork(txManager);
     const ticketRepo = new PostgresTicketRepository(txManager);
+    let persistedRunningSummary = "";
+    let summaryAppended = false;
+    let summaryItemCount = 0;
 
     await uow.execute(async () => {
-      let ticket = await ticketRepo.findByTicketId(ticketIdStr);
+      // Lock the row until commit so simultaneous follow-ups cannot overwrite
+      // each other's newly appended history item.
+      let ticket = await ticketRepo.findByTicketIdForUpdate(ticketIdStr);
       if (!ticket && /^\d+$/.test(ticketIdStr)) {
-        ticket = await ticketRepo.findById(parseInt(ticketIdStr, 10));
+        ticket = await ticketRepo.findByIdForUpdate(parseInt(ticketIdStr, 10));
       }
       if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
 
-      ticket.updateSummary(params.runningSummary, params.lastAiSummary);
+      // The database is authoritative for history. The MCP-provided runningSummary
+      // is retained in the input contract for compatibility, but must never replace
+      // details saved by earlier follow-ups.
+      const history = appendSummaryHistory(ticket.runningSummary, params.lastAiSummary);
+      persistedRunningSummary = history.runningSummary;
+      summaryAppended = history.appended;
+      summaryItemCount = history.itemCount;
+      ticket.updateSummary(persistedRunningSummary, String(params.lastAiSummary).trim());
       uow.registerAggregate(ticket);
       await ticketRepo.save(ticket);
     });
@@ -226,6 +241,10 @@ export class UpdateSummaryTool implements ITool {
       data: {
         ticketId: ticketIdStr,
         updated: true,
+        summaryAppended,
+        summaryItemCount,
+        runningSummary: persistedRunningSummary,
+        lastAiSummary: String(params.lastAiSummary).trim(),
         planeSynced: planeSync?.synced ?? false,
         planeIssueId: planeSync?.planeIssueId,
         planeSyncReason: planeSync?.reason,
@@ -283,6 +302,8 @@ export class MergeTicketTool implements ITool {
   });
   readonly outputSchema = ExecutionResultSchema;
 
+  constructor(private readonly planeService?: Pick<PlaneService, "syncMergedTicketToPlane">) {}
+
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const primaryIdStr = String(params.primaryTicketId);
@@ -307,14 +328,73 @@ export class MergeTicketTool implements ITool {
         return;
       }
 
-      ticket.markDuplicate(primary.id, 1.0, params.reason);
+      ticket.markDuplicate(primary.id, 1.0, String(params.reason).trim().slice(0, 50));
       uow.registerAggregate(ticket);
       await ticketRepo.save(ticket);
     });
 
+    let planeSync: PlaneTicketMergeResult | undefined;
+    if (this.planeService) planeSync = await this.planeService.syncMergedTicketToPlane(ticketIdStr);
+
     return {
       success: true,
-      data: { ticketId: ticketIdStr, merged: true, alreadyMerged },
+      data: {
+        ticketId: ticketIdStr,
+        primaryTicketId: primaryIdStr,
+        merged: true,
+        alreadyMerged,
+        planeSynced: planeSync?.synced ?? false,
+        planeIssueId: planeSync?.planeIssueId,
+      },
+      error: null,
+      source: "local",
+      executionId: require("crypto").randomUUID(),
+    };
+  }
+}
+
+export class ReopenTicketTool implements ITool {
+  definition!: McpToolDefinition;
+  readonly name = "reopen_ticket";
+  readonly inputSchema = z.object({ ticketId: z.string().min(1) });
+  readonly outputSchema = ExecutionResultSchema;
+
+  constructor(private readonly planeService?: Pick<PlaneService, "syncTicketReopenToPlane">) {}
+
+  async execute(params: Record<string, any>): Promise<Record<string, any>> {
+    const ticketIdStr = String(params.ticketId);
+    const txManager = new TransactionManager();
+    const uow = new UnitOfWork(txManager);
+    const ticketRepo = new PostgresTicketRepository(txManager);
+    let alreadyActive = false;
+
+    await uow.execute(async () => {
+      let ticket = await ticketRepo.findByTicketIdForUpdate(ticketIdStr);
+      if (!ticket && /^\d+$/.test(ticketIdStr)) {
+        ticket = await ticketRepo.findByIdForUpdate(parseInt(ticketIdStr, 10));
+      }
+      if (!ticket) throw new Error(`Ticket not found: ${ticketIdStr}`);
+
+      alreadyActive = !["closed", "done", "resolved", "cancelled", "canceled"].includes(
+        ticket.status.toLowerCase()
+      );
+      ticket.reopen();
+      uow.registerAggregate(ticket);
+      await ticketRepo.save(ticket);
+    });
+
+    let planeSync: PlaneTicketReopenResult | undefined;
+    if (this.planeService) planeSync = await this.planeService.syncTicketReopenToPlane(ticketIdStr);
+
+    return {
+      success: true,
+      data: {
+        ticketId: ticketIdStr,
+        status: "Backlog",
+        alreadyActive,
+        planeSynced: planeSync?.synced ?? false,
+        planeIssueId: planeSync?.planeIssueId,
+      },
       error: null,
       source: "local",
       executionId: require("crypto").randomUUID(),

@@ -12,7 +12,7 @@ function run(): void {
       priority: "Urgent",
       severity: "Critical",
       channel: "LINE",
-      running_summary: "Initial report; screen flashes <often>",
+      running_summary: "- Initial report\n- Screen flashes <often>",
       last_ai_summary: "Screen flashes & freezes",
       due_date: "2026-07-31T11:06:00.000+07:00",
     },
@@ -31,8 +31,8 @@ function run(): void {
   assert.match(payload.description_html, /HTTP status:<\/strong> 400/);
   assert.match(payload.description_html, /SLA target/);
   assert.match(payload.description_html, /Example &amp; Partners/);
-  assert.match(payload.description_html, /Current running summary/);
-  assert.match(payload.description_html, /Initial report; screen flashes &lt;often&gt;/);
+  assert.match(payload.description_html, /Customer update history/);
+  assert.match(payload.description_html, /<ul><li>Initial report<\/li><li>Screen flashes &lt;often&gt;<\/li><\/ul>/);
   assert.match(payload.description_html, /Latest customer update/);
   assert.match(payload.description_html, /Screen flashes &amp; freezes/);
   assert.match(payload.description_html, /&lt;ระบบ&gt;/);

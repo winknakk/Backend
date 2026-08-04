@@ -12,9 +12,27 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
     return TicketMapper.toDomain(rows[0]);
   }
 
+  async findByIdForUpdate(id: number): Promise<Ticket | null> {
+    const { rows } = await this.db.query(
+      "SELECT * FROM tickets WHERE id = $1 LIMIT 1 FOR UPDATE",
+      [id]
+    );
+    if (rows.length === 0) return null;
+    return TicketMapper.toDomain(rows[0]);
+  }
+
   async findByTicketId(ticketId: string): Promise<Ticket | null> {
     const { rows } = await this.db.query(
       "SELECT * FROM tickets WHERE ticket_number = $1 OR ticket_id = $1 LIMIT 1",
+      [ticketId]
+    );
+    if (rows.length === 0) return null;
+    return TicketMapper.toDomain(rows[0]);
+  }
+
+  async findByTicketIdForUpdate(ticketId: string): Promise<Ticket | null> {
+    const { rows } = await this.db.query(
+      "SELECT * FROM tickets WHERE ticket_number = $1 OR ticket_id = $1 LIMIT 1 FOR UPDATE",
       [ticketId]
     );
     if (rows.length === 0) return null;
@@ -28,9 +46,19 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
        WHERE conversation_id = $1
          AND deleted_at IS NULL
          AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'merged', 'cancelled', 'canceled')
-         AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
+         AND (
+           LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
              = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
-       ORDER BY created_at DESC
+           OR (
+             NULLIF(SUBSTRING(COALESCE(subject, '') FROM '\\m[1-5][0-9]{2}\\M'), '') IS NOT NULL
+             AND SUBSTRING(COALESCE(subject, '') FROM '\\m[1-5][0-9]{2}\\M')
+               = SUBSTRING($2::text FROM '\\m[1-5][0-9]{2}\\M')
+           )
+         )
+       ORDER BY
+         CASE WHEN LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
+           = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g')) THEN 0 ELSE 1 END,
+         created_at DESC
        LIMIT 1`,
       [conversationId, subject]
     );

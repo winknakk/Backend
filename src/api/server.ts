@@ -16,6 +16,7 @@ import {
   UpdateSummaryTool,
   FindTicketTool,
   MergeTicketTool,
+  ReopenTicketTool,
   CloseTicketTool,
   AssignTicketTool,
   EscalateToPmTool,
@@ -251,6 +252,7 @@ policyEngine.registerRule({
     "update_summary",
     "find_ticket",
     "merge_ticket",
+    "reopen_ticket",
     "close_ticket",
     "assign_ticket",
     "escalate_to_pm",
@@ -316,7 +318,8 @@ async function bootstrap() {
   toolRegistry.registerTool(new GetTicketStatusTool());
   toolRegistry.registerTool(new UpdateSummaryTool(planeService));
   toolRegistry.registerTool(new FindTicketTool());
-  toolRegistry.registerTool(new MergeTicketTool());
+  toolRegistry.registerTool(new MergeTicketTool(planeService));
+  toolRegistry.registerTool(new ReopenTicketTool(planeService));
   toolRegistry.registerTool(new CloseTicketTool(planeService));
   toolRegistry.registerTool(new AssignTicketTool());
   toolRegistry.registerTool(new EscalateToPmTool());
@@ -1015,6 +1018,22 @@ fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
     const result = await tool.execute(payload, context);
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+fastify.post("/api/v1/internal/tickets/reopen", async (request, reply) => {
+  const body = request.body as any;
+  const payload = body.data ? { ...body.data } : body;
+  const tool = toolRegistry.getLocalTool("reopen_ticket");
+  if (!tool) return reply.code(500).send({ error: "Tool reopen_ticket not found" });
+  try {
+    const result = await tool.execute(payload, {
+      correlationId: request.headers["x-correlation-id"],
+      traceId: request.headers["x-trace-id"],
+    });
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });

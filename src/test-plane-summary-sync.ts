@@ -1,7 +1,19 @@
 import assert from "assert";
-import { PlaneService } from "./services/planeService";
+import {
+  PlaneService,
+  selectPlaneBacklogState,
+  selectPlaneCancelledState,
+} from "./services/planeService";
 
 async function run(): Promise<void> {
+  const states = [
+    { id: "backlog", name: "Backlog", group: "backlog" },
+    { id: "done", name: "Done", group: "completed" },
+    { id: "cancelled", name: "Cancelled", group: "cancelled" },
+  ];
+  assert.strictEqual(selectPlaneBacklogState(states)?.id, "backlog");
+  assert.strictEqual(selectPlaneCancelledState(states)?.id, "cancelled");
+
   const requests: Array<{ method: string; url: string; body?: any }> = [];
   const dbAdapter = {
     getTicketCompanyContext: async () => ({
@@ -9,7 +21,7 @@ async function run(): Promise<void> {
         ticket_id: "TCK-TEST",
         subject: "Test work item 511",
         summary: "Original report",
-        running_summary: "Original report; screen flashes",
+        running_summary: "- Original report\n- Screen flashes",
         last_ai_summary: "Screen flashes",
         plane_issue_id: "work-item-1",
       },
@@ -36,8 +48,8 @@ async function run(): Promise<void> {
   assert.strictEqual(requests[0].method, "GET");
   assert.strictEqual(requests[1].method, "PATCH");
   assert.match(requests[1].url, /\/work-items\/work-item-1\/$/);
-  assert.match(requests[1].body.description_html, /Current running summary/);
-  assert.match(requests[1].body.description_html, /Original report; screen flashes/);
+  assert.match(requests[1].body.description_html, /Customer update history/);
+  assert.match(requests[1].body.description_html, /<li>Original report<\/li><li>Screen flashes<\/li>/);
   assert.match(requests[1].body.description_html, /Latest customer update/);
   assert.match(requests[1].body.description_html, /Screen flashes/);
 
