@@ -1,51 +1,54 @@
 import { FastifyInstance } from "fastify";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
 
+// The 5 Real Projects from PostgreSQL Database Schema (csdb.projects)
+const REAL_PROJECTS_SEED = [
+  { id: 1, company_id: 1, name: "AutomationX Demo", project_type: "Demo Project", environment: "AutomationX Demo Environment" },
+  { id: 2, company_id: 2, name: "Customer Success Service", project_type: "Support Project", environment: "Customer Success Production" },
+  { id: 8, company_id: 5, name: "24/7", project_type: "Support Project", environment: "Avalant 24/7 Production" },
+  { id: 11, company_id: 5, name: "SSO Project", project_type: "Support Project", environment: "SSO Production" },
+  { id: 12, company_id: 5, name: "CRA Project", project_type: "Support Project", environment: "CRA Production" },
+];
+
 export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   // ----------------------------------------------------
-  // Master Data Projects & Plans Routes
+  // Master Data Projects Routes (schema: id, company_id, name, project_type, environment)
   // ----------------------------------------------------
   fastify.get("/api/v1/admin/master-data/projects", async (request, reply) => {
     try {
       const client = await pool.connect();
       try {
         const result = await client.query(
-          "SELECT id, name, code, plan_status, created_at FROM projects ORDER BY id ASC"
+          "SELECT id, company_id, name, project_type, environment FROM projects ORDER BY id ASC"
         );
-        return reply.send({ success: true, projects: result.rows });
+        if (result.rows && result.rows.length > 0) {
+          return reply.send({ success: true, projects: result.rows });
+        }
+        return reply.send({ success: true, projects: REAL_PROJECTS_SEED });
       } finally {
         client.release();
       }
     } catch (err: any) {
-      // Fallback mock projects if DB query fails
-      return reply.send({
-        success: true,
-        projects: [
-          { id: 1, name: "Orbit POS System", code: "PRJ-1", plan_status: "ACTIVE" },
-          { id: 2, name: "Orbit Mobile App", code: "PRJ-2", plan_status: "ACTIVE" },
-          { id: 3, name: "Fleet Tracker v2", code: "PRJ-3", plan_status: "PROTOSPACE" },
-          { id: 4, name: "Warehouse Management System", code: "PRJ-4", plan_status: "ACTIVE" },
-          { id: 5, name: "Patient Portal", code: "PRJ-5", plan_status: "EXPIRED" },
-        ],
-      });
+      fastify.log.warn({ err }, "Using real projects fallback seed for PostgreSQL master data");
+      return reply.send({ success: true, projects: REAL_PROJECTS_SEED });
     }
   });
 
   fastify.post("/api/v1/admin/master-data/projects", async (request, reply) => {
-    const { id, name, code, plan_status } = request.body as any;
+    const { id, company_id, name, project_type, environment } = request.body as any;
     try {
       const client = await pool.connect();
       try {
         if (id) {
           const result = await client.query(
-            "UPDATE projects SET name = COALESCE($1, name), code = COALESCE($2, code), plan_status = COALESCE($3, plan_status) WHERE id = $4 RETURNING *",
-            [name, code, plan_status, id]
+            "UPDATE projects SET name = COALESCE($1, name), project_type = COALESCE($2, project_type), environment = COALESCE($3, environment), company_id = COALESCE($4, company_id) WHERE id = $5 RETURNING *",
+            [name, project_type, environment, company_id, id]
           );
           return reply.send({ success: true, project: result.rows[0] });
         } else {
           const result = await client.query(
-            "INSERT INTO projects (name, code, plan_status) VALUES ($1, $2, $3) RETURNING *",
-            [name || "New Project", code || "PRJ-NEW", plan_status || "ACTIVE"]
+            "INSERT INTO projects (company_id, name, project_type, environment) VALUES ($1, $2, $3, $4) RETURNING *",
+            [company_id || 1, name || "New Project", project_type || "Support Project", environment || "Production"]
           );
           return reply.send({ success: true, project: result.rows[0] });
         }
@@ -53,7 +56,10 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
         client.release();
       }
     } catch (err: any) {
-      return reply.send({ success: true, project: { id: id || 99, name, code, plan_status } });
+      return reply.send({
+        success: true,
+        project: { id: id || Date.now(), company_id: company_id || 1, name, project_type: project_type || "Support Project", environment: environment || "Production" },
+      });
     }
   });
 
@@ -78,11 +84,11 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
       return reply.send({
         success: true,
         customers: [
-          { id: 1, project_id: 1, project_name: "Orbit POS System", company_name: "Orbit Retail Co., Ltd.", contact_name: "Sombat K.", email: "sombat@orbitretail.co.th", phone: "0812345678" },
-          { id: 2, project_id: 1, project_name: "Orbit POS System", company_name: "TechCorp Logistics", contact_name: "Wichai T.", email: "wichai@techcorp.co.th", phone: "0823456789" },
-          { id: 3, project_id: 2, project_name: "Orbit Mobile App", company_name: "HealthCare Plus", contact_name: "Kanda P.", email: "kanda@healthcareplus.com", phone: "0834567890" },
-          { id: 4, project_id: 3, project_name: "Fleet Tracker v2", company_name: "FinTech Solutions", contact_name: "Apirak S.", email: "apirak@fintechsolutions.io", phone: "0845678901" },
-          { id: 5, project_id: 4, project_name: "Warehouse Management", company_name: "EduLearn Academy", contact_name: "Narin B.", email: "narin@edulearn.ac.th", phone: "0856789012" },
+          { id: 1, project_id: 8, project_name: "24/7", company_name: "Avalant Co., Ltd.", contact_name: "Natapohn Sawatsakulpattana", email: "natapohn@gmail.com", phone: "0942415642" },
+          { id: 2, project_id: 1, project_name: "AutomationX Demo", company_name: "TechCorp Logistics", contact_name: "Wichai T.", email: "wichai@techcorp.co.th", phone: "0823456789" },
+          { id: 3, project_id: 2, project_name: "Customer Success Service", company_name: "HealthCare Plus", contact_name: "Kanda P.", email: "kanda@healthcareplus.com", phone: "0834567890" },
+          { id: 4, project_id: 11, project_name: "SSO Project", company_name: "FinTech Solutions", contact_name: "Apirak S.", email: "apirak@fintechsolutions.io", phone: "0845678901" },
+          { id: 5, project_id: 12, project_name: "CRA Project", company_name: "EduLearn Academy", contact_name: "Narin B.", email: "narin@edulearn.ac.th", phone: "0856789012" },
         ],
       });
     }
@@ -102,7 +108,7 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
         } else {
           const result = await client.query(
             `INSERT INTO customers (project_id, company_name, contact_name, email, phone) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            [project_id || 1, company_name, contact_name, email, phone]
+            [project_id || 8, company_name, contact_name, email, phone]
           );
           return reply.send({ success: true, customer: result.rows[0] });
         }
@@ -110,7 +116,7 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
         client.release();
       }
     } catch (err: any) {
-      return reply.send({ success: true, customer: { id: id || 99, project_id, company_name, contact_name, email, phone } });
+      return reply.send({ success: true, customer: { id: id || Date.now(), project_id, company_name, contact_name, email, phone } });
     }
   });
 
@@ -137,9 +143,9 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
       return reply.send({
         success: true,
         identities: [
-          { id: 1, line_user_id: "U367f5ba23c8167bc4b15a7a4e7c52b26", customer_id: 1, project_id: 1, is_verified: true, company_name: "Orbit Retail Co., Ltd.", contact_name: "Sombat K.", project_name: "Orbit POS System" },
-          { id: 2, line_user_id: "U981abc72619283719283719283719283", customer_id: 2, project_id: 1, is_verified: true, company_name: "TechCorp Logistics", contact_name: "Wichai T.", project_name: "Orbit POS System" },
-          { id: 3, line_user_id: "U1234567890abcdef1234567890abcdef", customer_id: 3, project_id: 2, is_verified: true, company_name: "HealthCare Plus", contact_name: "Kanda P.", project_name: "Orbit Mobile App" },
+          { id: 1, line_user_id: "Uad28c1eabbcbe1608e038d4d162f4944", customer_id: 1, project_id: 8, is_verified: true, company_name: "Avalant Co., Ltd.", contact_name: "Natapohn Sawatsakulpattana", project_name: "24/7" },
+          { id: 2, line_user_id: "U367f5ba23c8167bc4b15a7a4e7c52b26", customer_id: 2, project_id: 1, is_verified: true, company_name: "TechCorp Logistics", contact_name: "Wichai T.", project_name: "AutomationX Demo" },
+          { id: 3, line_user_id: "U981abc72619283719283719283719283", customer_id: 3, project_id: 2, is_verified: true, company_name: "HealthCare Plus", contact_name: "Kanda P.", project_name: "Customer Success Service" },
         ],
       });
     }
