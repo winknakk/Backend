@@ -785,9 +785,12 @@ export class PostgresAdapter implements DatabaseAdapter {
       queryParams.push(parseInt(conversationId, 10));
       conditions.push(`t.conversation_id = $${queryParams.length}`);
     }
-    if (projectId) {
-      queryParams.push(parseInt(projectId, 10) || 1);
-      conditions.push(`t.project_id = $${queryParams.length}`);
+    if (projectId && projectId.toLowerCase() !== 'all') {
+      const parsed = parseInt(projectId, 10);
+      if (!isNaN(parsed)) {
+        queryParams.push(parsed);
+        conditions.push(`t.project_id = $${queryParams.length}`);
+      }
     }
     if (identityId) {
       const parsed = parseInt(identityId, 10);
@@ -870,7 +873,7 @@ export class PostgresAdapter implements DatabaseAdapter {
     `;
     
     const queryParams: any[] = [];
-    if (projectId) {
+    if (projectId && projectId.toLowerCase() !== 'all') {
       const parsedProjectId = parseInt(projectId, 10);
       if (!isNaN(parsedProjectId)) {
         query += ` AND c.project_id = $1 `;

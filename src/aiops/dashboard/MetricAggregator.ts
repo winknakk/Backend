@@ -59,13 +59,14 @@ export class MetricAggregator {
       }
     }
 
+    const isAll = !tenantId || tenantId.toLowerCase() === 'all';
     // Filter traces by tenantId
-    const filteredTraces = tenantId
+    const filteredTraces = !isAll
       ? allTraces.filter((t) => t.conversationId && convToCompany.get(t.conversationId) === tenantId)
       : allTraces;
 
     // Filter tickets by tenantId
-    const filteredTickets = tenantId
+    const filteredTickets = !isAll
       ? allTickets.filter((t) => {
           const cId =
             t.companyId ||
@@ -189,7 +190,7 @@ export class MetricAggregator {
         }
       } catch {}
 
-      if (tenantId && companyId !== tenantId) {
+      if (tenantId && tenantId.toLowerCase() !== 'all' && companyId !== tenantId) {
         continue; // Skip if filtered out
       }
 
