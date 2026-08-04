@@ -14,8 +14,8 @@
     "type": "object",
     "properties": {
       "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID" },
-      "runningSummary": { "type": "string", "description": "New running summary content" },
-      "lastAiSummary": { "type": "string", "description": "New AI summary content" }
+      "runningSummary": { "type": "string", "description": "Cumulative incident summary preserving prior facts and including the newest customer detail" },
+      "lastAiSummary": { "type": "string", "description": "Only the newest customer-provided detail from this follow-up" }
     },
     "required": ["ticketId", "runningSummary", "lastAiSummary"]
   },
@@ -27,7 +27,10 @@
         "type": "object",
         "properties": {
           "ticketId": { "type": "string" },
-          "updated": { "type": "boolean" }
+          "updated": { "type": "boolean" },
+          "planeSynced": { "type": "boolean", "description": "True when the linked Plane work item was updated" },
+          "planeIssueId": { "type": "string", "description": "Linked Plane work item ID when synchronized" },
+          "planeSyncReason": { "type": "string", "enum": ["not_linked"], "description": "Why Plane was not updated" }
         }
       },
       "error": { "type": "null" }
@@ -43,7 +46,7 @@
     "nextEvents": ["TicketSummaryUpdated"]
   },
   "agentX": {
-    "reasoningHints": ["Use only when the customer explicitly identifies the same existing Ticket. Different error codes, systems/modules, primary symptoms, or impacts require create_ticket."],
+    "reasoningHints": ["Use only when the customer explicitly identifies the same existing Ticket. Different error codes, systems/modules, primary symptoms, or impacts without an explicit same-Ticket reference require create_ticket.", "Claim an update only when this tool returns success=true. If the explicitly referenced Ticket is missing, deleted, or terminal, never create a replacement Ticket as fallback; report that it could not be updated and follow the tool-failure handoff policy.", "A linked Plane work item is updated after the TicketX summary is saved; inspect planeSynced in the result."],
     "memoryUsage": "conversational",
     "requiresEnrichedTicket": false
   },

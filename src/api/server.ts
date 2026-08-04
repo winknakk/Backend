@@ -176,6 +176,20 @@ async function requestHumanTakeover(input: {
     })
   );
 
+  // Legacy AgentX/MCP flows may dispatch SMS themselves after the internal
+  // takeover call. The direct Main AI human-notify path owns backend SMS.
+  if ((source || "workflow") !== "agentx") {
+    void smsNotificationService.sendTakeoverAlert({
+      conversationId,
+      customerName,
+      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+      reasonDetail,
+      lastMessage: content,
+    }).catch((error: any) => {
+      serverLogger.error({ error: error.message, conversationId }, "Failed to send takeover SMS alert");
+    });
+  }
+
   let smsTargetPhone = "0633628242";
   try {
     const projAdminResult = await pool.query(
@@ -300,7 +314,7 @@ async function bootstrap() {
   toolRegistry.registerTool(searchDocsTool);
   toolRegistry.registerTool(new GetTicketTool());
   toolRegistry.registerTool(new GetTicketStatusTool());
-  toolRegistry.registerTool(new UpdateSummaryTool());
+  toolRegistry.registerTool(new UpdateSummaryTool(planeService));
   toolRegistry.registerTool(new FindTicketTool());
   toolRegistry.registerTool(new MergeTicketTool());
   toolRegistry.registerTool(new CloseTicketTool(planeService));
@@ -1639,8 +1653,8 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         messageType
       }
     });
-    for (const [adminSocket, projectId] of adminConnections) {
-      if (projectId === conversationProjectId && adminSocket.readyState === 1) {
+    for (const [adminSocket] of adminConnections) {
+      if (adminSocket.readyState === 1) {
         adminSocket.send(notifyPayload);
       }
     }

@@ -9,7 +9,11 @@ import { TransactionManager } from "../shared/repositories/TransactionManager";
 import { UnitOfWork } from "../shared/repositories/UnitOfWork";
 import { PostgresTicketRepository } from "../infrastructure/db/PostgresTicketRepository";
 import { AdapterFactory } from "../adapters/AdapterFactory";
-import { PlaneService, PlaneTicketClosureResult } from "../services/planeService";
+import {
+  PlaneService,
+  PlaneTicketClosureResult,
+  PlaneTicketSummaryResult,
+} from "../services/planeService";
 
 // V2 Tool Contract Schema
 export const McpToolRegistryV2Schema = z.object({
@@ -192,6 +196,8 @@ export class UpdateSummaryTool implements ITool {
   });
   readonly outputSchema = ExecutionResultSchema;
 
+  constructor(private readonly planeService?: Pick<PlaneService, "syncTicketSummaryToPlane">) {}
+
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const ticketIdStr = String(params.ticketId);
     const txManager = new TransactionManager();
@@ -210,9 +216,20 @@ export class UpdateSummaryTool implements ITool {
       await ticketRepo.save(ticket);
     });
 
+    let planeSync: PlaneTicketSummaryResult | undefined;
+    if (this.planeService) {
+      planeSync = await this.planeService.syncTicketSummaryToPlane(ticketIdStr);
+    }
+
     return {
       success: true,
-      data: { ticketId: ticketIdStr, updated: true },
+      data: {
+        ticketId: ticketIdStr,
+        updated: true,
+        planeSynced: planeSync?.synced ?? false,
+        planeIssueId: planeSync?.planeIssueId,
+        planeSyncReason: planeSync?.reason,
+      },
       error: null,
       source: "local",
       executionId: require("crypto").randomUUID(),

@@ -872,11 +872,10 @@ export class PostgresAdapter implements DatabaseAdapter {
     const queryParams: any[] = [];
     if (projectId) {
       const parsedProjectId = parseInt(projectId, 10);
-      if (isNaN(parsedProjectId)) {
-        return [];
+      if (!isNaN(parsedProjectId)) {
+        query += ` AND c.project_id = $1 `;
+        queryParams.push(parsedProjectId);
       }
-      query += ` AND c.project_id = $1 `;
-      queryParams.push(parsedProjectId);
     }
     
     query += ` ORDER BY c.updated_at DESC`;
