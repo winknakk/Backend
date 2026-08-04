@@ -504,7 +504,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
         };
       });
 
-      if (projectId) {
+      if (projectId && projectId.toLowerCase() !== 'all') {
         mapped = mapped.filter((t: any) => String(t.projectId || 1) === String(projectId));
       }
 
@@ -542,7 +542,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
 
   async listAllConversations(projectId?: string): Promise<any[]> {
     const rawList = await this.listAllConversationsRaw();
-    if (projectId) {
+    if (projectId && projectId.toLowerCase() !== 'all') {
       return rawList.filter((c: any) => String(c.project_id || c.projectId || 1) === String(projectId));
     }
     return rawList;

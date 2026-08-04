@@ -97,40 +97,42 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const query = request.query as any;
     if (query && query.projectId !== undefined) {
       const pId = String(query.projectId);
-      const parsed = parseInt(pId, 10);
-      if (isNaN(parsed) || parsed <= 0 || pId === "null" || pId === "undefined" || pId === "") {
-        // If conversationId is provided and valid, allow it to pass so it can be resolved from the conversation context.
-        const parsedConv = parseInt(String(query.conversationId), 10);
-        const hasValidConvId = query.conversationId && !isNaN(parsedConv) && parsedConv > 0;
-        if (!hasValidConvId) {
-          return reply.code(400).send({
-            error: "Bad Request",
-            message: `Invalid projectId: ${pId}`,
-          });
+      if (pId.toLowerCase() !== 'all') {
+        const parsed = parseInt(pId, 10);
+        if (isNaN(parsed) || parsed <= 0 || pId === "null" || pId === "undefined" || pId === "") {
+          // If conversationId is provided and valid, allow it to pass so it can be resolved from the conversation context.
+          const parsedConv = parseInt(String(query.conversationId), 10);
+          const hasValidConvId = query.conversationId && !isNaN(parsedConv) && parsedConv > 0;
+          if (!hasValidConvId) {
+            return reply.code(400).send({
+              error: "Bad Request",
+              message: `Invalid projectId: ${pId}`,
+            });
+          }
         }
-      }
 
-      if (
-        routeUrl.includes("/api/admin/conversations/:id")
-        && params?.id !== undefined
-        && !isNaN(parsed)
-        && parsed > 0
-      ) {
-        const conversationId = parseInt(String(params.id), 10);
-        const scopedConversation = await pool.query(
-          `SELECT 1
-           FROM conversations
-           WHERE id = $1
-             AND project_id = $2
-             AND deleted_at IS NULL
-           LIMIT 1`,
-          [conversationId, parsed]
-        );
-        if (scopedConversation.rowCount === 0) {
-          return reply.code(404).send({
-            error: "Not Found",
-            message: `Conversation ${conversationId} does not belong to project ${parsed}`,
-          });
+        if (
+          routeUrl.includes("/api/admin/conversations/:id")
+          && params?.id !== undefined
+          && !isNaN(parsed)
+          && parsed > 0
+        ) {
+          const conversationId = parseInt(String(params.id), 10);
+          const scopedConversation = await pool.query(
+            `SELECT 1
+             FROM conversations
+             WHERE id = $1
+               AND project_id = $2
+               AND deleted_at IS NULL
+             LIMIT 1`,
+            [conversationId, parsed]
+          );
+          if (scopedConversation.rowCount === 0) {
+            return reply.code(404).send({
+              error: "Not Found",
+              message: `Conversation ${conversationId} does not belong to project ${parsed}`,
+            });
+          }
         }
       }
     }

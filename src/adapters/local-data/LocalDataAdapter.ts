@@ -448,7 +448,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
       if (conversationId) {
         tickets = tickets.filter((t) => String(t.conversation_id) === String(conversationId));
       }
-      if (projectId) {
+      if (projectId && projectId.toLowerCase() !== 'all') {
         tickets = tickets.filter((t) => String(t.project_id || 1) === String(projectId));
       }
       if (identityId) {
@@ -471,7 +471,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
   async listAllConversations(projectId?: string): Promise<any[]> {
     let conversations = this.readTable<any>("Conversations", DbConversationSchema);
-    if (projectId) {
+    if (projectId && projectId.toLowerCase() !== 'all') {
       conversations = conversations.filter((c) => String(c.project_id || 1) === String(projectId));
     }
     const identities = this.readTable<any>("Identities", DbIdentitySchema);
