@@ -7,6 +7,7 @@ export const PolicyContextSchema = z.object({
   userRole: z.string().default("customer"),
   ipAddress: z.string().optional(),
   agentId: z.string().optional(),
+  tenantOrgId: z.string().optional(),
 });
 export type PolicyContext = z.infer<typeof PolicyContextSchema>;
 

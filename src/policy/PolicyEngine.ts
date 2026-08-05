@@ -73,12 +73,15 @@ export class PolicyEngine implements IPolicyEngine {
 
       if (!cachedRules) {
         const policyDir = path.resolve(process.cwd(), "agent-policies");
-        const filePath = path.join(policyDir, `${agentId}.json`);
+        const orgId = context.tenantOrgId || context.companyId;
+        const tenantScopedPath = path.join(policyDir, orgId, `${agentId}.json`);
+        const defaultPath = path.join(policyDir, `${agentId}.json`);
+        const filePath = fs.existsSync(tenantScopedPath) ? tenantScopedPath : defaultPath;
 
         if (!fs.existsSync(filePath)) {
           return {
             isAllowed: false,
-            reason: `Missing policy file for agent '${agentId}' at agent-policies/${agentId}.json. Strict default deny.`,
+            reason: `Missing policy file for agent '${agentId}' at ${filePath}. Strict default deny.`,
           };
         }
 

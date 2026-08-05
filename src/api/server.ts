@@ -34,6 +34,8 @@ import { EvalTestRunner } from "../aiops/llmops/EvalTestRunner";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerMasterDataRoutes } from "./routes/masterData";
+import { registerPortalRoutes } from "./routes/portal";
+import { SLAMatrixService } from "../services/SLAMatrixService";
 import { PolicyEngine } from "../policy/PolicyEngine";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { ExecutionTraceService } from "../execution/ExecutionTrace";
@@ -44,6 +46,7 @@ import { PlaneService } from "../services/planeService";
 import { PlaneWebhookService, verifyPlaneWebhookSignature } from "../services/planeWebhookService";
 import { PlaneReverseSyncPoller } from "../services/PlaneReverseSyncPoller";
 import { InactivityTimerService } from "../services/InactivityTimerService";
+import { EmailNotificationService } from "../services/EmailNotificationService";
 import { AgentManager } from "../agent/AgentRuntime";
 import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
@@ -102,6 +105,7 @@ const trafficSplitter = new TrafficSplitter();
 const metricAggregator = new MetricAggregator(dbAdapter);
 const ingestionService = new IngestionService(vectorStore, embeddingService);
 const humanReplyService = new HumanReplyService(dbAdapter);
+const slaService = new SLAMatrixService();
 const planeService = new PlaneService(dbAdapter);
 const planeWebhookService = new PlaneWebhookService(dbAdapter);
 const planeReverseSyncPoller = new PlaneReverseSyncPoller(planeWebhookService);
@@ -109,6 +113,7 @@ const inactivityTimerService = new InactivityTimerService(dbAdapter);
 inactivityTimerService.startMonitor();
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
 const smsNotificationService = new SmsNotificationService(pool);
+const emailNotificationService = new EmailNotificationService();
 
 async function requestHumanTakeover(input: {
   conversationId: string;
@@ -1718,9 +1723,10 @@ registerAdminRoutes(fastify, {
 // Register WebChat Gateway and WebSockets
 fastify.register(WebChatGateway);
 
-// Register Auth & Master Data Routes
+// Register Auth, Master Data, & Customer Portal Routes
 fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
+registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
 
 const start = async () => {
   try {
