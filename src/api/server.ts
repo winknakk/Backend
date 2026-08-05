@@ -43,6 +43,7 @@ import { HumanReplyService } from "../services/humanReplyService";
 import { PlaneService } from "../services/planeService";
 import { PlaneWebhookService, verifyPlaneWebhookSignature } from "../services/planeWebhookService";
 import { PlaneReverseSyncPoller } from "../services/PlaneReverseSyncPoller";
+import { InactivityTimerService } from "../services/InactivityTimerService";
 import { AgentManager } from "../agent/AgentRuntime";
 import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
@@ -104,6 +105,8 @@ const humanReplyService = new HumanReplyService(dbAdapter);
 const planeService = new PlaneService(dbAdapter);
 const planeWebhookService = new PlaneWebhookService(dbAdapter);
 const planeReverseSyncPoller = new PlaneReverseSyncPoller(planeWebhookService);
+const inactivityTimerService = new InactivityTimerService(dbAdapter);
+inactivityTimerService.startMonitor();
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
 const smsNotificationService = new SmsNotificationService(pool);
 

@@ -269,7 +269,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
   fastify.get("/api/admin/conversations", async (request, reply) => {
     const query = request.query as any;
     const projectId = query?.projectId ? String(query.projectId) : undefined;
-    const list = await humanReplyService.listConversations(projectId);
+    const list = await humanReplyService.listConversations(projectId, request.tenantContext);
     return reply.code(200).send(await hydrateLineAvatars(list));
   });
 
@@ -955,7 +955,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       const params = request.params as any;
       const query = request.query as any;
       const projectId = query?.projectId ? String(query.projectId) : undefined;
-      const tickets = await deps.dbAdapter.listAllTickets(params.id, projectId);
+      const tickets = await deps.dbAdapter.listAllTickets(params.id, projectId, undefined, undefined, request.tenantContext);
       return reply.code(200).send(tickets);
     });
 
@@ -963,7 +963,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     fastify.get("/api/admin/tickets", async (request, reply) => {
       const query = request.query as any;
       const projectId = query?.projectId ? String(query.projectId) : undefined;
-      const tickets = await deps.dbAdapter.listAllTickets(undefined, projectId);
+      const tickets = await deps.dbAdapter.listAllTickets(undefined, projectId, undefined, undefined, request.tenantContext);
       return reply.code(200).send(tickets);
     });
 
