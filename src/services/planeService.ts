@@ -497,14 +497,17 @@ export class PlaneService {
     if (webhookUrl) {
       try {
         console.log(`[PlaneService] Triggering Activepieces Promote webhook at ${webhookUrl}...`);
+        const tenantOrgId = (ticket as any)?.org_id || (ticket as any)?.orgId || "org_default";
         await this.httpClient.post(
           webhookUrl,
           {
             ticket_internal_id: Number(ticketId) || ticketId,
+            org_id: tenantOrgId,
           },
           {
             headers: {
               "Content-Type": "application/json",
+              "X-Org-Id": tenantOrgId,
             },
             timeout: 5000,
           }

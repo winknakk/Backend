@@ -1,11 +1,12 @@
 import { TicketInput, ExecutionResult, AuditLog } from "../schemas/validation";
 import { SessionContext } from "../memory/types";
+import { TenantContext } from "../domain/tenant/TenantContext";
 
 export interface DatabaseAdapter {
   /**
    * Creates a ticket record in the database provider.
    */
-  createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult>;
+  createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string, tenantCtx?: TenantContext | string): Promise<ExecutionResult>;
 
   /**
    * Finds a project by its unique ID.
@@ -52,7 +53,7 @@ export interface DatabaseAdapter {
    * Performs local/external search query across tickets, messages, or documents.
    * Returns records with matching search content.
    */
-  searchKnowledge(query: string, filters?: { projectId?: string }): Promise<any[]>;
+  searchKnowledge(query: string, filters?: { projectId?: string; orgId?: string }, tenantCtx?: TenantContext | string): Promise<any[]>;
 
   /**
    * Saves an execution trace log.
@@ -77,12 +78,12 @@ export interface DatabaseAdapter {
   /**
    * Lists all tickets globally or filtered by conversation and project.
    */
-  listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]>;
+  listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string, tenantCtx?: TenantContext | string): Promise<any[]>;
 
   /**
    * Lists all conversations globally or filtered by project.
    */
-  listAllConversations(projectId?: string): Promise<any[]>;
+  listAllConversations(projectId?: string, tenantCtx?: TenantContext | string): Promise<any[]>;
 
   /**
    * Retrieves messages for a specific conversation.

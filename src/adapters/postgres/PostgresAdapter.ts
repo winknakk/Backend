@@ -1,6 +1,7 @@
 import pg from "pg";
 import { randomUUID } from "crypto";
 import { DatabaseAdapter } from "../types";
+import { TenantContext } from "../../domain/tenant/TenantContext";
 import { TicketInput, ExecutionResult, AuditLog } from "../../schemas/validation";
 import { SessionContext, CompanyContext } from "../../memory/types";
 import { config } from "../../config/env";
@@ -92,7 +93,8 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   // ─── Ticket ────────────────────────────────────────────────
 
-  async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult> {
+  async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string, tenantCtx?: TenantContext | string): Promise<ExecutionResult> {
+    const orgId = typeof tenantCtx === "string" ? tenantCtx : (tenantCtx?.orgId || "org_default");
     const executionId = randomUUID();
     try {
       let parsedProjectId: number | null = null;
@@ -112,8 +114,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       }
 
       const { rows } = await pool.query(
-        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, created_via, project_id, severity, due_date)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9)
+        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, created_via, project_id, severity, due_date, org_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9, $10)
          RETURNING *`,
         [
           ticketNumber,
@@ -125,6 +127,7 @@ export class PostgresAdapter implements DatabaseAdapter {
           parsedProjectId,
           input.severity,
           slaDueDate,
+          orgId,
         ]
       );
 
@@ -566,7 +569,7 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   // ─── Knowledge Search ─────────────────────────────────────
 
-  async searchKnowledge(query: string, filters?: { projectId?: string }): Promise<any[]> {
+  async searchKnowledge(query: string, filters?: { projectId?: string; orgId?: string }, tenantCtx?: TenantContext | string): Promise<any[]> {
     const fallback = async () => {
       const messages = await BackupManager.readFromBackup<any>("messages");
       const tickets = await BackupManager.readFromBackup<any>("tickets");
@@ -758,7 +761,27 @@ export class PostgresAdapter implements DatabaseAdapter {
     return res.rows.map((r: any) => this.mapRowToAuditLog(r));
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
+  private hasOrgIdMap: Map<string, boolean> = new Map();
+
+  private async checkTableHasOrgId(tableName: string): Promise<boolean> {
+    if (this.hasOrgIdMap.has(tableName)) {
+      return this.hasOrgIdMap.get(tableName)!;
+    }
+    try {
+      const res = await pool.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = 'org_id' LIMIT 1`,
+        [tableName]
+      );
+      const exists = res.rows.length > 0;
+      this.hasOrgIdMap.set(tableName, exists);
+      return exists;
+    } catch {
+      return false;
+    }
+  }
+
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string, tenantCtx?: TenantContext | string): Promise<any[]> {
+    const orgId = typeof tenantCtx === "string" ? tenantCtx : (tenantCtx?.orgId || "org_default");
     const fallback = async () => {
       let bk = await BackupManager.readFromBackup<any>("tickets");
       if (conversationId) {
@@ -766,6 +789,9 @@ export class PostgresAdapter implements DatabaseAdapter {
       }
       if (projectId) {
         bk = bk.filter((t) => String(t.project_id || 1) === String(projectId));
+      }
+      if (orgId && orgId !== "org_all") {
+        bk = bk.filter((t) => String(t.org_id || "org_default") === String(orgId));
       }
       return bk;
     };
@@ -778,6 +804,11 @@ export class PostgresAdapter implements DatabaseAdapter {
     const queryParams: any[] = [];
     const conditions: string[] = [];
 
+    const hasOrgId = await this.checkTableHasOrgId("tickets");
+    if (hasOrgId && orgId && orgId !== "org_all") {
+      queryParams.push(orgId);
+      conditions.push(`t.org_id = $${queryParams.length}`);
+    }
     if (conversationId) {
       if (!this.isValidConversationId(conversationId)) {
         return [];
@@ -810,7 +841,27 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
     query += ` ORDER BY t.id DESC`;
 
-    const res = await this.executeReadQuery(query, queryParams, fallback);
+    let res: any;
+    try {
+      res = await this.executeReadQuery(query, queryParams, fallback);
+    } catch (err: any) {
+      if (err?.message && (err.message.includes("column t.org_id does not exist") || err.message.includes("does not exist"))) {
+        const legacyConditions = conditions.filter(c => !c.includes("t.org_id"));
+        let legacyQuery = `
+          SELECT t.*, p.priority_name, p.resolve_hours 
+          FROM tickets t
+          LEFT JOIN project_sla_policies p ON p.project_id = t.project_id AND p.priority = t.priority
+        `;
+        if (legacyConditions.length > 0) {
+          legacyQuery += ` WHERE ` + legacyConditions.join(" AND ");
+        }
+        legacyQuery += ` ORDER BY t.id DESC`;
+        const legacyParams = queryParams.filter((val) => val !== orgId);
+        res = await this.executeReadQuery(legacyQuery, legacyParams, fallback);
+      } else {
+        throw err;
+      }
+    }
 
     return res.rows.map((r: any) => {
       const severity = r.priority_name || r.priority || "Low";
@@ -843,7 +894,24 @@ export class PostgresAdapter implements DatabaseAdapter {
     });
   }
 
-  async listAllConversations(projectId?: string): Promise<any[]> {
+  async listAllConversations(projectId?: string, tenantCtx?: TenantContext | string): Promise<any[]> {
+    const orgId = typeof tenantCtx === "string" ? tenantCtx : (tenantCtx?.orgId || "org_default");
+    const queryParams: any[] = [];
+    const conditions: string[] = ["c.deleted_at IS NULL", "c.status = 'open'"];
+
+    const hasOrgId = await this.checkTableHasOrgId("conversations");
+    if (hasOrgId && orgId && orgId !== "org_all") {
+      queryParams.push(orgId);
+      conditions.push(`c.org_id = $${queryParams.length}`);
+    }
+    if (projectId && projectId.toLowerCase() !== 'all') {
+      const parsedProjectId = parseInt(projectId, 10);
+      if (!isNaN(parsedProjectId)) {
+        queryParams.push(parsedProjectId);
+        conditions.push(`c.project_id = $${queryParams.length}`);
+      }
+    }
+
     let query = `
       SELECT
         c.id::text AS id,
@@ -868,20 +936,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       JOIN identities i ON i.id = c.identity_id
       LEFT JOIN profiles p ON p.id = i.profile_id
       LEFT JOIN companies co ON co.id = p.company_id
-      WHERE c.deleted_at IS NULL
-        AND c.status = 'open'
-    `;
-    
-    const queryParams: any[] = [];
-    if (projectId && projectId.toLowerCase() !== 'all') {
-      const parsedProjectId = parseInt(projectId, 10);
-      if (!isNaN(parsedProjectId)) {
-        query += ` AND c.project_id = $1 `;
-        queryParams.push(parsedProjectId);
-      }
-    }
-    
-    query += ` ORDER BY c.updated_at DESC`;
+      WHERE ` + conditions.join(" AND ") + ` ORDER BY c.updated_at DESC`;
     
     const fallback = async () => {
       const bk = await BackupManager.readFromBackup<any>("conversations");

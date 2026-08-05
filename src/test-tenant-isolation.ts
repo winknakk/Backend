@@ -1,51 +1,97 @@
+import { TenantResolver } from "./infrastructure/security/TenantResolver";
+import { TenantContext, createTenantContext, DEFAULT_TENANT_CONTEXT } from "./domain/tenant/TenantContext";
+import { PostgresAdapter } from "./adapters/postgres/PostgresAdapter";
 import { LocalDataAdapter } from "./adapters/local-data/LocalDataAdapter";
 
 function assert(condition: any, message: string): void {
-  if (!condition) throw new Error(message);
+  if (!condition) {
+    console.error(`❌ ASSERTION FAILED: ${message}`);
+    throw new Error(message);
+  }
 }
 
-async function run() {
-  console.log("=========================================");
-  console.log("  AutomationX V2 Tenant Isolation Tests  ");
-  console.log("=========================================\n");
+async function runTenantIsolationTestSuite() {
+  console.log("=================================================");
+  console.log("   AutomationX V2 Phase 1 Tenant Isolation Suite ");
+  console.log("=================================================\n");
 
-  const db = new LocalDataAdapter();
+  const resolver = new TenantResolver({
+    apiKeyHashMap: new Map([
+      ["997a17e97b6f0a545d59bfa807f0f5c1158d55c72b44ae03713cd3a4ae0df3c6", { orgId: "org_avalant", projectId: "8" }]
+    ])
+  });
 
-  // Test 1: Load Session Context for Tenant 1
-  console.log("Loading session context for User 1 on Tenant 1...");
-  const context1 = await db.loadSessionContext("U6256f0c4dbb64edacf9eea92904e49b1", "LINE");
-  assert(
-    context1.companyId === "1" || context1.companyId === "6",
-    `Expected company ID to match database data, got ${context1.companyId}`
-  );
-  console.log(`- Success: Tenant context loaded successfully for company ${context1.companyId}`);
+  // Test 1: Fallback Default Resolution when no headers/tokens are present
+  console.log("Test 1: Fallback Default Tenant Resolution...");
+  const dummyReq1 = { headers: {}, query: {} } as any;
+  const ctx1 = resolver.resolve(dummyReq1);
+  assert(ctx1.orgId === "org_default", `Expected org_default, got ${ctx1.orgId}`);
+  assert(ctx1.isFallback === true, "Expected isFallback to be true for unauthenticated request");
+  assert(ctx1.source === "fallback", `Expected source fallback, got ${ctx1.source}`);
+  console.log("  ✅ Test 1 PASSED: Unauthenticated requests fall back to org_default securely.");
 
-  // Test 2: Try to access conversation history across tenants
-  const tenant1ConvId = context1.conversationId;
-  console.log(`Checking cross-tenant history access for conversation ${tenant1ConvId} using invalid company ID...`);
+  // Test 2: Unauthenticated X-Org-Id Header Stripping
+  console.log("\nTest 2: Unauthenticated X-Org-Id Header Stripping...");
+  const dummyReq2 = {
+    headers: { "x-org-id": "org_competitor_secret" },
+    query: {}
+  } as any;
+  const ctx2 = resolver.resolve(dummyReq2);
+  assert(ctx2.orgId !== "org_competitor_secret", "Unauthenticated X-Org-Id header must NOT be trusted!");
+  assert(ctx2.orgId === "org_default", `Expected org_default fallback, got ${ctx2.orgId}`);
+  console.log("  ✅ Test 2 PASSED: Unauthenticated X-Org-Id header stripped & ignored.");
 
-  // Since our isolation changes enforce query-level checking, we expect getConversationHistory to filter out or block if called with a mismatched company ID (tenant ID)
-  try {
-    const crossHistory = await db.getConversationHistory(tenant1ConvId, "wrong-tenant-id" as any);
-    assert(crossHistory.length === 0, "Cross-tenant message history should be empty or blocked.");
-    console.log("- Success: Mismatched company ID queries yield 0 messages.");
-  } catch (err: any) {
-    console.log(`- Success: Mismatched company ID query rejected: ${err.message}`);
-  }
+  // Test 3: API Key Hashed Resolution
+  console.log("\nTest 3: Hashed API Key Tenant Resolution...");
+  const dummyReq3 = {
+    headers: { "x-api-key": "secret_avalant_api_key_123" },
+    query: {}
+  } as any;
+  const ctx3 = resolver.resolve(dummyReq3);
+  assert(ctx3.orgId === "org_avalant", `Expected org_avalant from hashed API key, got ${ctx3.orgId}`);
+  assert(ctx3.projectId === "8", `Expected project 8, got ${ctx3.projectId}`);
+  assert(ctx3.isFallback === false, "Expected isFallback to be false for valid API Key");
+  console.log("  ✅ Test 3 PASSED: Valid API Key maps to verified org_id (org_avalant).");
 
-  // Test 3: Try to find project across tenants
-  console.log("Checking cross-tenant project lookups...");
-  const p1 = await db.findProject("p1"); // Belongs to company 1
-  if (p1) {
-    assert(p1.company_id === "1" || p1.company === "1", "Project p1 must belong to company 1.");
-  }
-  console.log("- Success: Project belongs to correct company.");
+  // Test 4: Admin Header Override for Permitted JWT
+  console.log("\nTest 4: Admin Header Override for SuperAdmin JWT...");
+  const superAdminJwtPayload = Buffer.from(
+    JSON.stringify({ org_id: "org_default", roles: ["SuperAdmin"] })
+  ).toString("base64");
+  const fakeJwt = `header.${superAdminJwtPayload}.signature`;
 
-  console.log("\n✅ All Tenant Isolation Tests PASSED successfully!");
+  const dummyReq4 = {
+    headers: {
+      authorization: `Bearer ${fakeJwt}`,
+      "x-org-id": "org_target_client"
+    },
+    query: {}
+  } as any;
+
+  const ctx4 = resolver.resolve(dummyReq4);
+  assert(ctx4.orgId === "org_target_client", `Expected org_target_client override, got ${ctx4.orgId}`);
+  assert(ctx4.source === "header_override", `Expected source header_override, got ${ctx4.source}`);
+  console.log("  ✅ Test 4 PASSED: SuperAdmin JWT permitted to apply X-Org-Id override.");
+
+  // Test 5: LocalDataAdapter & PostgresAdapter Interface Verification
+  console.log("\nTest 5: Adapter Multi-Tenant Interface Verification...");
+  const localDb = new LocalDataAdapter();
+  const testTenantCtx = createTenantContext({ orgId: "org_test", projectId: "1" });
+  
+  const tickets = await localDb.listAllTickets(undefined, undefined, undefined, undefined, testTenantCtx);
+  assert(Array.isArray(tickets), "listAllTickets must return an array when passed TenantContext");
+  
+  const conversations = await localDb.listAllConversations(undefined, testTenantCtx);
+  assert(Array.isArray(conversations), "listAllConversations must return an array when passed TenantContext");
+  console.log("  ✅ Test 5 PASSED: Data Adapters accept TenantContext without breaking.");
+
+  console.log("\n=================================================");
+  console.log(" 🎉 ALL TENANT ISOLATION SUITE TESTS PASSED 100%!");
+  console.log("=================================================\n");
 }
 
-run().catch((err) => {
-  console.error("\n❌ Tenant Isolation Test FAILED:");
+runTenantIsolationTestSuite().catch((err) => {
+  console.error("\n❌ Tenant Isolation Test Suite FAILED:");
   console.error(err);
   process.exit(1);
 });

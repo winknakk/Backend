@@ -112,7 +112,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return tickets.find((t) => String(t.conversation_id) === conversationId && t.status !== "Closed") || null;
   }
 
-  async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string): Promise<ExecutionResult> {
+  async createTicket(input: TicketInput, slaDueDate: string, ticketNumber: string, tenantCtx?: any): Promise<ExecutionResult> {
     const executionId = randomUUID();
     const tickets = this.readTable<any>("Tickets", DbTicketSchema);
 
@@ -317,7 +317,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     }
   }
 
-  async searchKnowledge(query: string, filters?: { projectId?: string }): Promise<any[]> {
+  async searchKnowledge(query: string, filters?: { projectId?: string; orgId?: string }, tenantCtx?: any): Promise<any[]> {
     const lowerQuery = query.toLowerCase();
     const queryWords = lowerQuery.split(/\s+/).filter((w) => w.length > 2);
     const matches: any[] = [];
@@ -442,7 +442,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     return this.readTable<AuditLog>("Traces", AuditLogSchema);
   }
 
-  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string): Promise<any[]> {
+  async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string, tenantCtx?: any): Promise<any[]> {
     try {
       let tickets = this.readTable<any>("Tickets", DbTicketSchema);
       if (conversationId) {
@@ -469,7 +469,7 @@ export class LocalDataAdapter implements DatabaseAdapter {
     }
   }
 
-  async listAllConversations(projectId?: string): Promise<any[]> {
+  async listAllConversations(projectId?: string, tenantCtx?: any): Promise<any[]> {
     let conversations = this.readTable<any>("Conversations", DbConversationSchema);
     if (projectId && projectId.toLowerCase() !== 'all') {
       conversations = conversations.filter((c) => String(c.project_id || 1) === String(projectId));

@@ -35,7 +35,7 @@ export async function runMigrations(pool: pg.Pool): Promise<void> {
 
   const files = fs
     .readdirSync(migrationsDir)
-    .filter((file) => file.endsWith(".sql"))
+    .filter((file) => file.endsWith(".sql") && !file.endsWith("_down.sql") && !file.endsWith(".down.sql"))
     .sort(); // ensures 001 runs before 002
 
   for (const file of files) {

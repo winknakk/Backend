@@ -64,12 +64,14 @@ import { ConfigLoaderService } from "../services/ConfigLoaderService";
 import { OutboxProcessor } from "../infrastructure/db/OutboxProcessor";
 import { requestContextStorage } from "../shared/context/RequestContextHolder";
 import websocketPlugin from "@fastify/websocket";
+import { tenantPlugin } from "./plugins/tenantPlugin";
 import WebChatGateway from "../presentation/http/routes/WebChatGateway";
 import Redis from "ioredis";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any, bodyLimit: 50 * 1024 * 1024 }); // 50MB body limit for image uploads
 fastify.register(websocketPlugin);
+fastify.register(tenantPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
 const adminConnections = new Map<any, string>();
 

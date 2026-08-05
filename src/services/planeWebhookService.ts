@@ -2,6 +2,9 @@ import crypto from "crypto";
 import axios from "axios";
 import { DatabaseAdapter } from "../adapters/types";
 import { config } from "../config/env";
+import { createLogger } from "../observability/logger";
+
+const logger = createLogger("planeWebhookService");
 
 export interface PlaneWebhookPayload {
   event?: string;
@@ -177,6 +180,12 @@ export class PlaneWebhookService {
     }
 
     const matched = await this.dbAdapter.syncTicketFromPlane(planeIssueId, { status, priority });
+    if (matched && status === "Done") {
+      this.dispatchCustomerDoneNotification(planeIssueId).catch((err) => {
+        logger.error({ error: err.message, planeIssueId }, "Failed to dispatch customer Done notification");
+      });
+    }
+
     return {
       processed: true,
       matched,
@@ -185,6 +194,48 @@ export class PlaneWebhookService {
       status,
       priority,
     };
+  }
+
+  private async dispatchCustomerDoneNotification(planeIssueId: string): Promise<void> {
+    try {
+      const { pool } = require("../adapters/postgres/PostgresAdapter");
+      const { rows } = await pool.query(
+        `SELECT t.id, t.ticket_number, t.subject, t.conversation_id, c.channel, i.channel_ref
+         FROM tickets t
+         JOIN conversations c ON c.id = t.conversation_id
+         JOIN identities i ON i.id = c.identity_id
+         WHERE t.plane_issue_id = $1 LIMIT 1`,
+        [planeIssueId]
+      );
+
+      if (rows.length === 0) return;
+      const ticket = rows[0];
+      const notificationText = `🎉 ตั๋วของคุณ #${ticket.ticket_number || ticket.id} ("${ticket.subject}") ได้รับการแก้ไขและอัปเดตสถานะเป็น Done เรียบร้อยแล้วค่ะ`;
+
+      await this.dbAdapter.saveMessage(String(ticket.conversation_id), "ai", notificationText);
+
+      if (ticket.channel === "line" || ticket.channel === "line_group") {
+        const token = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
+        if (token && ticket.channel_ref && !ticket.channel_ref.startsWith("test_")) {
+          await axios.post(
+            "https://api.line.me/v2/bot/message/push",
+            {
+              to: ticket.channel_ref,
+              messages: [{ type: "text", text: notificationText }],
+            },
+            {
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              timeout: 10000,
+            }
+          );
+        }
+      }
+    } catch (err: any) {
+      logger.error({ error: err.message, planeIssueId }, "Error sending customer Done notification");
+    }
   }
 
   async syncLinkedTicketsFromPlane(batchSize = config.PLANE_REVERSE_SYNC_BATCH_SIZE): Promise<PlaneReverseSyncSummary> {
