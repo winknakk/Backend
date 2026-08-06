@@ -12,25 +12,50 @@ const REAL_PROJECTS_SEED = [
 
 export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   // ----------------------------------------------------
-  // Master Data Projects Routes (schema: id, company_id, name, project_type, environment)
+  // Master Data Organizations & Roles Routes
   // ----------------------------------------------------
-  fastify.get("/api/v1/admin/master-data/projects", async (request, reply) => {
+  fastify.get("/api/v1/admin/master-data/organizations", async (request, reply) => {
     try {
       const client = await pool.connect();
       try {
-        const result = await client.query(
-          "SELECT id, company_id, name, project_type, environment FROM projects ORDER BY id ASC"
-        );
-        if (result.rows && result.rows.length > 0) {
-          return reply.send({ success: true, projects: result.rows });
-        }
-        return reply.send({ success: true, projects: REAL_PROJECTS_SEED });
+        const result = await client.query("SELECT id, name, slug, status, created_at FROM organizations ORDER BY created_at DESC");
+        return reply.send({ success: true, organizations: result.rows });
       } finally {
         client.release();
       }
     } catch (err: any) {
-      fastify.log.warn({ err }, "Using real projects fallback seed for PostgreSQL master data");
-      return reply.send({ success: true, projects: REAL_PROJECTS_SEED });
+      return reply.send({
+        success: true,
+        organizations: [
+          { id: "org_default", name: "Default Organization", slug: "default", status: "active", created_at: "2026-08-01" },
+          { id: "org_avalant", name: "Avalant Co.,Ltd.", slug: "avalant", status: "active", created_at: "2026-08-05" },
+          { id: "org_siam", name: "Siam Banking Corp", slug: "siam", status: "active", created_at: "2026-08-06" },
+          { id: "org_acme", name: "Acme Retail Group", slug: "acme", status: "active", created_at: "2026-08-06" },
+          { id: "org_demo", name: "Demo Tenant", slug: "demo", status: "active", created_at: "2026-08-05" },
+        ],
+      });
+    }
+  });
+
+  fastify.get("/api/v1/admin/master-data/roles", async (request, reply) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const result = await client.query("SELECT id, user_email, role, org_id, status, created_at FROM user_roles ORDER BY created_at DESC");
+        return reply.send({ success: true, roles: result.rows });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      return reply.send({
+        success: true,
+        roles: [
+          { id: "role_superadmin", user_email: "superadmin@ticketx.io", role: "super_admin", org_id: "org_default", status: "Active" },
+          { id: "role_org_admin", user_email: "admin@avalant.co.th", role: "admin", org_id: "org_avalant", status: "Active" },
+          { id: "role_agent", user_email: "agent@avalant.co.th", role: "employee", org_id: "org_avalant", status: "Active" },
+          { id: "role_customer", user_email: "customer@avalant.co.th", role: "customer", org_id: "org_avalant", status: "Active" },
+        ],
+      });
     }
   });
 

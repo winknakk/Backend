@@ -72,8 +72,31 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
           user: profile,
         });
       } catch (e) {
-        // Fallback to local admin
+        // Fallback to local accounts
       }
+    }
+
+    // Quick Mock Demo Accounts
+    const mockAccounts: Record<string, { name: string; role: "super_admin" | "admin" | "employee" | "customer"; orgId: string }> = {
+      "superadmin@ticketx.io": { name: "Super Admin Overseer", role: "super_admin", orgId: "org_default" },
+      "admin@avalant.co.th": { name: "Avalant Org Admin", role: "admin", orgId: "org_avalant" },
+      "agent@avalant.co.th": { name: "Avalant Support Agent", role: "employee", orgId: "org_avalant" },
+      "customer@avalant.co.th": { name: "Avalant Client User", role: "customer", orgId: "org_avalant" },
+    };
+
+    if (mockAccounts[username]) {
+      const mock = mockAccounts[username];
+      return reply.send({
+        success: true,
+        token: `ticketx_mock_${mock.role}_token_${Date.now()}`,
+        user: {
+          username,
+          name: mock.name,
+          role: mock.role,
+          email: username,
+          orgId: mock.orgId,
+        },
+      });
     }
 
     const validUsername = process.env.ADMIN_USERNAME || "admin";
