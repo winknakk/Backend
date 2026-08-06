@@ -118,10 +118,16 @@ export function verifyPlaneWebhookSignature(
 }
 
 export class PlaneWebhookService {
+  private readonly doneNotificationDispatcher: (planeIssueId: string) => Promise<void>;
+
   constructor(
     private readonly dbAdapter: DatabaseAdapter,
-    private readonly httpClient: Pick<typeof axios, "get"> = axios
-  ) {}
+    private readonly httpClient: Pick<typeof axios, "get"> = axios,
+    doneNotificationDispatcher?: (planeIssueId: string) => Promise<void>
+  ) {
+    this.doneNotificationDispatcher =
+      doneNotificationDispatcher || ((planeIssueId) => this.dispatchCustomerDoneNotification(planeIssueId));
+  }
 
   async sync(payload: PlaneWebhookPayload): Promise<PlaneWebhookSyncResult> {
     const event = payload.event?.toLowerCase();
@@ -179,17 +185,17 @@ export class PlaneWebhookService {
       return { processed: false, matched: false, reason: "no_supported_changes", planeIssueId };
     }
 
-    const matched = await this.dbAdapter.syncTicketFromPlane(planeIssueId, { status, priority });
-    if (matched && status === "Done") {
-      this.dispatchCustomerDoneNotification(planeIssueId).catch((err) => {
+    const syncResult = await this.dbAdapter.syncTicketFromPlane(planeIssueId, { status, priority });
+    if (syncResult.matched && syncResult.statusChanged && status === "Done") {
+      this.doneNotificationDispatcher(planeIssueId).catch((err) => {
         logger.error({ error: err.message, planeIssueId }, "Failed to dispatch customer Done notification");
       });
     }
 
     return {
       processed: true,
-      matched,
-      reason: matched ? undefined : "ticket_not_linked",
+      matched: syncResult.matched,
+      reason: syncResult.matched ? undefined : "ticket_not_linked",
       planeIssueId,
       status,
       priority,
@@ -210,7 +216,7 @@ export class PlaneWebhookService {
 
       if (rows.length === 0) return;
       const ticket = rows[0];
-      const notificationText = `🎉 ตั๋วของคุณ #${ticket.ticket_number || ticket.id} ("${ticket.subject}") ได้รับการแก้ไขและอัปเดตสถานะเป็น Done เรียบร้อยแล้วค่ะ`;
+      const notificationText = `🎉 Ticket #${ticket.ticket_number || ticket.id} เรื่อง “${ticket.subject}” ดำเนินการเสร็จเรียบร้อยแล้วค่ะ หากยังพบปัญหาอยู่ พิมพ์รายละเอียดเพิ่มเติมกลับมาได้เลยนะคะ`;
 
       await this.dbAdapter.saveMessage(String(ticket.conversation_id), "ai", notificationText);
 

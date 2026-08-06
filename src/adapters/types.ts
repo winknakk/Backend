@@ -107,7 +107,7 @@ export interface DatabaseAdapter {
   syncTicketFromPlane(
     planeIssueId: string,
     changes: { status?: string; priority?: string }
-  ): Promise<boolean>;
+  ): Promise<PlaneTicketSyncResult>;
 
   /**
    * Deletes the local Ticket linked to a Plane work item without queueing a
@@ -119,5 +119,12 @@ export interface DatabaseAdapter {
    * Retrieves ticket details along with company context.
    */
   getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }>;
+}
+
+export interface PlaneTicketSyncResult {
+  matched: boolean;
+  statusChanged: boolean;
+  previousStatus?: string;
+  currentStatus?: string;
 }
 

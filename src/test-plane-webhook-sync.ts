@@ -38,18 +38,29 @@ async function run(): Promise<void> {
   assert.strictEqual(verifyPlaneWebhookSignature(payload, "invalid", secret), false);
 
   let captured: any;
+  let currentStatus = "In Progress";
+  let doneNotificationCount = 0;
   let deletedPlaneIssueId: string | undefined;
   const adapter = {
     async syncTicketFromPlane(planeIssueId: string, changes: { status?: string; priority?: string }) {
       captured = { planeIssueId, changes };
-      return true;
+      const previousStatus = currentStatus;
+      if (changes.status) currentStatus = changes.status;
+      return {
+        matched: true,
+        statusChanged: Boolean(changes.status && previousStatus !== currentStatus),
+        previousStatus,
+        currentStatus,
+      };
     },
     async deleteTicketFromPlane(planeIssueId: string) {
       deletedPlaneIssueId = planeIssueId;
       return true;
     },
   } as DatabaseAdapter;
-  const service = new PlaneWebhookService(adapter);
+  const service = new PlaneWebhookService(adapter, undefined, async () => {
+    doneNotificationCount += 1;
+  });
   const result = await service.sync(payload);
 
   assert.deepStrictEqual(captured, {
@@ -58,6 +69,10 @@ async function run(): Promise<void> {
   });
   assert.strictEqual(result.processed, true);
   assert.strictEqual(result.matched, true);
+  assert.strictEqual(doneNotificationCount, 1);
+
+  await service.sync(payload);
+  assert.strictEqual(doneNotificationCount, 1, "Repeated Done sync must not notify twice");
 
   await service.sync({
     event: "issue",

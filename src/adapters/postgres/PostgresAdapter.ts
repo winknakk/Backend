@@ -1053,7 +1053,7 @@ export class PostgresAdapter implements DatabaseAdapter {
   async syncTicketFromPlane(
     planeIssueId: string,
     changes: { status?: string; priority?: string }
-  ): Promise<boolean> {
+  ): Promise<import("../types").PlaneTicketSyncResult> {
     const assignments: string[] = [];
     const values: string[] = [];
 
@@ -1065,14 +1065,36 @@ export class PostgresAdapter implements DatabaseAdapter {
       values.push(changes.priority);
       assignments.push(`priority = $${values.length}`);
     }
-    if (assignments.length === 0) return false;
+    if (assignments.length === 0) return { matched: false, statusChanged: false };
 
     values.push(planeIssueId);
     const result = await pool.query(
-      `UPDATE tickets SET ${assignments.join(", ")}, updated_at = NOW() WHERE plane_issue_id = $${values.length}`,
+      `WITH target AS (
+         SELECT id, status AS previous_status
+         FROM tickets
+         WHERE plane_issue_id = $${values.length}
+         FOR UPDATE
+       )
+       UPDATE tickets AS t
+       SET ${assignments.join(", ")}, updated_at = NOW()
+       FROM target
+       WHERE t.id = target.id
+       RETURNING target.previous_status, t.status AS current_status`,
       values
     );
-    return (result.rowCount || 0) > 0;
+    const matched = (result.rowCount || 0) > 0;
+    const statusChanged = Boolean(
+      changes.status &&
+      result.rows.some(
+        (row) => String(row.previous_status || "").trim().toLowerCase() !== String(row.current_status || "").trim().toLowerCase()
+      )
+    );
+    return {
+      matched,
+      statusChanged,
+      previousStatus: result.rows[0]?.previous_status,
+      currentStatus: result.rows[0]?.current_status,
+    };
   }
 
   async deleteTicketFromPlane(planeIssueId: string): Promise<boolean> {

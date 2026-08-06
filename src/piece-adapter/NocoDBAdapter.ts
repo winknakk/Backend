@@ -1028,7 +1028,7 @@ export class NocoDBAdapter implements DatabaseAdapter {
   async syncTicketFromPlane(
     planeIssueId: string,
     changes: { status?: string; priority?: string }
-  ): Promise<boolean> {
+  ): Promise<import("../adapters/types").PlaneTicketSyncResult> {
     if (!this.apiToken) throw new Error("NocoDB token missing");
 
     const rows = await this.getRows(this.tableTickets, {
@@ -1036,13 +1036,15 @@ export class NocoDBAdapter implements DatabaseAdapter {
       where: `(plane_issue_id,eq,${planeIssueId})`,
     });
     const ticket = rows[0];
-    if (!ticket) return false;
+    if (!ticket) return { matched: false, statusChanged: false };
 
     const ticketId = ticket.Id || ticket.id || ticket.id1;
     const patch: Record<string, string> = {};
     if (changes.status) patch.status = changes.status;
     if (changes.priority) patch.priority = changes.priority;
-    if (Object.keys(patch).length === 0) return false;
+    if (Object.keys(patch).length === 0) return { matched: false, statusChanged: false };
+
+    const previousStatus = ticket.status;
 
     await this.requestWithRetry(() =>
       axios.patch(
@@ -1059,7 +1061,15 @@ export class NocoDBAdapter implements DatabaseAdapter {
     );
     this.cachedTicketsList = [];
     this.cachedTickets = null;
-    return true;
+    return {
+      matched: true,
+      statusChanged: Boolean(
+        changes.status &&
+        String(previousStatus || "").trim().toLowerCase() !== String(changes.status).trim().toLowerCase()
+      ),
+      previousStatus,
+      currentStatus: changes.status || previousStatus,
+    };
   }
 
   async getTicketCompanyContext(ticketId: string): Promise<{ ticket: any; companyName: string }> {
