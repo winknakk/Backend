@@ -48,6 +48,7 @@ import { PlaneWebhookService, verifyPlaneWebhookSignature } from "../services/pl
 import { PlaneReverseSyncPoller } from "../services/PlaneReverseSyncPoller";
 import { InactivityTimerService } from "../services/InactivityTimerService";
 import { EmailNotificationService } from "../services/EmailNotificationService";
+import { CloseTicketInputSchema, RestoreTicketInputSchema } from "../schemas/validation";
 import { AgentManager } from "../agent/AgentRuntime";
 import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
@@ -1017,27 +1018,49 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
 
-  const reason = payload.cancellation_reason || payload.cancellationReason || payload.reason || payload.resolutionReason || payload.reasonDetail;
-  if (!reason || typeof reason !== "string" || reason.trim().length < 10) {
+  const rawReason = payload.cancellation_reason || payload.cancellationReason || payload.reason || payload.resolutionReason || payload.reasonDetail;
+  const ticketId = payload.ticketId || payload.ticket_id || payload.id;
+
+  const parseResult = CloseTicketInputSchema.safeParse({
+    ticketId: String(ticketId || ""),
+    cancellation_reason: typeof rawReason === "string" ? rawReason.trim() : "",
+  });
+
+  if (!parseResult.success) {
     return reply.code(400).send({
       error: "Bad Request",
-      message: "A valid cancellation_reason (at least 10 characters) is required when cancelling or closing a ticket.",
+      message: parseResult.error.issues[0]?.message || "A valid cancellation_reason (at least 10 characters) is required.",
     });
   }
 
+  const validatedData = parseResult.data;
   const tool = toolRegistry.getLocalTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute({ ...payload, cancellation_reason: reason.trim() }, context);
+    const result = await tool.execute({ ...payload, cancellation_reason: validatedData.cancellation_reason }, context);
 
     // Save cancellation reason to database
-    const ticketId = payload.ticketId || payload.ticket_id || payload.id;
-    if (ticketId) {
+    await pool.query(
+      `UPDATE tickets SET cancellation_reason = $1, status = 'cancelled', updated_at = NOW() WHERE ticket_number = $2 OR id = $3`,
+      [validatedData.cancellation_reason, validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0]
+    );
+
+    // Audit logging in admin_audit_logs
+    try {
       await pool.query(
-        `UPDATE tickets SET cancellation_reason = $1, status = 'cancelled', updated_at = NOW() WHERE ticket_number = $2 OR id = $3`,
-        [reason.trim(), String(ticketId), parseInt(String(ticketId), 10) || 0]
+        `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [
+          "TICKET_CLOSED",
+          "Ticket",
+          validatedData.ticketId,
+          "system",
+          JSON.stringify({ ticketId: validatedData.ticketId, cancellation_reason: validatedData.cancellation_reason, timestamp: new Date().toISOString() })
+        ]
       );
+    } catch (auditErr: any) {
+      serverLogger.warn({ error: auditErr.message }, "Audit log creation failed for ticket close");
     }
 
     return reply.code(200).send(result);
@@ -1048,7 +1071,16 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
 fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   const params = request.params as any;
-  const ticketIdStr = String(params.id);
+  const ticketIdStr = String(params.id || "");
+
+  const parseResult = RestoreTicketInputSchema.safeParse({ ticketId: ticketIdStr });
+  if (!parseResult.success) {
+    return reply.code(400).send({
+      error: "Bad Request",
+      message: parseResult.error.issues[0]?.message || "Invalid ticket ID",
+    });
+  }
+
   const isNumeric = /^\d+$/.test(ticketIdStr);
 
   try {
@@ -1068,6 +1100,23 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
       `INSERT INTO ticket_events (ticket_id, event_type, payload) VALUES ($1, $2, $3)`,
       [ticket.id, "RESTORED", JSON.stringify({ restoredAt: new Date().toISOString(), restoredBy: "admin" })]
     );
+
+    // Audit logging in admin_audit_logs
+    try {
+      await pool.query(
+        `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [
+          "TICKET_RESTORED",
+          "Ticket",
+          String(ticket.id),
+          "system",
+          JSON.stringify({ ticketId: ticket.ticket_number || ticket.id, restoredAt: new Date().toISOString() })
+        ]
+      );
+    } catch (auditErr: any) {
+      serverLogger.warn({ error: auditErr.message }, "Audit log creation failed for ticket restore");
+    }
 
     return reply.code(200).send({
       success: true,
