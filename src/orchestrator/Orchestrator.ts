@@ -10,6 +10,7 @@ import { IssueSessionBuilder } from "../runtime/IssueSessionBuilder";
 import { IssueSessionResolver } from "../runtime/IssueSessionResolver";
 import { LifecycleState } from "../runtime/IssueSession";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
+import { pool } from "../adapters/postgres/PostgresAdapter";
 
 const logger = createLogger("Orchestrator");
 
@@ -51,6 +52,83 @@ export class Orchestrator {
       const sessionContext = await this.memoryService.loadSessionContext(message.senderId, message.channel);
       const conversationId = sessionContext.conversationId;
 
+      // LINE / First-Contact Identity Verification Check
+      const dbAdapter = (this.memoryService as any).dbAdapter;
+      if (dbAdapter && (message.channel === "line" || message.channel === "line_group")) {
+        try {
+          const identRes = await pool.query(
+            `SELECT id, verification_status, is_verified, profile_id FROM identities WHERE channel_ref = $1 LIMIT 1`,
+            [message.senderId]
+          );
+
+          if (identRes.rows.length > 0) {
+            const ident = identRes.rows[0];
+            const isGuest = ident.verification_status === "UNVERIFIED_GUEST" || !ident.is_verified;
+
+            if (isGuest) {
+              const inputText = (message.text || "").trim();
+
+              // Check if input matches a project code or project name (SECURITY: DO NOT match raw integer ID)
+              const projRes = await pool.query(
+                `SELECT id, name FROM projects WHERE LOWER(name) = LOWER($1) OR LOWER(slug) = LOWER($1) LIMIT 1`,
+                [inputText]
+              );
+
+              if (projRes.rows.length > 0) {
+                const matchedProject = projRes.rows[0];
+                await pool.query(
+                  `UPDATE identities SET verification_status = 'VERIFIED_CUSTOMER', is_verified = TRUE WHERE id = $1`,
+                  [ident.id]
+                );
+                await pool.query(
+                  `UPDATE conversations SET project_id = $1 WHERE id = $2`,
+                  [matchedProject.id, conversationId]
+                );
+
+                await this.memoryService.appendConversationLog(
+                  conversationId,
+                  "customer",
+                  message.text,
+                  message.externalId
+                );
+
+                const welcomeText = `✅ ยืนยันตัวตนสำเร็จแล้วค่ะ! ยินดีต้อนรับสู่ระบบบริการซัพพอร์ตโครงการ "${matchedProject.name}" มีข้อสงสัยหรือต้องการความช่วยเหลือเรื่องอะไร พิมพ์สอบถามมาได้เลยค่ะ`;
+
+                await this.memoryService.appendConversationLog(conversationId, "ai", welcomeText);
+
+                return {
+                  recipientId: message.senderId,
+                  channel: message.channel,
+                  text: welcomeText,
+                  sentAt: new Date().toISOString(),
+                };
+              } else {
+                // Intercept guest message and send challenge prompt
+                await this.memoryService.appendConversationLog(
+                  conversationId,
+                  "customer",
+                  message.text,
+                  message.externalId
+                );
+
+                const challengeText = `👋 สวัสดีค่ะ ยินดีต้อนรับสู่ระบบบริการซัพพอร์ตอัตโนมัติ\n\nกรุณาพิมพ์ **รหัสโครงการ (Project Code)** หรือ **ชื่อโปรเจกต์** ของท่าน เพื่อยืนยันตัวตนก่อนเริ่มต้นใช้งานบริการค่ะ`;
+
+                await this.memoryService.appendConversationLog(conversationId, "ai", challengeText);
+
+                return {
+                  recipientId: message.senderId,
+                  channel: message.channel,
+                  text: challengeText,
+                  sentAt: new Date().toISOString(),
+                };
+              }
+            }
+          }
+        } catch (identErr: any) {
+          logger.warn({ error: identErr.message }, "Identity verification check error, proceeding with standard orchestration");
+        }
+      }
+
       logger.info(
         {
           requestId: reqId,
@@ -62,7 +140,6 @@ export class Orchestrator {
       );
 
       // Resolve database adapter and project context to build IssueSession
-      const dbAdapter = (this.memoryService as any).dbAdapter;
       const contextResolver = new RuntimeContextResolver(dbAdapter);
       const runtimeContext = await contextResolver.resolveRuntimeContext(conversationId);
       if (!runtimeContext) {

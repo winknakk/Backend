@@ -995,14 +995,73 @@ fastify.post("/api/v1/webhooks/plane", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
+
+  const reason = payload.cancellation_reason || payload.cancellationReason || payload.reason || payload.resolutionReason || payload.reasonDetail;
+  if (!reason || typeof reason !== "string" || reason.trim().length < 10) {
+    return reply.code(400).send({
+      error: "Bad Request",
+      message: "A valid cancellation_reason (at least 10 characters) is required when cancelling or closing a ticket.",
+    });
+  }
+
   const tool = toolRegistry.getLocalTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
   try {
-    const result = await tool.execute(payload, context);
+    const result = await tool.execute({ ...payload, cancellation_reason: reason.trim() }, context);
+
+    // Save cancellation reason to database
+    const ticketId = payload.ticketId || payload.ticket_id || payload.id;
+    if (ticketId) {
+      await pool.query(
+        `UPDATE tickets SET cancellation_reason = $1, status = 'cancelled', updated_at = NOW() WHERE ticket_number = $2 OR id = $3`,
+        [reason.trim(), String(ticketId), parseInt(String(ticketId), 10) || 0]
+      );
+    }
+
     return reply.code(200).send(result);
   } catch (err: any) {
     return reply.code(500).send({ error: err.message });
+  }
+});
+
+fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
+  const params = request.params as any;
+  const ticketIdStr = String(params.id);
+  const isNumeric = /^\d+$/.test(ticketIdStr);
+
+  try {
+    const query = isNumeric
+      ? `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE id = $1 RETURNING *`
+      : `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE ticket_number = $1 RETURNING *`;
+    const { rows } = await pool.query(query, [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr]);
+
+    if (rows.length === 0) {
+      return reply.code(404).send({ error: "Not Found", message: `Ticket ${ticketIdStr} not found` });
+    }
+
+    const ticket = rows[0];
+
+    // Log ticket event
+    await pool.query(
+      `INSERT INTO ticket_events (ticket_id, event_type, payload) VALUES ($1, $2, $3)`,
+      [ticket.id, "RESTORED", JSON.stringify({ restoredAt: new Date().toISOString(), restoredBy: "admin" })]
+    );
+
+    return reply.code(200).send({
+      success: true,
+      message: `Ticket ${ticket.ticket_number || ticket.id} has been restored successfully.`,
+      ticket: {
+        id: String(ticket.id),
+        ticketId: ticket.ticket_number || ticket.ticket_id,
+        status: ticket.status,
+        createdByType: ticket.created_by_type || "CUSTOMER",
+        createdByName: ticket.created_by_name || null,
+        cancellationReason: null,
+      },
+    });
+  } catch (err: any) {
+    return reply.code(500).send({ error: "Failed to restore ticket", message: err.message });
   }
 });
 

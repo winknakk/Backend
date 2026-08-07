@@ -30,6 +30,9 @@ export class TicketMapper {
         : raw.ai_confidence_metrics,
       searchableText: raw.searchable_text || undefined,
       enrichmentState: raw.enrichment_state || "PENDING",
+      createdByTypes: raw.created_by_type || "CUSTOMER",
+      createdByName: raw.created_by_name || undefined,
+      cancellationReason: raw.cancellation_reason || undefined,
     });
   }
 
@@ -60,6 +63,9 @@ export class TicketMapper {
       ai_confidence_metrics: JSON.stringify(domain.aiConfidenceMetrics),
       searchable_text: domain.searchableText || null,
       enrichment_state: domain.enrichmentState,
+      created_by_type: domain.createdByType || "CUSTOMER",
+      created_by_name: domain.createdByName || null,
+      cancellation_reason: domain.cancellationReason || null,
     };
   }
 }
