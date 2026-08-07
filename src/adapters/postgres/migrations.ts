@@ -12,7 +12,7 @@ const legacyMigrationAliases: Record<string, string[]> = {
   "000_nocodb_to_postgresql.sql": ["nocodb_to_postgresql.sql"],
 };
 
-export async function runMigrations(pool: pg.Pool): Promise<void> {
+export async function runMigrations(pool: pg.Pool, options: { only?: string } = {}): Promise<void> {
   logger.info("Starting database migrations check...");
 
   // We want to ensure we can run queries. Let's make sure a migrations metadata table exists.
@@ -33,10 +33,21 @@ export async function runMigrations(pool: pg.Pool): Promise<void> {
     return;
   }
 
-  const files = fs
+  let files = fs
     .readdirSync(migrationsDir)
     .filter((file) => file.endsWith(".sql") && !file.endsWith("_down.sql") && !file.endsWith(".down.sql"))
     .sort(); // ensures 001 runs before 002
+
+  if (options.only) {
+    if (path.basename(options.only) !== options.only || !/^\d{3}_[A-Za-z0-9_-]+\.sql$/.test(options.only)) {
+      throw new Error("Invalid migration filename supplied to --only");
+    }
+    if (!files.includes(options.only)) {
+      throw new Error(`Migration file not found: ${options.only}`);
+    }
+    files = [options.only];
+    logger.info({ file: options.only }, "Running one explicitly selected migration");
+  }
 
   for (const file of files) {
     const filePath = path.join(migrationsDir, file);

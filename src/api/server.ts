@@ -35,6 +35,7 @@ import { registerAdminRoutes } from "./routes/admin";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerMasterDataRoutes } from "./routes/masterData";
 import { registerPortalRoutes } from "./routes/portal";
+import { registerLineWebhookRoutes } from "./routes/lineWebhook";
 import { SLAMatrixService } from "../services/SLAMatrixService";
 import { PolicyEngine } from "../policy/PolicyEngine";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
@@ -71,9 +72,21 @@ import websocketPlugin from "@fastify/websocket";
 import { tenantPlugin } from "./plugins/tenantPlugin";
 import WebChatGateway from "../presentation/http/routes/WebChatGateway";
 import Redis from "ioredis";
+import { LineProjectOnboardingService } from "../services/LineProjectOnboardingService";
 
 const serverLogger = createLogger("server");
 const fastify = Fastify({ loggerInstance: rootLogger as any, bodyLimit: 50 * 1024 * 1024 }); // 50MB body limit for image uploads
+// LINE signs the exact raw request bytes. Preserve those bytes while keeping
+// parsed JSON behavior unchanged for every existing route.
+fastify.removeContentTypeParser("application/json");
+fastify.addContentTypeParser("application/json", { parseAs: "buffer" }, (request, body, done) => {
+  try {
+    request.rawBody = body as Buffer;
+    done(null, JSON.parse((body as Buffer).toString("utf8")));
+  } catch (error: any) {
+    done(error, undefined);
+  }
+});
 fastify.register(websocketPlugin);
 fastify.register(tenantPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
@@ -114,6 +127,14 @@ inactivityTimerService.startMonitor();
 const evalTestRunner = new EvalTestRunner(agentManager, dbAdapter);
 const smsNotificationService = new SmsNotificationService(pool);
 const emailNotificationService = new EmailNotificationService();
+const projectJoinCodePepper =
+  config.PROJECT_JOIN_CODE_PEPPER ||
+  (config.NODE_ENV === "production" ? "" : config.LINE_CHANNEL_ACCESS_TOKEN);
+const lineProjectOnboardingService = new LineProjectOnboardingService(
+  pool,
+  projectJoinCodePepper,
+  config.LINE_ONBOARDING_MODE
+);
 
 async function requestHumanTakeover(input: {
   conversationId: string;
@@ -1727,6 +1748,7 @@ fastify.register(WebChatGateway);
 fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
 registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
+registerLineWebhookRoutes(fastify, lineProjectOnboardingService);
 
 const start = async () => {
   try {

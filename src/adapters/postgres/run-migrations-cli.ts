@@ -7,7 +7,9 @@ const logger = createLogger("migrations-cli");
 async function main() {
   logger.info("Starting decoupled database migration runner...");
   try {
-    await runMigrations(pool);
+    const onlyArg = process.argv.find((value) => value.startsWith("--only="));
+    const only = onlyArg ? onlyArg.slice("--only=".length) : undefined;
+    await runMigrations(pool, { only });
     logger.info("Decoupled database migration completed successfully.");
     await pool.end();
     process.exit(0);
