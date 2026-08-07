@@ -20,7 +20,7 @@ declare module "fastify" {
 function buildLineReply(decision: LineOnboardingDecision): Record<string, unknown> {
   const message: Record<string, unknown> = {
     type: "text",
-    text: decision.replyText || "ระบบรับข้อมูลเรียบร้อยแล้วครับ",
+    text: decision.replyText || "รับข้อมูลแล้วนะคะ",
   };
   if (decision.quickReplies?.length) {
     message.quickReply = {
@@ -241,7 +241,7 @@ export function registerLineWebhookRoutes(
     try {
       await sendLinePush(
         result.lineUserId,
-        `เจ้าหน้าที่ตรวจสอบเรียบร้อยแล้วครับ บัญชีนี้เชื่อมกับโปรเจกต์ “${result.projectName}” แล้ว สามารถแจ้งปัญหาหรือสอบถามข้อมูลได้เลยครับ`
+        `เจ้าหน้าที่เช็กให้แล้วนะคะ บัญชีเชื่อมกับโปรเจกต์ “${result.projectName}” เรียบร้อยแล้ว ✅ พร้อมใช้งานได้เลยค่ะ`
       );
       notificationDelivered = true;
     } catch (error: any) {

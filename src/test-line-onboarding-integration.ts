@@ -13,7 +13,7 @@ async function main(): Promise<void> {
         id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, org_id VARCHAR(64) NOT NULL, name TEXT NOT NULL
       );
       CREATE TEMP TABLE project_channels (
-        project_id INTEGER NOT NULL, channel_id TEXT NOT NULL, is_enabled BOOLEAN, active BOOLEAN
+        project_id INTEGER NOT NULL, channel_id TEXT NOT NULL, channel_type TEXT NOT NULL, is_enabled BOOLEAN, active BOOLEAN
       );
       CREATE TEMP TABLE profiles (
         id TEXT PRIMARY KEY, company_id INTEGER NOT NULL, name TEXT NOT NULL, metadata JSONB,
@@ -55,8 +55,12 @@ async function main(): Promise<void> {
         webhook_event_id TEXT PRIMARY KEY, line_user_id TEXT, event_type TEXT, status TEXT DEFAULT 'processing',
         response JSONB, received_at TIMESTAMPTZ DEFAULT NOW(), processed_at TIMESTAMPTZ
       );
-      INSERT INTO projects VALUES (8, 5, 'org_default', '24/7');
-      INSERT INTO project_channels VALUES (8, 'U_DESTINATION', TRUE, TRUE);
+      INSERT INTO projects VALUES
+        (8, 5, 'org_default', '24/7'),
+        (11, 5, 'org_default', 'SSO Project');
+      INSERT INTO project_channels VALUES
+        (8, 'U_DESTINATION', 'line', TRUE, TRUE),
+        (11, 'U_OTHER_DESTINATION', 'line', TRUE, TRUE);
     `);
   } finally {
     client.release();
@@ -64,7 +68,30 @@ async function main(): Promise<void> {
 
   const service = new LineProjectOnboardingService(testPool, "integration-test-project-code-pepper", "code_required");
   const rotated = await service.rotateJoinCode({ projectId: 8, orgId: "org_default", createdBy: "test" });
+  const relinkCode = await service.rotateJoinCode({ projectId: 11, orgId: "org_default", createdBy: "test" });
   assert.match(rotated.code, /^TX-/);
+
+  await service.processEvent({
+    type: "follow", webhookEventId: "evt-retry-follow", destination: "U_DESTINATION", userId: "U_RETRY",
+  });
+  await service.processEvent({
+    type: "postback", webhookEventId: "evt-retry-choice", destination: "U_DESTINATION", userId: "U_RETRY",
+    postbackData: "ticketx:onboarding:has_code",
+  });
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const invalid = await service.processEvent({
+      type: "message", webhookEventId: `evt-retry-invalid-${attempt}`,
+      destination: "U_DESTINATION", userId: "U_RETRY", messageText: "TX-WRNG-CODE",
+    });
+    assert.equal(invalid.reason, "invalid_code");
+    assert.doesNotMatch(invalid.replyText || "", /15 นาที|เหลือ .* ครั้ง/);
+  }
+  const validAfterRetries = await service.processEvent({
+    type: "message", webhookEventId: "evt-retry-valid", destination: "U_DESTINATION",
+    userId: "U_RETRY", messageText: rotated.code,
+  });
+  assert.equal(validAfterRetries.state, "COMPLETED");
+  assert.equal(validAfterRetries.projectId, 8);
 
   const follow = await service.processEvent({
     type: "follow", webhookEventId: "evt-follow", destination: "U_DESTINATION", userId: "U_NEW",
@@ -102,16 +129,40 @@ async function main(): Promise<void> {
   assert.equal(relink.action, "REPLY");
   assert.equal(relink.state, "AWAITING_CHOICE");
   assert.equal(relink.reason, "existing_user_requested_project_relink");
+  assert.equal(relink.replyText, follow.replyText);
+  assert.deepEqual(relink.quickReplies, follow.quickReplies);
   await service.processEvent({
     type: "postback", webhookEventId: "evt-relink-choice", destination: "U_DESTINATION", userId: "U_NEW",
     postbackData: "ticketx:onboarding:has_code",
   });
   const relinkCompleted = await service.processEvent({
     type: "message", webhookEventId: "evt-relink-code", destination: "U_DESTINATION", userId: "U_NEW",
-    messageText: rotated.code,
+    messageText: relinkCode.code,
   });
   assert.equal(relinkCompleted.state, "COMPLETED");
-  assert.equal(relinkCompleted.projectId, 8);
+  assert.equal(relinkCompleted.projectId, 11);
+  const memberships = await testPool.query(
+    `SELECT pp.project_id
+     FROM profile_projects pp
+     JOIN identities i ON i.profile_id = pp.profile_id
+     WHERE i.channel_ref = 'U_NEW'
+     ORDER BY pp.project_id`
+  );
+  assert.deepEqual(memberships.rows.map((row) => Number(row.project_id)), [8, 11]);
+  const openConversations = await testPool.query(
+    `SELECT c.project_id
+     FROM conversations c
+     JOIN identities i ON i.id = c.identity_id
+     WHERE i.channel_ref = 'U_NEW' AND c.status = 'open'
+     ORDER BY c.project_id`
+  );
+  assert.deepEqual(openConversations.rows.map((row) => Number(row.project_id)), [8, 11]);
+  const passAfterRelink = await service.processEvent({
+    type: "message", webhookEventId: "evt-after-relink", destination: "U_DESTINATION", userId: "U_NEW",
+    messageText: "ทดสอบหลังเปลี่ยนโปรเจกต์",
+  });
+  assert.equal(passAfterRelink.action, "PASS_TO_AI");
+  assert.equal(passAfterRelink.projectId, 11);
 
   const existingFriendFirstMessage = await service.processEvent({
     type: "message", webhookEventId: "evt-existing-friend", destination: "U_DESTINATION", userId: "U_EXISTING_FRIEND",

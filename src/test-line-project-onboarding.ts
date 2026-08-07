@@ -63,7 +63,31 @@ function testMigrationContract(): void {
   assert.doesNotMatch(migration, /TX-[A-Z0-9]{4}-[A-Z0-9]{4}/);
 }
 
+function testOnboardingVoice(): void {
+  const serviceSource = fs.readFileSync(
+    path.resolve(__dirname, "services/LineProjectOnboardingService.ts"),
+    "utf8"
+  );
+  const routeSource = fs.readFileSync(path.resolve(__dirname, "api/routes/lineWebhook.ts"), "utf8");
+  const greetingPolicy = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "../../../workflow-tooling/promptx_tools/workflow/Workflow latest (Good)/documentation/LINE-OA-Greeting-Disabled.txt"
+    ),
+    "utf8"
+  );
+
+  assert.match(serviceSource, /ส่งรหัสโปรเจกต์มาได้เลยค่ะ/);
+  assert.match(serviceSource, /พร้อมใช้งานได้เลยค่ะ/);
+  assert.doesNotMatch(serviceSource, /15 นาที|invalid_code_locked|temporarily_locked/);
+  assert.match(serviceSource, /s\.selected_project_id = c\.project_id/);
+  assert.doesNotMatch(serviceSource, /ครับ/);
+  assert.doesNotMatch(routeSource, /ครับ/);
+  assert.match(greetingPolicy, /ปิดข้อความทักทายเพื่อนใหม่/);
+}
+
 testProjectCodeFormat();
 testLineSignature();
 testMigrationContract();
+testOnboardingVoice();
 process.stdout.write("LINE project onboarding source tests passed.\n");

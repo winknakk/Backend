@@ -342,7 +342,7 @@ export class LineProjectOnboardingService {
           projectId: Number(ready.project_id),
           projectName: ready.project_name,
           conversationId: Number(ready.conversation_id),
-          replyText: `ยินดีต้อนรับกลับครับ บัญชีนี้เชื่อมกับโปรเจกต์ “${ready.project_name}” แล้ว สามารถแจ้งปัญหาหรือสอบถามข้อมูลได้เลยครับ`,
+          replyText: `กลับมาแล้วนะคะ 😊 ตอนนี้บัญชีเชื่อมกับโปรเจกต์ “${ready.project_name}” อยู่ แจ้งเรื่องที่อยากให้ช่วยมาได้เลยค่ะ`,
         };
       }
       if (input.type === "message" && !ACTIVE_ONBOARDING_STATES.has(String(session?.state || ""))) {
@@ -370,7 +370,7 @@ export class LineProjectOnboardingService {
             projectId: project.id,
             projectName: project.name,
             conversationId: provisioned.conversationId,
-            replyText: `เชื่อมบัญชีกับโปรเจกต์ “${project.name}” เรียบร้อยแล้วครับ ✅ ตอนนี้แจ้งปัญหาหรือสอบถามข้อมูลได้เลยครับ`,
+            replyText: `เชื่อมกับโปรเจกต์ “${project.name}” ให้แล้วนะคะ ✅ พร้อมใช้งานได้เลยค่ะ`,
           };
         }
       }
@@ -385,7 +385,7 @@ export class LineProjectOnboardingService {
           action: "REPLY",
           state: "AWAITING_CODE",
           reason: "customer_has_code",
-          replyText: "กรุณาพิมพ์รหัสโปรเจกต์ที่ได้รับจากผู้ดูแล เช่น TX-ABCD-2345 โดยไม่ต้องส่งรหัสผ่านหรือข้อมูลลับอื่นครับ",
+          replyText: "ส่งรหัสโปรเจกต์มาได้เลยค่ะ",
         };
       }
       if (input.postbackData === "ticketx:onboarding:no_code") {
@@ -394,7 +394,7 @@ export class LineProjectOnboardingService {
           action: "REPLY",
           state: "AWAITING_PROJECT_DETAILS",
           reason: "customer_has_no_code",
-          replyText: "ไม่เป็นไรครับ กรุณาส่งชื่อบริษัทและชื่อโปรเจกต์ที่ต้องการติดต่อ เจ้าหน้าที่จะตรวจสอบให้โดยไม่เปิดเผยข้อมูลของโปรเจกต์ก่อนยืนยันตัวตนครับ",
+          replyText: "ได้เลยค่ะ ส่งชื่อบริษัทกับชื่อโปรเจกต์มาได้เลย เดี๋ยวให้เจ้าหน้าที่ช่วยเช็กให้นะคะ",
         };
       }
       return { action: "IGNORE", state: session?.state || "UNKNOWN", reason: "unsupported_postback" };
@@ -411,16 +411,6 @@ export class LineProjectOnboardingService {
       return this.choiceDecision("first_message_requires_onboarding");
     }
 
-    if (session.locked_until && new Date(session.locked_until).getTime() > Date.now()) {
-      return {
-        action: "REPLY",
-        state: session.state,
-        reason: "temporarily_locked",
-        replyText: "มีการลองรหัสหลายครั้งเกินกำหนด กรุณารอ 15 นาที หรือเลือก “ไม่มี/ไม่ทราบรหัส” เพื่อให้เจ้าหน้าที่ช่วยตรวจสอบครับ",
-        quickReplies: [{ label: "ไม่มี/ไม่ทราบรหัส", data: "ticketx:onboarding:no_code" }],
-      };
-    }
-
     if (session.state === "AWAITING_CHOICE") {
       const possibleCode = LineProjectOnboardingService.normalizeCode(input.messageText || "");
       if (possibleCode.startsWith("TX") && possibleCode.length >= 8) {
@@ -432,7 +422,7 @@ export class LineProjectOnboardingService {
     }
 
     if (session.state === "AWAITING_CODE") {
-      return this.validateAndProvisionCode(client, orgId, input, session);
+      return this.validateAndProvisionCode(client, orgId, input);
     }
 
     if (session.state === "AWAITING_PROJECT_DETAILS") {
@@ -442,7 +432,7 @@ export class LineProjectOnboardingService {
           action: "REPLY",
           state: session.state,
           reason: "project_details_too_short",
-          replyText: "กรุณาระบุชื่อบริษัทและชื่อโปรเจกต์ให้ละเอียดขึ้นอีกเล็กน้อยครับ",
+          replyText: "ขอชื่อบริษัทกับชื่อโปรเจกต์เพิ่มอีกนิดนะคะ",
         };
       }
       await client.query(
@@ -461,7 +451,7 @@ export class LineProjectOnboardingService {
         action: "REPLY",
         state: "PENDING_HUMAN",
         reason: "manual_project_verification_requested",
-        replyText: "รับข้อมูลเรียบร้อยแล้วครับ เจ้าหน้าที่จะตรวจสอบและแจ้งผลกลับทาง LINE นี้ โดยระหว่างนี้ระบบจะยังไม่เปิดเผยข้อมูลของโปรเจกต์ใดครับ",
+        replyText: "รับข้อมูลแล้วนะคะ เดี๋ยวเจ้าหน้าที่เช็กให้ แล้วจะแจ้งกลับทาง LINE นี้ค่ะ",
       };
     }
 
@@ -470,7 +460,7 @@ export class LineProjectOnboardingService {
         action: "REPLY",
         state: session.state,
         reason: "manual_verification_pending",
-        replyText: "คำขอเชื่อมโปรเจกต์กำลังรอเจ้าหน้าที่ตรวจสอบอยู่ครับ หากมีข้อมูลเพิ่มเติมสามารถส่งไว้ได้หลังเจ้าหน้าที่ติดต่อกลับครับ",
+        replyText: "เรื่องกำลังรอเจ้าหน้าที่เช็กอยู่นะคะ ถ้ามีข้อมูลเพิ่ม รอให้เจ้าหน้าที่ติดต่อกลับแล้วส่งเพิ่มได้เลยค่ะ",
       };
     }
 
@@ -482,7 +472,7 @@ export class LineProjectOnboardingService {
       action: "REPLY",
       state: "AWAITING_CHOICE",
       reason,
-      replyText: "สวัสดีครับ 👋 ก่อนเริ่มใช้งาน ขอเชื่อมบัญชี LINE ของคุณกับโปรเจกต์ที่รับบริการครับ",
+      replyText: "สวัสดีค่ะ 👋 ยินดีต้อนรับสู่ TicketX Support ก่อนเริ่มใช้งาน ขอเชื่อมบัญชี LINE กับโปรเจกต์ของคุณก่อนนะคะ",
       quickReplies: CHOICE_REPLIES,
     };
   }
@@ -490,8 +480,7 @@ export class LineProjectOnboardingService {
   private async validateAndProvisionCode(
     client: PoolClient,
     orgId: string,
-    input: LineWebhookEventInput,
-    session: any
+    input: LineWebhookEventInput
   ): Promise<LineOnboardingDecision> {
     const normalized = LineProjectOnboardingService.normalizeCode(input.messageText || "");
     const digest = this.digestCode(normalized);
@@ -499,36 +488,36 @@ export class LineProjectOnboardingService {
       `SELECT c.id AS code_id, c.project_id, p.name AS project_name
        FROM project_join_codes c
        JOIN projects p ON p.id = c.project_id AND p.org_id = c.org_id
-       JOIN project_channels pc ON pc.project_id = p.id
        WHERE c.org_id = $1
          AND c.code_digest = $2
-         AND pc.channel_id = $3
-         AND COALESCE(pc.is_enabled, TRUE)
-         AND COALESCE(pc.active, TRUE)
          AND c.status = 'active'
          AND (c.expires_at IS NULL OR c.expires_at > NOW())
+         AND EXISTS (
+           SELECT 1
+           FROM project_channels pc
+           WHERE pc.project_id = p.id
+             AND LOWER(pc.channel_type) = 'line'
+             AND COALESCE(pc.is_enabled, TRUE)
+             AND COALESCE(pc.active, TRUE)
+         )
        LIMIT 1`,
-      [orgId, digest, input.destination]
+      [orgId, digest]
     );
 
     if (codeResult.rows.length === 0) {
-      const attempts = Number(session.attempts || 0) + 1;
-      const locked = attempts >= 3;
       await client.query(
         `UPDATE line_onboarding_sessions
-         SET attempts = $4,
-             locked_until = CASE WHEN $5 THEN NOW() + INTERVAL '15 minutes' ELSE NULL END,
+         SET attempts = 0,
+             locked_until = NULL,
              updated_at = NOW()
          WHERE org_id = $1 AND line_user_id = $2 AND destination = $3`,
-        [orgId, input.userId, input.destination, attempts, locked]
+        [orgId, input.userId, input.destination]
       );
       return {
         action: "REPLY",
         state: "AWAITING_CODE",
-        reason: locked ? "invalid_code_locked" : "invalid_code",
-        replyText: locked
-          ? "ยังยืนยันรหัสไม่ได้และมีการลองครบ 3 ครั้งแล้ว กรุณารอ 15 นาที หรือให้เจ้าหน้าที่ช่วยตรวจสอบครับ"
-          : `ยังยืนยันรหัสไม่ได้ครับ กรุณาตรวจตัวอักษรแล้วลองอีกครั้ง (เหลือ ${3 - attempts} ครั้งก่อนพักชั่วคราว)`,
+        reason: "invalid_code",
+        replyText: "รหัสนี้ยังใช้ไม่ได้ค่ะ ลองเช็กแล้วส่งใหม่อีกครั้งนะคะ",
         quickReplies: RETRY_REPLIES,
       };
     }
@@ -549,7 +538,7 @@ export class LineProjectOnboardingService {
       projectId: Number(code.project_id),
       projectName: code.project_name,
       conversationId: provisioned.conversationId,
-      replyText: `เชื่อมบัญชีกับโปรเจกต์ “${code.project_name}” เรียบร้อยแล้วครับ ✅ ตอนนี้แจ้งปัญหาหรือสอบถามข้อมูลได้เลยครับ`,
+      replyText: `เชื่อมกับโปรเจกต์ “${code.project_name}” ให้แล้วนะคะ ✅ พร้อมใช้งานได้เลยค่ะ`,
     };
   }
 
@@ -595,15 +584,30 @@ export class LineProjectOnboardingService {
        FROM identities i
        JOIN conversations c ON c.identity_id = i.id
        JOIN projects p ON p.id = c.project_id
-       JOIN project_channels pc ON pc.project_id = p.id
+       LEFT JOIN line_onboarding_sessions s
+         ON s.org_id = p.org_id
+        AND s.line_user_id = $1
+        AND s.destination = $2
+        AND s.state = 'COMPLETED'
+       LEFT JOIN project_channels pc
+         ON pc.project_id = p.id
+        AND pc.channel_id = $2
+        AND LOWER(pc.channel_type) = 'line'
+        AND COALESCE(pc.is_enabled, TRUE)
+        AND COALESCE(pc.active, TRUE)
        WHERE LOWER(i.channel) = 'line'
          AND i.channel_ref = $1
-         AND pc.channel_id = $2
-         AND COALESCE(pc.is_enabled, TRUE)
-         AND COALESCE(pc.active, TRUE)
+         AND (
+           s.selected_project_id = c.project_id
+           OR (s.selected_project_id IS NULL AND pc.project_id IS NOT NULL)
+         )
          AND c.status = 'open'
          AND c.deleted_at IS NULL
-       ORDER BY c.updated_at DESC NULLS LAST, c.created_at DESC, c.id DESC
+       ORDER BY
+         CASE WHEN s.selected_project_id = c.project_id THEN 0 ELSE 1 END,
+         c.updated_at DESC NULLS LAST,
+         c.created_at DESC,
+         c.id DESC
        LIMIT 1`,
       [userId, destination]
     );
@@ -633,8 +637,8 @@ export class LineProjectOnboardingService {
        VALUES ($1, $2, $3, $4, $5::jsonb)
        ON CONFLICT (org_id, line_user_id, destination) DO UPDATE SET
          state = EXCLUDED.state,
-         attempts = CASE WHEN EXCLUDED.state = 'AWAITING_CODE' THEN line_onboarding_sessions.attempts ELSE 0 END,
-         locked_until = CASE WHEN EXCLUDED.state = 'AWAITING_CODE' THEN line_onboarding_sessions.locked_until ELSE NULL END,
+         attempts = 0,
+         locked_until = NULL,
          metadata = line_onboarding_sessions.metadata || EXCLUDED.metadata,
          expires_at = NOW() + INTERVAL '24 hours',
          updated_at = NOW()`,
