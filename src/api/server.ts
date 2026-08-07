@@ -1464,27 +1464,52 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
 
   const senderId = payload.senderId || payload.sender_ref || payload.customer_ref;
   const channel = payload.channel || "LINE";
-  const messageText = payload.messageText || payload.message || "";
+  const rawText = payload.messageText 
+    || payload.message_text 
+    || payload.message 
+    || payload.text 
+    || payload.event?.message?.text 
+    || payload.message?.text 
+    || payload.body?.message?.text 
+    || payload.body?.text 
+    || body.messageText 
+    || body.message_text 
+    || body.message?.text 
+    || body.text 
+    || body.event?.message?.text 
+    || payload.postbackData 
+    || payload.postback_data 
+    || payload.postback?.data 
+    || payload.event?.postback?.data 
+    || body.postbackData 
+    || body.postback?.data 
+    || "";
+  const messageText = typeof rawText === "string" ? rawText : (typeof rawText === "object" ? (rawText.text || "") : String(rawText || ""));
   const isMentioned = payload.isMentioned === true || payload.isMentioned === "true";
   
   // Unify all LINE Gateway / Activepieces / PromptX field aliases (bulletproof deep lookup)
-  const imageId = payload.line_image_id 
+  const eventObj = payload.event || (Array.isArray(payload.events) ? payload.events[0] : null) || body.event || (Array.isArray(body.events) ? body.events[0] : null) || null;
+  const msgObj = eventObj?.message || payload.message || body.message || null;
+
+  const rawMessageType = payload.messageType 
+    || payload.message_type 
+    || msgObj?.type 
+    || eventObj?.type 
+    || payload.type 
+    || body.messageType 
+    || body.message_type;
+
+  const explicitImageId = payload.line_image_id 
     || payload.lineImageId 
     || payload.imageId 
     || payload.line_image 
-    || payload.message_id 
-    || payload.external_id 
-    || payload.event?.message?.id 
-    || payload.body?.line_image_id
-    || payload.body?.message?.id
-    || body.line_image_id
-    || body.message_id
-    || body.external_id
-    || body.event?.message?.id
-    || null;
+    || body.line_image_id 
+    || body.imageId;
 
-  const rawMessageType = payload.messageType || payload.message_type || body.messageType || body.message_type;
-  const messageType = rawMessageType || (imageId ? "image" : "text");
+  const isImageMessage = rawMessageType === "image" || msgObj?.type === "image" || !!explicitImageId;
+  const messageType = isImageMessage ? "image" : (rawMessageType === "sticker" ? "sticker" : "text");
+
+  const imageId = explicitImageId || (isImageMessage ? (msgObj?.id || payload.externalId || payload.external_id || body.external_id || null) : null);
 
   const rawQuoteToken = payload.quote_token 
     || payload.quoteToken 

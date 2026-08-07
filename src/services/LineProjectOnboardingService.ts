@@ -328,9 +328,9 @@ export class LineProjectOnboardingService {
     const normalizedMessage = String(input.messageText || "").trim().toLowerCase();
     const relinkRequested = input.type === "message" && PROJECT_RELINK_COMMANDS.has(normalizedMessage);
 
-    if (ready && relinkRequested) {
+    if (relinkRequested) {
       await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
-      return this.choiceDecision("existing_user_requested_project_relink");
+      return this.choiceDecision(ready ? "existing_user_requested_project_relink" : "unlinked_user_requested_project_relink");
     }
 
     if (ready) {
