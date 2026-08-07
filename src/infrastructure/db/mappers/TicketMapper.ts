@@ -31,6 +31,7 @@ export class TicketMapper {
       searchableText: raw.searchable_text || undefined,
       enrichmentState: raw.enrichment_state || "PENDING",
       createdByTypes: raw.created_by_type || "CUSTOMER",
+      createdByType: raw.created_by_type || "CUSTOMER",
       createdByName: raw.created_by_name || undefined,
       cancellationReason: raw.cancellation_reason || undefined,
     });
@@ -39,6 +40,7 @@ export class TicketMapper {
   static toPersistence(domain: Ticket): any {
     return {
       id: domain.id,
+      ticket_number: domain.ticketId,
       ticket_id: domain.ticketId,
       conversation_id: domain.conversationId,
       project_id: domain.projectId || null,

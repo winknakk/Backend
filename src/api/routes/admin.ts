@@ -1024,6 +1024,9 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       }
 
       const ticketService = new TicketService(deps.dbAdapter);
+      const createdByType = body.created_by_type || body.createdByType || "HUMAN_AGENT";
+      const createdByName = body.created_by_name || body.createdByName || body.operator_name || "Super Admin Overseer";
+
       const result = await ticketService.createTicket({
         conversationId: params.id,
         subject: body.subject,
@@ -1031,7 +1034,26 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
         severity: body.severity,
         priority: body.priority,
         projectId: body.projectId || "1",
+        createdByType,
+        createdByName,
       });
+
+      if (!result.success) {
+        return reply.code(500).send(result);
+      }
+
+      if (result.success && result.data && result.data.id) {
+        try {
+          const planeService = new PlaneService(deps.dbAdapter);
+          const planeResult = await planeService.promoteTicketToPlane(result.data.id);
+          if (planeResult && planeResult.plane_issue_id) {
+            result.data.planeIssueId = planeResult.plane_issue_id;
+            result.data.plane_issue_id = planeResult.plane_issue_id;
+          }
+        } catch (planeErr: any) {
+          fastify.log.warn({ err: planeErr.message }, "[TicketCreation] Auto-promote to Plane failed gracefully");
+        }
+      }
 
       return reply.code(200).send(result);
     });

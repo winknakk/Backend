@@ -43,8 +43,7 @@ export class TicketService {
         }
       }
 
-      // Only an active row can satisfy idempotency. A missing, deleted, or terminal
-      // ticket represents a completed incident and must not block a new ticket.
+      // Only an active row can satisfy idempotency.
       const existing = await this.ticketRepo.findActiveByConversationAndSubject(conversationIdNum, input.subject);
       if (existing) {
         return {
@@ -61,9 +60,11 @@ export class TicketService {
             status: existing.status as any,
             startDate: existing.createdAt.toISOString(),
             dueDate: existing.dueDate?.toISOString() || null,
-            createdBy: "AI Support Agent",
+            createdBy: existing.createdByName || existing.createdByType || "AI Support Agent",
             enrichmentState: existing.enrichmentState,
-            aiConfidenceMetrics: existing.aiConfidenceMetrics
+            aiConfidenceMetrics: existing.aiConfidenceMetrics,
+            created_by_type: existing.createdByType,
+            created_by_name: existing.createdByName,
           },
           error: null,
           source: "postgres_idempotent",
@@ -93,6 +94,9 @@ export class TicketService {
       const randomSuffix = Math.floor(10000 + Math.random() * 90000);
       const ticketNumber = `TCK-${currentYear}-${randomSuffix}`;
 
+      const createdByType = input.createdByType || "HUMAN_AGENT";
+      const createdByName = input.createdByName || undefined;
+
       const ticket = Ticket.create({
         ticketId: ticketNumber,
         conversationId: conversationIdNum,
@@ -104,7 +108,9 @@ export class TicketService {
         severity: input.severity,
         dueDate,
         createdAt: startDate,
-        createdVia: "ai",
+        createdVia: createdByType === "HUMAN_AGENT" || createdByType === "AGENT" ? "human" : "ai",
+        createdByType,
+        createdByName,
       });
 
       const eventPublisher = new BullMQEventPublisher();
@@ -119,9 +125,9 @@ export class TicketService {
           const outboxPayload = { ticketId: ticketNumber };
           const client = this.txManager.getClient();
           await client.query(
-            `INSERT INTO outbox_events (event_type, payload, status, attempts)
-             VALUES ($1, $2, $3, $4)`,
-            ["TicketCreated", JSON.stringify(outboxPayload), "pending", 0]
+            `INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload, status, attempts)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            ["Ticket", ticket.id.toString(), "TicketCreated", JSON.stringify(outboxPayload), "pending", 0]
           );
         },
         async (events) => {
@@ -143,7 +149,9 @@ export class TicketService {
         processingStatus: "PENDING_ENRICHMENT",
         startDate: ticket.createdAt.toISOString(),
         dueDate: dueDate.toISOString(),
-        createdBy: "AI Support Agent",
+        createdBy: createdByName || createdByType,
+        created_by_type: createdByType,
+        created_by_name: createdByName || null,
         enrichmentState: ticket.enrichmentState,
         aiConfidenceMetrics: ticket.aiConfidenceMetrics
       };

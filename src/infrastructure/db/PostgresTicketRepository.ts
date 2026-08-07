@@ -85,13 +85,13 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
       // Insert new ticket
       const { rows } = await this.db.query(
         `INSERT INTO tickets (
-          ticket_id, conversation_id, project_id, subject, summary, status, priority, severity, 
+          ticket_number, ticket_id, conversation_id, project_id, subject, summary, status, priority, severity, 
           assigned_pm, created_via, plane_issue_id, due_date, created_at,
           title, original_problem_statement, running_summary, last_ai_summary, 
           duplicate_of_ticket_id, duplicate_score, duplicate_reason, ai_confidence_metrics, searchable_text,
           enrichment_state, created_by_type, created_by_name, cancellation_reason
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, 
+          $1, $1, $2, $3, $4, $5, $6, $7, $8, 
           $9, $10, $11, $12, COALESCE($13, NOW()),
           $14, $15, $16, $17, 
           $18, $19, $20, $21, $22,
@@ -131,6 +131,7 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
       // Update existing ticket
       await this.db.query(
         `UPDATE tickets SET
+          ticket_number = $1,
           ticket_id = $1,
           conversation_id = $2,
           project_id = $3,

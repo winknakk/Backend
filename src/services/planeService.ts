@@ -88,10 +88,27 @@ export function buildPlaneWorkItemPayload(
   const lastAiSummary = String(ticket.last_ai_summary || ticket.lastAiSummary || "").trim();
   const httpStatus = `${subject} ${summary}`.match(/\b[1-5]\d{2}\b/)?.[0];
 
+  const rawCreatorType = String(
+    ticket.created_by_type || ticket.createdByType || (ticket as any).createdBy || "CUSTOMER"
+  ).toUpperCase();
+  const creatorName = String(ticket.created_by_name || ticket.createdByName || "").trim();
+
+  let creatorLabel = "👤 Customer";
+  if (rawCreatorType.includes("AI")) {
+    creatorLabel = `🤖 AI Bot${creatorName ? ` (${creatorName})` : ""}`;
+  } else if (rawCreatorType.includes("HUMAN") || rawCreatorType.includes("AGENT")) {
+    creatorLabel = `🎧 Human Agent${creatorName ? ` (${creatorName})` : ""}`;
+  } else if (rawCreatorType.includes("PLANE")) {
+    creatorLabel = `✈️ Plane.io User${creatorName ? ` (${creatorName})` : ""}`;
+  } else if (creatorName) {
+    creatorLabel = `👤 Customer (${creatorName})`;
+  }
+
   const metadata = [
     ["TicketX ID", ticketNumber],
     ["Conversation", conversationId ? `#${conversationId}` : ""],
     ["Source", source],
+    ["Creator", creatorLabel],
     ["Customer / Company", companyName === "Unknown" ? "" : companyName],
     ["Severity", severity],
     ["Priority", String(ticket.priority || priority)],
@@ -489,12 +506,44 @@ export class PlaneService {
     let planeIssueId = `mock-issue-${randomUUID()}`;
     let webhookTriggered = false;
 
-    // 2. Trigger Activepieces webhook if configured
+    const useDirectPlaneApi =
+      config.PLANE_API_KEY &&
+      config.PLANE_API_KEY !== "plane_mock_key" &&
+      config.PLANE_PROJECT_ID &&
+      config.PLANE_PROJECT_ID !== "proj_id";
+
+    if (useDirectPlaneApi) {
+      try {
+        console.log(`[PlaneService] Promoting ticket ${ticketId} directly to Plane API...`);
+        const url = `${this.getProjectBaseUrl()}/work-items/`;
+        const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
+        const res = await this.httpClient.post(
+          url,
+          payload,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "X-API-Key": config.PLANE_API_KEY,
+            },
+            timeout: 8000,
+          }
+        );
+        if (res.data && res.data.id) {
+          planeIssueId = res.data.id;
+          webhookTriggered = true;
+          console.log(`[PlaneService] Direct Plane issue created successfully with ID: ${planeIssueId}`);
+        }
+      } catch (err: any) {
+        const errorMsg = err.response?.data?.message || err.message;
+        console.error(`[PlaneService] Direct Plane API promotion failed:`, errorMsg);
+      }
+    }
+
     const webhookUrl = config.ACTIVEPIECES_WORKFLOW_PROVIDER === "postgres_v2"
       ? config.ACTIVEPIECES_PROMOTE_TICKET_WEBHOOK_URL_V2
       : config.ACTIVEPIECES_PROMOTE_TICKET_WEBHOOK_URL;
 
-    if (webhookUrl) {
+    if (!webhookTriggered && webhookUrl) {
       try {
         console.log(`[PlaneService] Triggering Activepieces Promote webhook at ${webhookUrl}...`);
         const tenantOrgId = (ticket as any)?.org_id || (ticket as any)?.orgId || "org_default";
@@ -521,45 +570,8 @@ export class PlaneService {
       }
     }
 
-    // 3. Fallback to direct Plane API call if webhook was not triggered/configured
-    if (!webhookTriggered) {
-      const useMockMode =
-        !config.PLANE_API_KEY ||
-        config.PLANE_API_KEY === "plane_mock_key" ||
-        !config.PLANE_PROJECT_ID ||
-        config.PLANE_PROJECT_ID === "proj_id";
-
-      if (!useMockMode) {
-        try {
-          console.log(`[PlaneService] Promoting ticket ${ticketId} to Plane API...`);
-          const url = `${this.getProjectBaseUrl()}/work-items/`;
-          const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
-          const res = await this.httpClient.post(
-            url,
-            payload,
-            {
-              headers: {
-                "Content-Type": "application/json",
-                "X-API-Key": config.PLANE_API_KEY,
-              },
-              timeout: 5000,
-            }
-          );
-          if (res.data && res.data.id) {
-            planeIssueId = res.data.id;
-            console.log(`[PlaneService] Plane issue created successfully with ID: ${planeIssueId}`);
-          }
-        } catch (err: any) {
-          const errorMsg = err.response?.data?.message || err.message;
-          console.error(`[PlaneService] Plane API promotion failed, falling back to mock mode:`, errorMsg);
-        }
-      } else {
-        console.log(`[PlaneService] Plane credentials are not configured or set to mock keys. Running in Mock Mode.`);
-      }
-
-      // Update plane_issue_id and status in database directly
-      await this.dbAdapter.updateTicketPlaneIssue(ticketId, planeIssueId);
-    }
+    // Update plane_issue_id and status in database directly
+    await this.dbAdapter.updateTicketPlaneIssue(ticketId, planeIssueId);
 
     return {
       success: true,

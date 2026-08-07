@@ -51,6 +51,8 @@ export const TicketInputSchema = z.object({
   severity: SeveritySchema,
   priority: PrioritySchema,
   projectId: z.string().min(1, "Project ID is required"),
+  createdByType: z.string().optional(),
+  createdByName: z.string().optional(),
 });
 export type TicketInput = z.infer<typeof TicketInputSchema>;
 
