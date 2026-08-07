@@ -251,7 +251,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     const mediaStorageService = getMediaStorageService(req);
     const hasLocalFile = storageKey ? await mediaStorageService.exists(storageKey) : false;
     const freshFileUrl = hasLocalFile
-      ? await mediaStorageService.generatePresignedUrl(storageKey)
+      ? await mediaStorageService.generatePresignedUrl(storageKey, 86400)
       : att.file_url;
 
     return {
@@ -279,9 +279,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     try {
       const messages = await humanReplyService.getMessages(params.id);
 
-      // Import media service for fresh URL generation
-      const { S3MediaStorageService } = await import("../../media/services/S3MediaStorageService");
-      const mediaService = new S3MediaStorageService({});
+      // Use request-aware media service so publicCdnBaseUrl matches the actual host
+      const mediaService = getMediaStorageService(request);
 
       const hydratedMessages = await Promise.all(messages.map(async (m: any) => {
         const msgId = m.id || m.Id;
@@ -303,7 +302,7 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
             // If storage_key exists, generate fresh presigned URL
             if (att.storage_key) {
               try {
-                const freshUrl = await mediaService.generatePresignedUrl(att.storage_key, 3600);
+                const freshUrl = await mediaService.generatePresignedUrl(att.storage_key, 86400);
                 fileUrl = freshUrl;
                 thumbnailUrl = freshUrl;
               } catch (e) {

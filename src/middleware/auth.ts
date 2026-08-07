@@ -15,12 +15,13 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply): Pr
     return;
   }
 
-  // Skip auth for health check and webhook endpoints
+  // Skip auth for health check, webhook, and public media endpoints
   if (
     request.url === "/health" ||
     request.url === "/webhook/message" ||
     request.url.startsWith("/api/v1/webchat") ||
-    request.url.startsWith("/api/v1/webhooks")
+    request.url.startsWith("/api/v1/webhooks") ||
+    request.url.startsWith("/api/v1/media/")
   ) {
     return;
   }
