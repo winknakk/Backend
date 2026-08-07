@@ -1020,6 +1020,7 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
   const rawReason = payload.cancellation_reason || payload.cancellationReason || payload.reason || payload.resolutionReason || payload.reasonDetail;
   const ticketId = payload.ticketId || payload.ticket_id || payload.id;
+  const orgId = request.headers["x-org-id"] || payload.org_id || payload.orgId;
 
   const parseResult = CloseTicketInputSchema.safeParse({
     ticketId: String(ticketId || ""),
@@ -1037,41 +1038,59 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const tool = toolRegistry.getLocalTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
+
+  const client = await pool.connect();
   try {
+    await client.query("BEGIN");
+
     const result = await tool.execute({ ...payload, cancellation_reason: validatedData.cancellation_reason }, context);
 
-    // Save cancellation reason to database
-    await pool.query(
-      `UPDATE tickets SET cancellation_reason = $1, status = 'cancelled', updated_at = NOW() WHERE ticket_number = $2 OR id = $3`,
-      [validatedData.cancellation_reason, validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0]
+    // Save cancellation reason and update status within transaction
+    const updateRes = await client.query(
+      `UPDATE tickets 
+       SET cancellation_reason = $1, status = 'cancelled', updated_at = NOW() 
+       WHERE (ticket_number = $2 OR id = $3) ${orgId ? "AND (org_id = $4 OR org_id IS NULL)" : ""}
+       RETURNING id, ticket_number, org_id`,
+      orgId 
+        ? [validatedData.cancellation_reason, validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0, String(orgId)]
+        : [validatedData.cancellation_reason, validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0]
     );
 
-    // Audit logging in admin_audit_logs
-    try {
-      await pool.query(
-        `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())`,
-        [
-          "TICKET_CLOSED",
-          "Ticket",
-          validatedData.ticketId,
-          "system",
-          JSON.stringify({ ticketId: validatedData.ticketId, cancellation_reason: validatedData.cancellation_reason, timestamp: new Date().toISOString() })
-        ]
-      );
-    } catch (auditErr: any) {
-      serverLogger.warn({ error: auditErr.message }, "Audit log creation failed for ticket close");
+    if (updateRes.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "Not Found", message: `Ticket ${validatedData.ticketId} not found or tenant access denied` });
     }
 
+    const closedTicket = updateRes.rows[0];
+
+    // Atomic Audit logging in admin_audit_logs inside transaction
+    await client.query(
+      `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [
+        "TICKET_CLOSED",
+        "Ticket",
+        String(closedTicket.id),
+        "system",
+        JSON.stringify({ ticketId: closedTicket.ticket_number || closedTicket.id, cancellation_reason: validatedData.cancellation_reason, timestamp: new Date().toISOString() })
+      ]
+    );
+
+    await client.query("COMMIT");
     return reply.code(200).send(result);
   } catch (err: any) {
-    return reply.code(500).send({ error: err.message });
+    await client.query("ROLLBACK");
+    serverLogger.error({ error: err.message, ticketId: validatedData.ticketId }, "Failed to close ticket atomically");
+    return reply.code(500).send({ error: "Internal Server Error", message: err.message });
+  } finally {
+    client.release();
   }
 });
 
 fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   const params = request.params as any;
   const ticketIdStr = String(params.id || "");
+  const orgId = request.headers["x-org-id"];
 
   const parseResult = RestoreTicketInputSchema.safeParse({ ticketId: ticketIdStr });
   if (!parseResult.success) {
@@ -1082,41 +1101,48 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   }
 
   const isNumeric = /^\d+$/.test(ticketIdStr);
+  const client = await pool.connect();
 
   try {
+    await client.query("BEGIN");
+
     const query = isNumeric
-      ? `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE id = $1 RETURNING *`
-      : `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE ticket_number = $1 RETURNING *`;
-    const { rows } = await pool.query(query, [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr]);
+      ? `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE id = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`
+      : `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE ticket_number = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`;
+    
+    const queryArgs = orgId
+      ? [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr, String(orgId)]
+      : [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr];
+
+    const { rows } = await client.query(query, queryArgs);
 
     if (rows.length === 0) {
-      return reply.code(404).send({ error: "Not Found", message: `Ticket ${ticketIdStr} not found` });
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "Not Found", message: `Ticket ${ticketIdStr} not found or tenant access denied` });
     }
 
     const ticket = rows[0];
 
-    // Log ticket event
-    await pool.query(
+    // Log ticket event inside transaction
+    await client.query(
       `INSERT INTO ticket_events (ticket_id, event_type, payload) VALUES ($1, $2, $3)`,
       [ticket.id, "RESTORED", JSON.stringify({ restoredAt: new Date().toISOString(), restoredBy: "admin" })]
     );
 
-    // Audit logging in admin_audit_logs
-    try {
-      await pool.query(
-        `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())`,
-        [
-          "TICKET_RESTORED",
-          "Ticket",
-          String(ticket.id),
-          "system",
-          JSON.stringify({ ticketId: ticket.ticket_number || ticket.id, restoredAt: new Date().toISOString() })
-        ]
-      );
-    } catch (auditErr: any) {
-      serverLogger.warn({ error: auditErr.message }, "Audit log creation failed for ticket restore");
-    }
+    // Atomic audit logging in admin_audit_logs inside transaction
+    await client.query(
+      `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [
+        "TICKET_RESTORED",
+        "Ticket",
+        String(ticket.id),
+        "system",
+        JSON.stringify({ ticketId: ticket.ticket_number || ticket.id, restoredAt: new Date().toISOString() })
+      ]
+    );
+
+    await client.query("COMMIT");
 
     return reply.code(200).send({
       success: true,
@@ -1131,7 +1157,11 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
       },
     });
   } catch (err: any) {
-    return reply.code(500).send({ error: "Failed to restore ticket", message: err.message });
+    await client.query("ROLLBACK");
+    serverLogger.error({ error: err.message, ticketId: ticketIdStr }, "Failed to restore ticket atomically");
+    return reply.code(500).send({ error: "Internal Server Error", message: err.message });
+  } finally {
+    client.release();
   }
 });
 
