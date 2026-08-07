@@ -44,6 +44,12 @@ export interface TicketProps {
   };
   searchableText?: string;
   enrichmentState?: EnrichmentState;
+
+  // Creator Attribution & Cancellation Safeguards
+  createdByType?: string;
+  createdByTypes?: string;
+  createdByName?: string;
+  cancellationReason?: string;
 }
 
 export class Ticket extends BaseAggregate<number> {
@@ -76,6 +82,11 @@ export class Ticket extends BaseAggregate<number> {
   };
   private _searchableText?: string;
   private _enrichmentState: EnrichmentState;
+
+  // Creator Attribution & Cancellation Safeguards
+  private _createdByType: string;
+  private _createdByName?: string;
+  private _cancellationReason?: string;
 
   constructor(props: TicketProps) {
     super(props.id);
@@ -113,6 +124,9 @@ export class Ticket extends BaseAggregate<number> {
     };
     this._searchableText = props.searchableText;
     this._enrichmentState = this.normalizeEnrichmentState(props.enrichmentState);
+    this._createdByType = props.createdByType || props.createdByTypes || "CUSTOMER";
+    this._createdByName = props.createdByName;
+    this._cancellationReason = props.cancellationReason;
   }
 
   // Getters
@@ -137,6 +151,9 @@ export class Ticket extends BaseAggregate<number> {
   get aiConfidenceMetrics() { return this._aiConfidenceMetrics; }
   get searchableText(): string | undefined { return this._searchableText; }
   get enrichmentState(): EnrichmentState { return this._enrichmentState; }
+  get createdByType(): string { return this._createdByType; }
+  get createdByName(): string | undefined { return this._createdByName; }
+  get cancellationReason(): string | undefined { return this._cancellationReason; }
 
   // Static Factory Method
   public static create(props: Omit<TicketProps, "id"> & { id?: number }): Ticket {
@@ -261,6 +278,21 @@ export class Ticket extends BaseAggregate<number> {
       duplicate: confidence,
     };
     this.recalculateEnrichmentState();
+  }
+
+  public cancelTicket(reason: string): void {
+    if (!reason || reason.trim().length < 10) {
+      throw new Error("A valid cancellation reason of at least 10 characters is required.");
+    }
+    this._status = "cancelled";
+    this._cancellationReason = reason.trim();
+    this.addDomainEvent(new TicketStatusChangedEvent(this.id!, this.ticketId, "cancelled"));
+  }
+
+  public restore(): void {
+    this._status = "open";
+    this._cancellationReason = undefined;
+    this.addDomainEvent(new TicketStatusChangedEvent(this.id!, this.ticketId, "open"));
   }
 
   public merge(primaryTicketId: number): void {

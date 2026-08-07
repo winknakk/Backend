@@ -89,13 +89,13 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           assigned_pm, created_via, plane_issue_id, due_date, created_at,
           title, original_problem_statement, running_summary, last_ai_summary, 
           duplicate_of_ticket_id, duplicate_score, duplicate_reason, ai_confidence_metrics, searchable_text,
-          enrichment_state
+          enrichment_state, created_by_type, created_by_name, cancellation_reason
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, 
           $9, $10, $11, $12, COALESCE($13, NOW()),
           $14, $15, $16, $17, 
           $18, $19, $20, $21, $22,
-          $23
+          $23, $24, $25, $26
         ) RETURNING id`,
         [
           data.ticket_id,
@@ -120,7 +120,10 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           data.duplicate_reason,
           data.ai_confidence_metrics,
           data.searchable_text,
-          data.enrichment_state
+          data.enrichment_state,
+          data.created_by_type || 'CUSTOMER',
+          data.created_by_name || null,
+          data.cancellation_reason || null
         ]
       );
       ticket.assignDatabaseId(rows[0].id);
@@ -149,8 +152,11 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           duplicate_reason = $19,
           ai_confidence_metrics = $20,
           searchable_text = $21,
-          enrichment_state = $22
-        WHERE id = $23`,
+          enrichment_state = $22,
+          created_by_type = COALESCE($23, created_by_type),
+          created_by_name = COALESCE($24, created_by_name),
+          cancellation_reason = COALESCE($25, cancellation_reason)
+        WHERE id = $26`,
         [
           data.ticket_id,
           data.conversation_id,
@@ -174,11 +180,22 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
           data.ai_confidence_metrics,
           data.searchable_text,
           data.enrichment_state,
+          data.created_by_type || null,
+          data.created_by_name || null,
+          data.cancellation_reason || null,
           ticket.id
         ]
       );
     }
 
     return ticket;
+  }
+
+  async restoreTicket(id: number): Promise<Ticket | null> {
+    const ticket = await this.findById(id);
+    if (!ticket) return null;
+
+    ticket.restore();
+    return await this.save(ticket);
   }
 }

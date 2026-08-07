@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import axios from "axios";
 import { DatabaseAdapter } from "../adapters/types";
+import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 
@@ -186,6 +187,25 @@ export class PlaneWebhookService {
     }
 
     const syncResult = await this.dbAdapter.syncTicketFromPlane(planeIssueId, { status, priority });
+
+    // Update Plane creator attribution if present
+    const creatorName = (data as any)?.created_by_detail?.display_name ||
+      (data as any)?.created_by_detail?.first_name ||
+      (typeof (data as any)?.created_by === "object" ? ((data as any)?.created_by?.first_name || (data as any)?.created_by?.display_name) : (data as any)?.created_by) ||
+      "Plane.io User";
+    
+    try {
+      await pool.query(
+        `UPDATE tickets 
+         SET created_by_type = 'PLANE_IO', 
+             created_by_name = COALESCE($1, created_by_name, 'Plane.io User') 
+         WHERE plane_issue_id = $2 AND (created_by_type IS NULL OR created_by_type = 'CUSTOMER')`,
+        [creatorName, planeIssueId]
+      );
+    } catch (dbErr: any) {
+      logger.warn({ error: dbErr.message, planeIssueId }, "Could not update plane creator attribution");
+    }
+
     if (syncResult.matched && syncResult.statusChanged && status === "Done") {
       this.doneNotificationDispatcher(planeIssueId).catch((err) => {
         logger.error({ error: err.message, planeIssueId }, "Failed to dispatch customer Done notification");
