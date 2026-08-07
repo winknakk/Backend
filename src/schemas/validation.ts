@@ -63,6 +63,17 @@ export const TicketSchema = TicketInputSchema.extend({
 });
 export type Ticket = z.infer<typeof TicketSchema>;
 
+export const CloseTicketInputSchema = z.object({
+  ticketId: z.string().min(1, "Ticket ID is required"),
+  cancellation_reason: z.string().min(10, "A valid cancellation_reason (at least 10 characters) is required"),
+});
+export type CloseTicketInput = z.infer<typeof CloseTicketInputSchema>;
+
+export const RestoreTicketInputSchema = z.object({
+  ticketId: z.string().min(1, "Ticket ID is required"),
+});
+export type RestoreTicketInput = z.infer<typeof RestoreTicketInputSchema>;
+
 // --- Policy & Audit payloads ---
 export const PolicyRuleSchema = z.object({
   ruleId: z.string(),
