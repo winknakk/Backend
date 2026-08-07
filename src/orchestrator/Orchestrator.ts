@@ -52,9 +52,9 @@ export class Orchestrator {
       const sessionContext = await this.memoryService.loadSessionContext(message.senderId, message.channel);
       const conversationId = sessionContext.conversationId;
 
-      // LINE / First-Contact Identity Verification Check
+      // Multi-Channel First-Contact Identity Verification Check (LINE, WebChat, Widget, Email, WhatsApp)
       const dbAdapter = (this.memoryService as any).dbAdapter;
-      if (dbAdapter && (message.channel === "line" || message.channel === "line_group")) {
+      if (dbAdapter) {
         try {
           const identRes = await pool.query(
             `SELECT id, verification_status, is_verified, profile_id FROM identities WHERE channel_ref = $1 LIMIT 1`,
@@ -67,11 +67,17 @@ export class Orchestrator {
 
             if (isGuest) {
               const inputText = (message.text || "").trim();
+              const metaProjectCode = (
+                (message as any).metadata?.projectCode ||
+                (message as any).metadata?.slug ||
+                ""
+              ).trim();
+              const candidateCode = metaProjectCode || inputText;
 
-              // Check if input matches a project code or project name (SECURITY: DO NOT match raw integer ID)
+              // Check if input or channel metadata matches a project code or project name (SECURITY: DO NOT match raw integer ID)
               const projRes = await pool.query(
-                `SELECT id, name FROM projects WHERE LOWER(name) = LOWER($1) OR LOWER(slug) = LOWER($1) LIMIT 1`,
-                [inputText]
+                `SELECT id, name FROM projects WHERE (LOWER(name) = LOWER($1) OR LOWER(slug) = LOWER($1) OR LOWER(code) = LOWER($1)) AND is_active = TRUE LIMIT 1`,
+                [candidateCode]
               );
 
               if (projRes.rows.length > 0) {
@@ -103,7 +109,7 @@ export class Orchestrator {
                   sentAt: new Date().toISOString(),
                 };
               } else {
-                // Intercept guest message and send challenge prompt
+                // Intercept guest message and send challenge prompt tailored for the channel
                 await this.memoryService.appendConversationLog(
                   conversationId,
                   "customer",
@@ -111,7 +117,10 @@ export class Orchestrator {
                   message.externalId
                 );
 
-                const challengeText = `👋 สวัสดีค่ะ ยินดีต้อนรับสู่ระบบบริการซัพพอร์ตอัตโนมัติ\n\nกรุณาพิมพ์ **รหัสโครงการ (Project Code)** หรือ **ชื่อโปรเจกต์** ของท่าน เพื่อยืนยันตัวตนก่อนเริ่มต้นใช้งานบริการค่ะ`;
+                const isEmailChannel = String(message.channel).toLowerCase() === "email";
+                const challengeText = isEmailChannel
+                  ? `[TicketX System Notification]\n\nสวัสดีค่ะ ยินดีต้อนรับสู่ระบบบริการซัพพอร์ต\n\nกรุณาตอบกลับอีเมลฉบับนี้โดยระบุ **รหัสโครงการ (Project Code)** หรือ **ชื่อโปรเจกต์** ของท่าน เพื่อยืนยันตัวตนก่อนเริ่มต้นเปิดตั๋วงานค่ะ`
+                  : `👋 สวัสดีค่ะ ยินดีต้อนรับสู่ระบบบริการซัพพอร์ตอัตโนมัติ\n\nกรุณาพิมพ์ **รหัสโครงการ (Project Code)** หรือ **ชื่อโปรเจกต์** ของท่าน เพื่อยืนยันตัวตนก่อนเริ่มต้นใช้งานบริการค่ะ`;
 
                 await this.memoryService.appendConversationLog(conversationId, "ai", challengeText);
 
