@@ -13,9 +13,10 @@
   "inputSchema": {
     "type": "object",
     "properties": {
-      "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID to close" }
+      "ticketId": { "type": "string", "description": "The ticket readable ID or database serial ID to close" },
+      "cancellation_reason": { "type": "string", "description": "Mandatory reason for closing or cancelling the ticket (minimum 10 characters)" }
     },
-    "required": ["ticketId"]
+    "required": ["ticketId", "cancellation_reason"]
   },
   "outputSchema": {
     "type": "object",
