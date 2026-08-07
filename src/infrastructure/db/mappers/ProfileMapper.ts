@@ -13,9 +13,11 @@ export class ProfileMapper {
   }
 
   static toPersistence(domain: Profile): any {
+    const numericId = parseInt(domain.id, 10);
+    const numericCompanyId = domain.companyId ? parseInt(domain.companyId, 10) : null;
     return {
-      id: parseInt(domain.id),
-      company_id: domain.companyId ? parseInt(domain.companyId) : null,
+      id: !isNaN(numericId) ? numericId : 1,
+      company_id: (numericCompanyId && !isNaN(numericCompanyId)) ? numericCompanyId : null,
       name: domain.name || null,
       email: domain.email || null,
       phone: domain.phone || null,

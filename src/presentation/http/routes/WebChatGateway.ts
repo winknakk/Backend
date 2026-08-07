@@ -140,10 +140,11 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         identity = await identityRepo.findByChannelAndRef("WebChat", channelRef);
 
         if (!identity) {
+          const safeCompanyId = (companyId && !isNaN(parseInt(companyId, 10))) ? parseInt(companyId, 10) : 1;
           // Check if customer profile exists by name/company
           const profileCheck = await pool.query(
             "SELECT id FROM profiles WHERE name = $1 AND company_id = $2 LIMIT 1",
-            [customerName, parseInt(companyId)]
+            [customerName, safeCompanyId]
           );
 
           let profileId = "";
