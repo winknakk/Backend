@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F9FB"/>
+  <rect x="34" y="34" width="956" height="956" rx="44" fill="#FFFFFF" stroke="#E1E4EA" stroke-width="4"/>
+  <rect x="76" y="76" width="258" height="60" rx="18" fill="#E9ECF8"/>
+  <text x="205" y="117" text-anchor="middle" fill="#4B5FC7" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="28" font-weight="700">TicketX Support</text>
+  <rect x="326" y="228" width="372" height="372" rx="72" fill="#E9ECF8"/>
+  <circle cx="512" cy="414" r="112" fill="#4B5FC7"/>
+  <path d="M486 351 V477 L590 414 Z" fill="#FFFFFF"/>
+  <text x="76" y="727" fill="#20242D" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="68" font-weight="800">เริ่มใช้งาน</text>
+  <text x="76" y="801" fill="#667085" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="35">ตรวจสอบโปรเจกต์ของบัญชีนี้</text>
+  <circle cx="84" cy="887" r="8" fill="#4B5FC7"/>
+  <path d="M112 887 H948" stroke="#E1E4EA" stroke-width="4" stroke-linecap="round"/>
+</svg>

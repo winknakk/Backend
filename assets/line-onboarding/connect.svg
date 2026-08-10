@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F9FB"/>
+  <rect x="34" y="34" width="956" height="956" rx="44" fill="#FFFFFF" stroke="#E1E4EA" stroke-width="4"/>
+  <rect x="76" y="76" width="258" height="60" rx="18" fill="#E9ECF8"/>
+  <text x="205" y="117" text-anchor="middle" fill="#4B5FC7" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="28" font-weight="700">TicketX Support</text>
+  <rect x="326" y="228" width="372" height="372" rx="72" fill="#F2F3F6"/>
+  <g fill="none" stroke="#4B5FC7" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M450 350 L400 400 C354 446 354 520 400 566 C446 612 520 612 566 566 L616 516"/>
+    <path d="M574 478 L624 428 C670 382 670 308 624 262 C578 216 504 216 458 262 L408 312" transform="translate(14 80)"/>
+    <path d="M425 515 L599 341"/>
+  </g>
+  <text x="76" y="727" fill="#20242D" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="64" font-weight="800">เชื่อมโปรเจกต์</text>
+  <text x="76" y="801" fill="#667085" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="35">ใช้รหัสที่ได้รับจากผู้ดูแล</text>
+  <circle cx="84" cy="887" r="8" fill="#4B5FC7"/>
+  <path d="M112 887 H948" stroke="#E1E4EA" stroke-width="4" stroke-linecap="round"/>
+</svg>

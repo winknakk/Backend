@@ -92,12 +92,28 @@ async function main(): Promise<void> {
   });
   assert.equal(validAfterRetries.state, "COMPLETED");
   assert.equal(validAfterRetries.projectId, 8);
+  const singleProjectMenu = await service.processEvent({
+    type: "postback", webhookEventId: "evt-retry-change", destination: "U_DESTINATION",
+    userId: "U_RETRY", postbackData: "ticketx:onboarding:menu:change",
+  });
+  assert.equal(singleProjectMenu.reason, "change_single_membership");
+  assert.equal(singleProjectMenu.projectMenu?.projects.length, 1);
+  assert.equal(singleProjectMenu.projectMenu?.projects[0].projectId, 8);
+  assert.equal(singleProjectMenu.projectMenu?.projects[0].isCurrent, true);
+
+  const noProjectMenu = await service.processEvent({
+    type: "postback", webhookEventId: "evt-no-project-change", destination: "U_DESTINATION",
+    userId: "U_NO_PROJECT", postbackData: "ticketx:onboarding:menu:change",
+  });
+  assert.equal(noProjectMenu.reason, "change_without_membership");
+  assert.match(noProjectMenu.replyText || "", /ยินดีต้อนรับ/);
+  assert.equal(noProjectMenu.quickReplies?.length, 2);
 
   const follow = await service.processEvent({
     type: "follow", webhookEventId: "evt-follow", destination: "U_DESTINATION", userId: "U_NEW",
   });
   assert.equal(follow.state, "AWAITING_CHOICE");
-  assert.equal(follow.quickReplies?.length, 2);
+  assert.equal(follow.replyWithOnboardingCarousel, true);
   const duplicate = await service.processEvent({
     type: "follow", webhookEventId: "evt-follow", destination: "U_DESTINATION", userId: "U_NEW",
   });
@@ -129,8 +145,15 @@ async function main(): Promise<void> {
   assert.equal(relink.action, "REPLY");
   assert.equal(relink.state, "AWAITING_CHOICE");
   assert.equal(relink.reason, "existing_user_requested_project_relink");
-  assert.equal(relink.replyText, follow.replyText);
-  assert.deepEqual(relink.quickReplies, follow.quickReplies);
+  assert.equal(relink.replyWithOnboardingCarousel, true);
+  const carouselSelection = await service.processEvent({
+    type: "postback", webhookEventId: "evt-relink-menu-selection", destination: "U_DESTINATION", userId: "U_NEW",
+    postbackData: "ticketx:onboarding:menu:change",
+  });
+  assert.equal(carouselSelection.state, "AWAITING_CHOICE");
+  assert.equal(carouselSelection.reason, "change_single_membership");
+  assert.equal(carouselSelection.replyWithOnboardingCarousel, undefined);
+  assert.equal(carouselSelection.projectMenu?.projects.length, 1);
   await service.processEvent({
     type: "postback", webhookEventId: "evt-relink-choice", destination: "U_DESTINATION", userId: "U_NEW",
     postbackData: "ticketx:onboarding:has_code",
@@ -140,7 +163,10 @@ async function main(): Promise<void> {
     messageText: relinkCode.code,
   });
   assert.equal(relinkCompleted.state, "COMPLETED");
-  assert.equal(relinkCompleted.projectId, 11);
+  assert.equal(relinkCompleted.reason, "project_linked_switch_confirmation");
+  assert.equal(relinkCompleted.projectId, 8);
+  assert.equal(relinkCompleted.projectLinkConfirmation?.linkedProjectId, 11);
+  assert.equal(relinkCompleted.projectLinkConfirmation?.currentProjectId, 8);
   const memberships = await testPool.query(
     `SELECT pp.project_id
      FROM profile_projects pp
@@ -157,12 +183,55 @@ async function main(): Promise<void> {
      ORDER BY c.project_id`
   );
   assert.deepEqual(openConversations.rows.map((row) => Number(row.project_id)), [8, 11]);
+  const passBeforeConfirmedSwitch = await service.processEvent({
+    type: "message", webhookEventId: "evt-before-confirmed-switch", destination: "U_DESTINATION", userId: "U_NEW",
+    messageText: "ทดสอบก่อนยืนยันเปลี่ยนโปรเจกต์",
+  });
+  assert.equal(passBeforeConfirmedSwitch.action, "PASS_TO_AI");
+  assert.equal(passBeforeConfirmedSwitch.projectId, 8);
+  const confirmNewProject = await service.processEvent({
+    type: "postback", webhookEventId: "evt-confirm-new-project", destination: "U_DESTINATION",
+    userId: "U_NEW", postbackData: "ticketx:onboarding:switch_project:11",
+  });
+  assert.equal(confirmNewProject.reason, "project_switch_completed");
+  assert.equal(confirmNewProject.projectId, 11);
   const passAfterRelink = await service.processEvent({
     type: "message", webhookEventId: "evt-after-relink", destination: "U_DESTINATION", userId: "U_NEW",
-    messageText: "ทดสอบหลังเปลี่ยนโปรเจกต์",
+    messageText: "ทดสอบหลังยืนยันเปลี่ยนโปรเจกต์",
   });
   assert.equal(passAfterRelink.action, "PASS_TO_AI");
   assert.equal(passAfterRelink.projectId, 11);
+
+  const multiProjectMenu = await service.processEvent({
+    type: "postback", webhookEventId: "evt-change-multiple", destination: "U_DESTINATION",
+    userId: "U_NEW", postbackData: "ticketx:onboarding:menu:change",
+  });
+  assert.equal(multiProjectMenu.reason, "change_multiple_memberships");
+  assert.deepEqual(
+    multiProjectMenu.projectMenu?.projects.map((project) => [project.projectId, project.isCurrent]),
+    [[8, false], [11, true]]
+  );
+
+  const deniedSwitch = await service.processEvent({
+    type: "postback", webhookEventId: "evt-change-denied", destination: "U_DESTINATION",
+    userId: "U_NEW", postbackData: "ticketx:onboarding:switch_project:999",
+  });
+  assert.equal(deniedSwitch.reason, "project_switch_unavailable");
+  assert.match(deniedSwitch.projectMenu?.notice || "", /ไม่พร้อมใช้งาน/);
+
+  const switched = await service.processEvent({
+    type: "postback", webhookEventId: "evt-change-to-eight", destination: "U_DESTINATION",
+    userId: "U_NEW", postbackData: "ticketx:onboarding:switch_project:8",
+  });
+  assert.equal(switched.reason, "project_switch_completed");
+  assert.equal(switched.projectId, 8);
+  assert.match(switched.replyText || "", /24\/7/);
+  const passAfterSwitch = await service.processEvent({
+    type: "message", webhookEventId: "evt-after-switch", destination: "U_DESTINATION",
+    userId: "U_NEW", messageText: "ทดสอบหลังเปลี่ยนโปรเจกต์",
+  });
+  assert.equal(passAfterSwitch.action, "PASS_TO_AI");
+  assert.equal(passAfterSwitch.projectId, 8);
 
   const existingFriendFirstMessage = await service.processEvent({
     type: "message", webhookEventId: "evt-existing-friend", destination: "U_DESTINATION", userId: "U_EXISTING_FRIEND",
@@ -170,6 +239,7 @@ async function main(): Promise<void> {
   });
   assert.equal(existingFriendFirstMessage.state, "AWAITING_CHOICE");
   assert.equal(existingFriendFirstMessage.reason, "first_message_requires_onboarding");
+  assert.equal(existingFriendFirstMessage.replyWithOnboardingCarousel, true);
 
   await service.processEvent({
     type: "follow", webhookEventId: "evt-follow-2", destination: "U_DESTINATION", userId: "U_NO_CODE",
@@ -185,6 +255,15 @@ async function main(): Promise<void> {
   assert.equal(pending.state, "PENDING_HUMAN");
   const requests = await testPool.query("SELECT id FROM line_onboarding_requests WHERE status = 'pending'");
   assert.equal(requests.rows.length, 1);
+  const duplicatePending = await service.processEvent({
+    type: "postback", webhookEventId: "evt-choice-duplicate-pending", destination: "U_DESTINATION",
+    userId: "U_NO_CODE", postbackData: "ticketx:onboarding:no_code",
+  });
+  assert.equal(duplicatePending.reason, "manual_verification_already_pending");
+  const requestsAfterDuplicate = await testPool.query(
+    "SELECT id FROM line_onboarding_requests WHERE status = 'pending'"
+  );
+  assert.equal(requestsAfterDuplicate.rows.length, 1);
   const resolved = await service.resolveManualRequest({
     requestId: Number(requests.rows[0].id), projectId: 8, orgId: "org_default",
   });

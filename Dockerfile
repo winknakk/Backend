@@ -36,6 +36,7 @@ COPY --from=builder /app/package.json ./
 # คัดลอกคลังโฟลเดอร์คู่มือและฐานข้อมูลสำหรับการรันระบบ V3
 COPY --from=builder /app/database ./database
 COPY --from=builder /app/prompts ./prompts
+COPY --from=builder /app/assets ./assets
 
 
 # ตั้งค่าสภาพแวดล้อมเป็นโหมดปลอดภัยความเร็วสูง
