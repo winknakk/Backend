@@ -1,4 +1,6 @@
 import axios from "axios";
+import fs from "node:fs";
+import path from "node:path";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config/env";
 import {
@@ -8,6 +10,14 @@ import {
 import { createLogger } from "../../observability/logger";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
 import { resolveLineWebhookPayload, verifyLineSignature } from "../../services/lineWebhookSecurity";
+import {
+  buildLineChoicePrompt,
+  buildLineOnboardingCarousel,
+  buildLineProjectLinkConfirmation,
+  buildLineProjectMenu,
+  LINE_ONBOARDING_CARDS,
+  lineOnboardingCardDirectory,
+} from "../../services/LineOnboardingCarouselService";
 
 const logger = createLogger("line-webhook");
 
@@ -40,9 +50,18 @@ function buildLineReply(decision: LineOnboardingDecision): Record<string, unknow
 
 async function sendLineReply(replyToken: string, decision: LineOnboardingDecision): Promise<void> {
   if (!replyToken) throw new Error("LINE event cannot be replied to because replyToken is missing");
+  const messages = decision.replyWithOnboardingCarousel
+    ? [buildLineOnboardingCarousel(config.BACKEND_PUBLIC_URL)]
+    : decision.projectLinkConfirmation
+      ? [buildLineProjectLinkConfirmation(decision.projectLinkConfirmation)]
+    : decision.projectMenu
+      ? buildLineProjectMenu(decision.projectMenu)
+    : decision.quickReplies?.length
+      ? [buildLineChoicePrompt(decision.replyText || "เลือกวิธีดำเนินการได้เลยค่ะ", decision.quickReplies)]
+    : [buildLineReply(decision)];
   await axios.post(
     "https://api.line.me/v2/bot/message/reply",
-    { replyToken, messages: [buildLineReply(decision)] },
+    { replyToken, messages },
     {
       headers: {
         Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
@@ -107,6 +126,25 @@ export function registerLineWebhookRoutes(
   fastify: FastifyInstance,
   onboardingService: LineProjectOnboardingService
 ): void {
+  fastify.get("/api/v1/media/line-onboarding/cards/:filename", async (request, reply) => {
+    const filename = String((request.params as any).filename || "");
+    if (!LINE_ONBOARDING_CARDS.some((card) => card.fileName === filename)) {
+      return reply.code(404).send({ error: "LINE onboarding card not found" });
+    }
+    const imagePath = path.join(lineOnboardingCardDirectory(), filename);
+    try {
+      const image = await fs.promises.readFile(imagePath);
+      return reply
+        .header("Content-Type", "image/png")
+        .header("Cache-Control", "public, max-age=86400, immutable")
+        .header("X-Content-Type-Options", "nosniff")
+        .send(image);
+    } catch (error: any) {
+      logger.error({ error: error.message, filename }, "LINE onboarding card could not be read");
+      return reply.code(503).send({ error: "LINE onboarding card unavailable" });
+    }
+  });
+
   fastify.post("/api/v1/webhooks/line", async (request: FastifyRequest, reply) => {
     if (!config.LINE_CHANNEL_SECRET) {
       logger.error("LINE webhook rejected because LINE_CHANNEL_SECRET is not configured");

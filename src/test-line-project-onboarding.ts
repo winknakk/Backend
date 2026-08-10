@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { LineProjectOnboardingService } from "./services/LineProjectOnboardingService";
+import {
+  LineProjectOnboardingService,
+  PROJECT_RELINK_COMMAND_TEXTS,
+} from "./services/LineProjectOnboardingService";
 import { resolveLineWebhookPayload, verifyLineSignature } from "./services/lineWebhookSecurity";
 
 function testProjectCodeFormat(): void {
@@ -81,9 +84,16 @@ function testOnboardingVoice(): void {
   assert.match(serviceSource, /พร้อมใช้งานได้เลยค่ะ/);
   assert.doesNotMatch(serviceSource, /15 นาที|invalid_code_locked|temporarily_locked/);
   assert.match(serviceSource, /s\.selected_project_id = c\.project_id/);
+  assert.match(serviceSource, /JOIN profile_projects pp ON pp\.profile_id = pr\.id/);
+  assert.match(serviceSource, /project_switch_completed/);
+  assert.match(serviceSource, /p\.company_id = pr\.company_id/);
+  assert.match(serviceSource, /ticketx:onboarding:switch_project/);
   assert.doesNotMatch(serviceSource, /ครับ/);
   assert.doesNotMatch(routeSource, /ครับ/);
   assert.match(greetingPolicy, /ปิดข้อความทักทายเพื่อนใหม่/);
+  for (const alias of ["เริ่มใช้งาน", "เมนู", "โปรเจกต์ของฉัน", "/menu", "/project"]) {
+    assert.ok(PROJECT_RELINK_COMMAND_TEXTS.includes(alias as any), `missing menu alias: ${alias}`);
+  }
 }
 
 testProjectCodeFormat();

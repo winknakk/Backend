@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F9FB"/>
+  <rect x="34" y="34" width="956" height="956" rx="44" fill="#FFFFFF" stroke="#E1E4EA" stroke-width="4"/>
+  <rect x="76" y="76" width="258" height="60" rx="18" fill="#EEF0F5"/>
+  <text x="205" y="117" text-anchor="middle" fill="#20242D" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="28" font-weight="700">TicketX Support</text>
+  <rect x="326" y="228" width="372" height="372" rx="72" fill="#EEF0F5"/>
+  <path d="M386 362 H638 M638 362 L586 310 M638 362 L586 414" fill="none" stroke="#4B5FC7" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M638 486 H386 M386 486 L438 434 M386 486 L438 538" fill="none" stroke="#202A44" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="76" y="727" fill="#20242D" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="64" font-weight="800">เปลี่ยนโปรเจกต์</text>
+  <text x="76" y="801" fill="#667085" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="35">เลือกโปรเจกต์สำหรับสนทนา</text>
+  <circle cx="84" cy="887" r="8" fill="#202A44"/>
+  <path d="M112 887 H948" stroke="#E1E4EA" stroke-width="4" stroke-linecap="round"/>
+</svg>

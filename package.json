@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "dev": "tsx src/api/server.ts",
     "test:takeover-policy": "npx tsx src/test-takeover-policy.ts",
     "test:media-pipeline": "npx tsx src/test-media-pipeline.ts",
     "test:plane-payload": "npx tsx src/test-plane-work-item-payload.ts",
@@ -9,9 +10,11 @@
     "test:line-onboarding": "npx tsx src/test-line-project-onboarding.ts",
     "test:line-onboarding-db": "npx tsx src/test-line-onboarding-migration.ts",
     "test:line-onboarding-integration": "npx tsx src/test-line-onboarding-integration.ts",
+    "test:line-onboarding-carousel": "npx tsx src/test-line-onboarding-carousel.ts",
     "db:migrate": "npx tsx src/adapters/postgres/run-migrations-cli.ts",
     "db:seed": "npx tsx src/adapters/postgres/run-seeds-cli.ts",
     "line:project-code": "npx tsx src/cli/line-project-code.ts",
+    "line:onboarding-carousel": "npx tsx src/cli/line-onboarding-carousel.ts",
     "line:onboarding-bootstrap": "npx tsx src/cli/bootstrap-line-onboarding.ts",
     "plane:sync": "npx tsx src/run-plane-reverse-sync.ts",
     "plane:backfill-metadata": "npx tsx src/backfill-plane-work-item-metadata.ts",

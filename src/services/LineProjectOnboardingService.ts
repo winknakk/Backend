@@ -8,6 +8,27 @@ export interface LineQuickReply {
   data: string;
 }
 
+export interface LineProjectMenuItem {
+  projectId: number;
+  projectName: string;
+  isCurrent: boolean;
+}
+
+export interface LineProjectMenu {
+  kind: "overview" | "selector";
+  projects: LineProjectMenuItem[];
+  page: number;
+  totalPages: number;
+  notice?: string;
+}
+
+export interface LineProjectLinkConfirmation {
+  currentProjectId: number;
+  currentProjectName: string;
+  linkedProjectId: number;
+  linkedProjectName: string;
+}
+
 export interface LineOnboardingDecision {
   action: LineOnboardingAction;
   state: string;
@@ -15,6 +36,9 @@ export interface LineOnboardingDecision {
   duplicate?: boolean;
   replyText?: string;
   quickReplies?: LineQuickReply[];
+  replyWithOnboardingCarousel?: boolean;
+  projectMenu?: LineProjectMenu;
+  projectLinkConfirmation?: LineProjectLinkConfirmation;
   projectId?: number;
   projectName?: string;
   conversationId?: number;
@@ -50,13 +74,18 @@ const RETRY_REPLIES: LineQuickReply[] = [
   { label: "ไม่มี/ไม่ทราบรหัส", data: "ticketx:onboarding:no_code" },
 ];
 
-const PROJECT_RELINK_COMMANDS = new Set([
+export const PROJECT_RELINK_COMMAND_TEXTS = [
   "เริ่มใช้งาน",
   "เชื่อมโปรเจกต์",
   "เชื่อมโปรเจกต์ใหม่",
   "เปลี่ยนโปรเจกต์",
+  "เมนู",
+  "โปรเจกต์ของฉัน",
+  "/menu",
   "/project",
-]);
+] as const;
+
+const PROJECT_RELINK_COMMANDS = new Set<string>(PROJECT_RELINK_COMMAND_TEXTS);
 
 const ACTIVE_ONBOARDING_STATES = new Set([
   "AWAITING_CHOICE",
@@ -64,6 +93,8 @@ const ACTIVE_ONBOARDING_STATES = new Set([
   "AWAITING_PROJECT_DETAILS",
   "PENDING_HUMAN",
 ]);
+
+const PROJECT_MENU_PAGE_SIZE = 10;
 
 export class LineProjectOnboardingService {
   constructor(
@@ -330,7 +361,7 @@ export class LineProjectOnboardingService {
 
     if (relinkRequested) {
       await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
-      return this.choiceDecision(ready ? "existing_user_requested_project_relink" : "unlinked_user_requested_project_relink");
+      return this.carouselDecision(ready ? "existing_user_requested_project_relink" : "unlinked_user_requested_project_relink");
     }
 
     if (ready) {
@@ -375,10 +406,138 @@ export class LineProjectOnboardingService {
         }
       }
       await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
-      return this.choiceDecision("new_follow");
+      return this.carouselDecision("new_follow");
     }
 
     if (input.type === "postback") {
+      const postbackData = String(input.postbackData || "");
+      const switchMatch = /^ticketx:onboarding:switch_project:(\d+)$/.exec(postbackData);
+      if (switchMatch) {
+        const requestedProjectId = Number(switchMatch[1]);
+        const projects = await this.findAvailableProjects(client, orgId, input.userId);
+        const target = projects.find((project) => project.id === requestedProjectId);
+        const currentProjectId = this.resolveCurrentProjectId(projects, session, ready);
+        if (!target) {
+          if (projects.length === 0) {
+            await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+            return this.choiceDecision("project_switch_denied");
+          }
+          return this.projectMenuDecision(
+            "project_switch_unavailable",
+            "selector",
+            projects,
+            currentProjectId,
+            0,
+            "โปรเจกต์ที่เลือกไม่พร้อมใช้งานแล้วค่ะ เลือกจากรายการล่าสุดได้เลยนะคะ"
+          );
+        }
+        const provisioned = await this.provisionProject(client, orgId, input.userId, target.id);
+        await this.completeSession(client, orgId, input, target.id);
+        return {
+          action: "REPLY",
+          state: "COMPLETED",
+          reason: currentProjectId === target.id ? "project_switch_current" : "project_switch_completed",
+          projectId: target.id,
+          projectName: target.name,
+          conversationId: provisioned.conversationId,
+          replyText: currentProjectId === target.id
+            ? `ตอนนี้กำลังใช้งานโปรเจกต์ “${target.name}” อยู่แล้วค่ะ ส่งเรื่องที่ต้องการให้ช่วยมาได้เลยนะคะ`
+            : `เปลี่ยนมาใช้โปรเจกต์ “${target.name}” แล้วนะคะ ✅ ส่งเรื่องที่ต้องการให้ช่วยมาได้เลยค่ะ`,
+        };
+      }
+
+      const pageMatch = /^ticketx:onboarding:projects_page:(\d+)$/.exec(postbackData);
+      if (pageMatch) {
+        const projects = await this.findAvailableProjects(client, orgId, input.userId);
+        const currentProjectId = this.resolveCurrentProjectId(projects, session, ready);
+        if (projects.length === 0) {
+          await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+          return this.choiceDecision("change_without_membership");
+        }
+        return this.projectMenuDecision(
+          "change_project_page",
+          "selector",
+          projects,
+          currentProjectId,
+          Number(pageMatch[1])
+        );
+      }
+
+      const menuMatch = /^ticketx:onboarding:menu:(start|connect|connect_new|change)$/.exec(postbackData);
+      if (menuMatch) {
+        const projects = await this.findAvailableProjects(client, orgId, input.userId);
+        const currentProjectId = this.resolveCurrentProjectId(projects, session, ready);
+        const intent = menuMatch[1];
+
+        if (intent === "start") {
+          if (projects.length === 0) {
+            await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+            return this.choiceDecision("start_without_project");
+          }
+          if (currentProjectId || projects.length === 1) {
+            const target = projects.find((project) => project.id === currentProjectId) || projects[0];
+            const provisioned = await this.provisionProject(client, orgId, input.userId, target.id);
+            await this.completeSession(client, orgId, input, target.id);
+            return {
+              action: "REPLY",
+              state: "COMPLETED",
+              reason: "start_with_active_project",
+              projectId: target.id,
+              projectName: target.name,
+              conversationId: provisioned.conversationId,
+              replyText: `ตอนนี้บัญชีเชื่อมกับโปรเจกต์ “${target.name}” อยู่ค่ะ ส่งเรื่องที่ต้องการให้ช่วยมาได้เลยนะคะ`,
+            };
+          }
+          return this.projectMenuDecision(
+            "start_requires_project_selection",
+            "selector",
+            projects,
+            null
+          );
+        }
+
+        if (intent === "connect_new") {
+          await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+          return this.choiceDecision(
+            "connect_new_requested",
+            projects.length
+              ? "มาเชื่อมโปรเจกต์ใหม่กันค่ะ เลือกได้เลยว่ามีรหัสโปรเจกต์หรืออยากให้เจ้าหน้าที่ช่วยตรวจสอบนะคะ"
+              : undefined
+          );
+        }
+
+        if (intent === "connect") {
+          if (projects.length === 0) {
+            await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+            return this.choiceDecision("connect_without_project");
+          }
+          return this.projectMenuDecision(
+            "connect_existing_project",
+            "overview",
+            projects,
+            currentProjectId,
+            0,
+            currentProjectId
+              ? `ตอนนี้กำลังใช้งานโปรเจกต์ “${projects.find((project) => project.id === currentProjectId)?.name || projects[0].name}” อยู่ค่ะ`
+              : "บัญชีนี้เชื่อมกับโปรเจกต์อยู่แล้วค่ะ"
+          );
+        }
+
+        if (projects.length === 0) {
+          await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+          return this.choiceDecision("change_without_membership");
+        }
+        return this.projectMenuDecision(
+          projects.length === 1 ? "change_single_membership" : "change_multiple_memberships",
+          "selector",
+          projects,
+          currentProjectId,
+          0,
+          projects.length === 1
+            ? `ตอนนี้คุณเชื่อมอยู่กับโปรเจกต์ “${projects[0].name}” ค่ะ ยังไม่มีโปรเจกต์อื่นให้เปลี่ยนนะคะ`
+            : undefined
+        );
+      }
       if (input.postbackData === "ticketx:onboarding:has_code") {
         await this.upsertSession(client, orgId, input, "AWAITING_CODE");
         return {
@@ -389,6 +548,23 @@ export class LineProjectOnboardingService {
         };
       }
       if (input.postbackData === "ticketx:onboarding:no_code") {
+        const pendingRequest = await client.query(
+          `SELECT id
+           FROM line_onboarding_requests
+           WHERE org_id = $1 AND line_user_id = $2 AND destination = $3 AND status = 'pending'
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [orgId, input.userId, input.destination]
+        );
+        if (pendingRequest.rows.length > 0) {
+          await this.upsertSession(client, orgId, input, "PENDING_HUMAN");
+          return {
+            action: "REPLY",
+            state: "PENDING_HUMAN",
+            reason: "manual_verification_already_pending",
+            replyText: "เจ้าหน้าที่กำลังตรวจสอบโปรเจกต์ให้อยู่นะคะ หากมีข้อมูลเพิ่มเติม รอให้เจ้าหน้าที่ติดต่อกลับแล้วส่งเพิ่มได้เลยค่ะ",
+          };
+        }
         await this.upsertSession(client, orgId, input, "AWAITING_PROJECT_DETAILS");
         return {
           action: "REPLY",
@@ -408,7 +584,7 @@ export class LineProjectOnboardingService {
       await this.upsertSession(client, orgId, input, "AWAITING_CHOICE", {
         pendingMessage: String(input.messageText || "").slice(0, 1000),
       });
-      return this.choiceDecision("first_message_requires_onboarding");
+      return this.carouselDecision("first_message_requires_onboarding");
     }
 
     if (session.state === "AWAITING_CHOICE") {
@@ -417,7 +593,7 @@ export class LineProjectOnboardingService {
         await this.upsertSession(client, orgId, input, "AWAITING_CODE");
         session = { ...session, state: "AWAITING_CODE" };
       } else {
-        return this.choiceDecision("choice_required");
+        return this.carouselDecision("choice_required");
       }
     }
 
@@ -464,17 +640,67 @@ export class LineProjectOnboardingService {
       };
     }
 
-    return this.choiceDecision("onboarding_state_not_ready");
+    return this.carouselDecision("onboarding_state_not_ready");
   }
 
-  private choiceDecision(reason: string): LineOnboardingDecision {
+  private carouselDecision(reason: string): LineOnboardingDecision {
     return {
       action: "REPLY",
       state: "AWAITING_CHOICE",
       reason,
-      replyText: "สวัสดีค่ะ 👋 ยินดีต้อนรับสู่ TicketX Support ก่อนเริ่มใช้งาน ขอเชื่อมบัญชี LINE กับโปรเจกต์ของคุณก่อนนะคะ",
+      replyWithOnboardingCarousel: true,
+    };
+  }
+
+  private choiceDecision(reason: string, replyText?: string): LineOnboardingDecision {
+    return {
+      action: "REPLY",
+      state: "AWAITING_CHOICE",
+      reason,
+      replyText: replyText || "สวัสดีค่ะ 👋 ยินดีต้อนรับสู่ TicketX Support ก่อนเริ่มใช้งาน ขอเชื่อมบัญชี LINE กับโปรเจกต์ของคุณก่อนนะคะ",
       quickReplies: CHOICE_REPLIES,
     };
+  }
+
+  private projectMenuDecision(
+    reason: string,
+    kind: "overview" | "selector",
+    projects: Array<{ id: number; name: string }>,
+    currentProjectId: number | null,
+    requestedPage = 0,
+    notice?: string
+  ): LineOnboardingDecision {
+    const totalPages = Math.max(1, Math.ceil(projects.length / PROJECT_MENU_PAGE_SIZE));
+    const page = Math.min(Math.max(0, requestedPage), totalPages - 1);
+    const pageProjects = projects.slice(page * PROJECT_MENU_PAGE_SIZE, (page + 1) * PROJECT_MENU_PAGE_SIZE);
+    return {
+      action: "REPLY",
+      state: "AWAITING_CHOICE",
+      reason,
+      projectMenu: {
+        kind,
+        projects: pageProjects.map((project) => ({
+          projectId: project.id,
+          projectName: project.name,
+          isCurrent: project.id === currentProjectId,
+        })),
+        page,
+        totalPages,
+        notice,
+      },
+    };
+  }
+
+  private resolveCurrentProjectId(
+    projects: Array<{ id: number; name: string }>,
+    session: any,
+    ready: any
+  ): number | null {
+    const selected = Number(session?.selected_project_id || 0);
+    if (selected && projects.some((project) => project.id === selected)) return selected;
+    const readyProject = Number(ready?.project_id || 0);
+    if (readyProject && projects.some((project) => project.id === readyProject)) return readyProject;
+    return projects.length === 1 ? projects[0].id : null;
   }
 
   private async validateAndProvisionCode(
@@ -523,6 +749,11 @@ export class LineProjectOnboardingService {
     }
 
     const code = codeResult.rows[0];
+    const projectsBeforeLink = await this.findAvailableProjects(client, orgId, input.userId!);
+    const currentSession = await this.getSession(client, orgId, input.userId!, input.destination);
+    const currentReady = await this.findReadyConversation(client, input.userId!, input.destination);
+    const currentProjectId = this.resolveCurrentProjectId(projectsBeforeLink, currentSession, currentReady);
+    const currentProject = projectsBeforeLink.find((project) => project.id === currentProjectId);
     const provisioned = await this.provisionProject(client, orgId, input.userId!, Number(code.project_id));
     await client.query(
       `UPDATE project_join_codes
@@ -530,6 +761,22 @@ export class LineProjectOnboardingService {
        WHERE id = $1`,
       [code.code_id]
     );
+    if (currentProject && currentProject.id !== Number(code.project_id)) {
+      await this.completeSession(client, orgId, input, currentProject.id);
+      return {
+        action: "REPLY",
+        state: "COMPLETED",
+        reason: "project_linked_switch_confirmation",
+        projectId: currentProject.id,
+        projectName: currentProject.name,
+        projectLinkConfirmation: {
+          currentProjectId: currentProject.id,
+          currentProjectName: currentProject.name,
+          linkedProjectId: Number(code.project_id),
+          linkedProjectName: code.project_name,
+        },
+      };
+    }
     await this.completeSession(client, orgId, input, Number(code.project_id));
     return {
       action: "REPLY",
@@ -612,6 +859,37 @@ export class LineProjectOnboardingService {
       [userId, destination]
     );
     return result.rows[0] || null;
+  }
+
+  private async findAvailableProjects(
+    client: PoolClient,
+    orgId: string,
+    userId: string
+  ): Promise<Array<{ id: number; name: string }>> {
+    const result = await client.query(
+      `SELECT DISTINCT p.id, p.name
+       FROM identities i
+       JOIN profiles pr ON pr.id = i.profile_id
+       JOIN profile_projects pp ON pp.profile_id = pr.id
+       JOIN projects p
+         ON p.id = pp.project_id
+        AND p.org_id = $2
+        AND p.company_id = pr.company_id
+       WHERE LOWER(i.channel) = 'line'
+         AND i.channel_ref = $1
+         AND i.deleted_at IS NULL
+         AND EXISTS (
+           SELECT 1
+           FROM project_channels pc
+           WHERE pc.project_id = p.id
+             AND LOWER(pc.channel_type) = 'line'
+             AND COALESCE(pc.is_enabled, TRUE)
+             AND COALESCE(pc.active, TRUE)
+         )
+       ORDER BY p.name, p.id`,
+      [userId, orgId]
+    );
+    return result.rows.map((row) => ({ id: Number(row.id), name: String(row.name) }));
   }
 
   private async getSession(client: PoolClient, orgId: string, userId: string, destination: string): Promise<any> {
