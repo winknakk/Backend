@@ -33,6 +33,10 @@ async function main(): Promise<void> {
         handled_by TEXT, org_id VARCHAR(64), deleted_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
       );
+      CREATE TEMP TABLE messages (
+        id SERIAL PRIMARY KEY, conversation_id INTEGER, role TEXT, content TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
       CREATE TEMP TABLE project_join_codes (
         id BIGSERIAL PRIMARY KEY, org_id VARCHAR(64), project_id INTEGER, code_digest CHAR(64) UNIQUE,
         code_hint VARCHAR(4), status VARCHAR(16) DEFAULT 'active', expires_at TIMESTAMPTZ,
@@ -137,7 +141,49 @@ async function main(): Promise<void> {
   });
   assert.equal(pass.action, "PASS_TO_AI");
   assert.equal(pass.projectId, 8);
+  assert.equal(pass.pushOnboardingCarousel, undefined);
 
+  await testPool.query(
+    `UPDATE line_onboarding_sessions
+     SET metadata = jsonb_set(metadata, '{lastDmActivityAt}', to_jsonb((NOW() - INTERVAL '23 hours 59 minutes')::text))
+     WHERE line_user_id = 'U_NEW' AND destination = 'U_DESTINATION'`
+  );
+  const activeBeforeCooldown = await service.processEvent({
+    type: "message", webhookEventId: "evt-carousel-before-cooldown", destination: "U_DESTINATION",
+    userId: "U_NEW", messageText: "กลับมาก่อนครบหนึ่งวัน",
+  });
+  assert.equal(activeBeforeCooldown.action, "PASS_TO_AI");
+  assert.equal(activeBeforeCooldown.pushOnboardingCarousel, undefined);
+
+  await testPool.query(
+    `UPDATE line_onboarding_sessions
+     SET metadata = jsonb_set(metadata, '{lastDmActivityAt}', to_jsonb((NOW() - INTERVAL '24 hours')::text))
+     WHERE line_user_id = 'U_NEW' AND destination = 'U_DESTINATION'`
+  );
+  const recalledAfterCooldown = await service.processEvent({
+    type: "message", webhookEventId: "evt-carousel-after-cooldown", destination: "U_DESTINATION",
+    userId: "U_NEW", messageText: "กลับมาหลังหนึ่งวัน",
+  });
+  assert.equal(recalledAfterCooldown.action, "PASS_TO_AI");
+  assert.equal(recalledAfterCooldown.pushOnboardingCarousel, true);
+
+  const immediateFollowUp = await service.processEvent({
+    type: "message", webhookEventId: "evt-carousel-immediate-follow-up", destination: "U_DESTINATION",
+    userId: "U_NEW", messageText: "ส่งต่อทันที",
+  });
+  assert.equal(immediateFollowUp.action, "PASS_TO_AI");
+  assert.equal(immediateFollowUp.pushOnboardingCarousel, undefined);
+
+  await testPool.query(
+    `UPDATE line_onboarding_sessions
+     SET metadata = metadata - 'lastDmActivityAt'
+     WHERE line_user_id = 'U_NEW' AND destination = 'U_DESTINATION'`
+  );
+  await testPool.query(
+    `INSERT INTO messages (conversation_id, role, content, created_at)
+     VALUES ($1, 'customer', 'old activity', NOW() - INTERVAL '25 hours')`,
+    [completed.conversationId]
+  );
   const relink = await service.processEvent({
     type: "message", webhookEventId: "evt-relink", destination: "U_DESTINATION", userId: "U_NEW",
     messageText: "เริ่มใช้งาน",
@@ -189,6 +235,7 @@ async function main(): Promise<void> {
   });
   assert.equal(passBeforeConfirmedSwitch.action, "PASS_TO_AI");
   assert.equal(passBeforeConfirmedSwitch.projectId, 8);
+  assert.equal(passBeforeConfirmedSwitch.pushOnboardingCarousel, undefined);
   const confirmNewProject = await service.processEvent({
     type: "postback", webhookEventId: "evt-confirm-new-project", destination: "U_DESTINATION",
     userId: "U_NEW", postbackData: "ticketx:onboarding:switch_project:11",

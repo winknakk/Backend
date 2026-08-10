@@ -88,6 +88,10 @@ function testOnboardingVoice(): void {
   assert.match(serviceSource, /project_switch_completed/);
   assert.match(serviceSource, /p\.company_id = pr\.company_id/);
   assert.match(serviceSource, /ticketx:onboarding:switch_project/);
+  assert.match(serviceSource, /CAROUSEL_RECALL_AFTER_MS = 24 \* 60 \* 60 \* 1000/);
+  assert.match(serviceSource, /pushOnboardingCarousel/);
+  assert.match(routeSource, /24-hour carousel recall push failed/);
+  assert.match(routeSource, /notificationDisabled/);
   assert.doesNotMatch(serviceSource, /ครับ/);
   assert.doesNotMatch(routeSource, /ครับ/);
   assert.match(greetingPolicy, /ปิดข้อความทักทายเพื่อนใหม่/);

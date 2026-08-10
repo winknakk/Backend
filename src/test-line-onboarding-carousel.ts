@@ -67,11 +67,9 @@ const choice = buildLineChoicePrompt("เลือกวิธีเชื่อ
   { label: "ไม่มี/ไม่ทราบรหัส", data: "ticketx:onboarding:no_code" },
 ]) as any;
 assert.equal(choice.type, "flex");
-assert.equal(choice.quickReply.items.length, 2);
+assert.equal(choice.quickReply, undefined, "Flex choices must not duplicate their actions as Quick Reply buttons");
 assert.deepEqual(postbackData(choice).sort(), [
   "ticketx:onboarding:has_code",
-  "ticketx:onboarding:has_code",
-  "ticketx:onboarding:no_code",
   "ticketx:onboarding:no_code",
 ].sort());
 assert.equal(boxesWithCornerRadius(choice, "xxl").length, 2);

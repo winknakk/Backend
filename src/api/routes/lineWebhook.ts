@@ -73,9 +73,17 @@ async function sendLineReply(replyToken: string, decision: LineOnboardingDecisio
 }
 
 async function sendLinePush(userId: string, text: string): Promise<void> {
+  await sendLinePushMessages(userId, [{ type: "text", text }]);
+}
+
+async function sendLinePushMessages(
+  userId: string,
+  messages: Array<Record<string, unknown>>,
+  notificationDisabled = false
+): Promise<void> {
   await axios.post(
     "https://api.line.me/v2/bot/message/push",
-    { to: userId, messages: [{ type: "text", text }] },
+    { to: userId, messages, notificationDisabled },
     {
       headers: {
         Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
@@ -207,6 +215,20 @@ export function registerLineWebhookRoutes(
               projectName: decision.projectName,
               conversationId: decision.conversationId,
             });
+            if (decision.pushOnboardingCarousel && event?.source?.userId) {
+              try {
+                await sendLinePushMessages(
+                  String(event.source.userId),
+                  [buildLineOnboardingCarousel(config.BACKEND_PUBLIC_URL)],
+                  true
+                );
+              } catch (carouselError: any) {
+                logger.error(
+                  { error: carouselError.message, webhookEventId },
+                  "LINE AI forwarding succeeded but the 24-hour carousel recall push failed"
+                );
+              }
+            }
           }
         } catch (deliveryError) {
           await onboardingService.releaseWebhookEventForRetry(webhookEventId);

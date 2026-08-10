@@ -134,15 +134,6 @@ function actionPill(options: {
   };
 }
 
-function quickReplyItems(items: LineQuickReply[]): Record<string, unknown> {
-  return {
-    items: items.map((item) => ({
-      type: "action",
-      action: postbackAction(item.label, item.data, true),
-    })),
-  };
-}
-
 export function buildLineChoicePrompt(
   text: string,
   quickReplies: LineQuickReply[]
@@ -150,7 +141,6 @@ export function buildLineChoicePrompt(
   return {
     type: "flex",
     altText: text,
-    quickReply: quickReplyItems(quickReplies),
     contents: {
       type: "bubble",
       size: "kilo",

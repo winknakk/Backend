@@ -37,6 +37,7 @@ export interface LineOnboardingDecision {
   replyText?: string;
   quickReplies?: LineQuickReply[];
   replyWithOnboardingCarousel?: boolean;
+  pushOnboardingCarousel?: boolean;
   projectMenu?: LineProjectMenu;
   projectLinkConfirmation?: LineProjectLinkConfirmation;
   projectId?: number;
@@ -95,6 +96,7 @@ const ACTIVE_ONBOARDING_STATES = new Set([
 ]);
 
 const PROJECT_MENU_PAGE_SIZE = 10;
+const CAROUSEL_RECALL_AFTER_MS = 24 * 60 * 60 * 1000;
 
 export class LineProjectOnboardingService {
   constructor(
@@ -377,10 +379,18 @@ export class LineProjectOnboardingService {
         };
       }
       if (input.type === "message" && !ACTIVE_ONBOARDING_STATES.has(String(session?.state || ""))) {
+        const shouldRecallCarousel = await this.recordDmActivityAndCheckCarouselRecall(
+          client,
+          orgId,
+          input,
+          Number(ready.project_id),
+          Number(ready.conversation_id)
+        );
         return {
           action: "PASS_TO_AI",
           state: "COMPLETED",
           reason: "verified_existing_conversation",
+          ...(shouldRecallCarousel ? { pushOnboardingCarousel: true } : {}),
           projectId: Number(ready.project_id),
           projectName: ready.project_name,
           conversationId: Number(ready.conversation_id),
@@ -902,6 +912,56 @@ export class LineProjectOnboardingService {
     return result.rows[0] || null;
   }
 
+  private async recordDmActivityAndCheckCarouselRecall(
+    client: PoolClient,
+    orgId: string,
+    input: LineWebhookEventInput,
+    projectId: number,
+    conversationId: number
+  ): Promise<boolean> {
+    const now = new Date();
+    await client.query(
+      `INSERT INTO line_onboarding_sessions
+        (org_id, line_user_id, destination, state, selected_project_id, expires_at, metadata)
+       VALUES ($1, $2, $3, 'COMPLETED', $4, NOW() + INTERVAL '3650 days', '{}'::jsonb)
+       ON CONFLICT (org_id, line_user_id, destination) DO NOTHING`,
+      [orgId, input.userId, input.destination, projectId]
+    );
+    const lockedSession = await client.query(
+      `SELECT metadata
+       FROM line_onboarding_sessions
+       WHERE org_id = $1 AND line_user_id = $2 AND destination = $3
+       FOR UPDATE`,
+      [orgId, input.userId, input.destination]
+    );
+    const metadata = lockedSession.rows[0]?.metadata || {};
+    let previousActivityAt = Date.parse(String(metadata.lastDmActivityAt || ""));
+    if (!Number.isFinite(previousActivityAt)) {
+      const history = await client.query(
+        `SELECT MAX(created_at) AS last_activity_at
+         FROM messages
+         WHERE conversation_id = $1 AND role = 'customer'`,
+        [conversationId]
+      );
+      previousActivityAt = history.rows[0]?.last_activity_at
+        ? new Date(history.rows[0].last_activity_at).getTime()
+        : Number.NaN;
+    }
+    await client.query(
+      `UPDATE line_onboarding_sessions
+       SET metadata = jsonb_set(
+         COALESCE(metadata, '{}'::jsonb),
+         '{lastDmActivityAt}',
+         to_jsonb($4::text),
+         TRUE
+       )
+       WHERE org_id = $1 AND line_user_id = $2 AND destination = $3`,
+      [orgId, input.userId, input.destination, now.toISOString()]
+    );
+    return Number.isFinite(previousActivityAt)
+      && now.getTime() - previousActivityAt >= CAROUSEL_RECALL_AFTER_MS;
+  }
+
   private async upsertSession(
     client: PoolClient,
     orgId: string,
@@ -909,6 +969,10 @@ export class LineProjectOnboardingService {
     state: string,
     metadata: Record<string, unknown> = {}
   ): Promise<void> {
+    const sessionMetadata = {
+      ...metadata,
+      lastDmActivityAt: new Date().toISOString(),
+    };
     await client.query(
       `INSERT INTO line_onboarding_sessions
         (org_id, line_user_id, destination, state, metadata)
@@ -920,7 +984,7 @@ export class LineProjectOnboardingService {
          metadata = line_onboarding_sessions.metadata || EXCLUDED.metadata,
          expires_at = NOW() + INTERVAL '24 hours',
          updated_at = NOW()`,
-      [orgId, input.userId, input.destination, state, JSON.stringify(metadata)]
+      [orgId, input.userId, input.destination, state, JSON.stringify(sessionMetadata)]
     );
   }
 
@@ -930,15 +994,26 @@ export class LineProjectOnboardingService {
     input: LineWebhookEventInput,
     projectId: number
   ): Promise<void> {
+    const lastDmActivityAt = new Date().toISOString();
     await client.query(
       `INSERT INTO line_onboarding_sessions
-        (org_id, line_user_id, destination, state, selected_project_id, expires_at)
-       VALUES ($1, $2, $3, 'COMPLETED', $4, NOW() + INTERVAL '3650 days')
+        (org_id, line_user_id, destination, state, selected_project_id, expires_at, metadata)
+       VALUES (
+         $1, $2, $3, 'COMPLETED', $4, NOW() + INTERVAL '3650 days',
+         jsonb_build_object('lastDmActivityAt', $5::text)
+       )
        ON CONFLICT (org_id, line_user_id, destination) DO UPDATE SET
          state = 'COMPLETED', selected_project_id = EXCLUDED.selected_project_id,
          attempts = 0, locked_until = NULL,
-         expires_at = EXCLUDED.expires_at, updated_at = NOW()`,
-      [orgId, input.userId, input.destination, projectId]
+         expires_at = EXCLUDED.expires_at,
+         metadata = jsonb_set(
+           COALESCE(line_onboarding_sessions.metadata, '{}'::jsonb),
+           '{lastDmActivityAt}',
+           to_jsonb($5::text),
+           TRUE
+         ),
+         updated_at = NOW()`,
+      [orgId, input.userId, input.destination, projectId, lastDmActivityAt]
     );
   }
 
