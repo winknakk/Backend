@@ -18,7 +18,9 @@
       "summary": { "type": "string", "description": "Full detailed description of the problem (at least 10 chars)" },
       "severity": { "type": "string", "description": "Severity: Critical, High, Medium, Low" },
       "priority": { "type": "string", "description": "Priority: P1, P2, P3, P4" },
-      "projectId": { "type": "string", "description": "The relevant project ID" }
+      "projectId": { "type": "string", "description": "The relevant project ID" },
+      "diagnostic": { "type": "object", "description": "Optional structured Developer Diagnostic summary" },
+      "attachments": { "type": "array", "description": "Optional list of attachments or screenshots" }
     },
     "required": ["conversationId", "subject", "summary", "severity", "priority", "projectId"]
   },

@@ -65,6 +65,7 @@ export class TicketService {
             aiConfidenceMetrics: existing.aiConfidenceMetrics,
             created_by_type: existing.createdByType,
             created_by_name: existing.createdByName,
+            diagnostic: (existing as any).diagnostic || undefined,
           },
           error: null,
           source: "postgres_idempotent",
@@ -153,7 +154,8 @@ export class TicketService {
         created_by_type: createdByType,
         created_by_name: createdByName || null,
         enrichmentState: ticket.enrichmentState,
-        aiConfidenceMetrics: ticket.aiConfidenceMetrics
+        aiConfidenceMetrics: ticket.aiConfidenceMetrics,
+        diagnostic: input.diagnostic || undefined,
       };
 
       // Write to local encrypted backup

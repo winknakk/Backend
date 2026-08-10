@@ -1364,7 +1364,8 @@ fastify.all("/api/v1/internal/rag", async (request, reply) => {
     projectId = payload.projectId || payload.project_id || "1";
   }
 
-  const results = await knowledgeService.searchKnowledgeBase(query || "", String(projectId));
+  const orgId = request.tenantContext?.orgId;
+  const results = await knowledgeService.searchKnowledgeBase(query || "", String(projectId), orgId);
   return reply.code(200).send({
     success: true,
     data: { results }

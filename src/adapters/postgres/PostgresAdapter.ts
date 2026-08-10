@@ -569,16 +569,31 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   // ─── Knowledge Search ─────────────────────────────────────
 
-  async searchKnowledge(query: string, filters?: { projectId?: string; orgId?: string }, tenantCtx?: TenantContext | string): Promise<any[]> {
+  async searchKnowledge(
+    query: string,
+    filters?: { projectId?: string; orgId?: string },
+    tenantCtx?: TenantContext | string
+  ): Promise<any[]> {
+    const rawOrgId = filters?.orgId || (typeof tenantCtx === "string" ? tenantCtx : tenantCtx?.orgId);
+    const orgId = rawOrgId || "org_default";
+    const rawProjectId = filters?.projectId;
+    const projectIdNum = rawProjectId && rawProjectId.toLowerCase() !== "all" ? parseInt(rawProjectId, 10) : undefined;
+
     const fallback = async () => {
       const messages = await BackupManager.readFromBackup<any>("messages");
       const tickets = await BackupManager.readFromBackup<any>("tickets");
+      const conversations = await BackupManager.readFromBackup<any>("conversations");
       const results: any[] = [];
 
       const lowerQuery = query.toLowerCase();
 
-      // Search Messages fallback
+      // Search Messages fallback - strictly scoped to active tenant and project
       messages.forEach((m) => {
+        const conv = conversations.find((c) => String(c.id) === String(m.conversation_id));
+        if (!conv) return;
+        if (orgId && orgId !== "org_all" && conv.org_id && conv.org_id !== orgId) return;
+        if (projectIdNum !== undefined && !isNaN(projectIdNum) && conv.project_id !== projectIdNum) return;
+
         if ((m.content || "").toLowerCase().includes(lowerQuery)) {
           results.push({
             source: "postgres_fallback",
@@ -591,8 +606,16 @@ export class PostgresAdapter implements DatabaseAdapter {
         }
       });
 
-      // Search Tickets fallback
+      // Search Tickets fallback - strictly scoped to active tenant and project
       tickets.forEach((t) => {
+        const conv = conversations.find((c) => String(c.id) === String(t.conversation_id));
+        if (conv) {
+          if (orgId && orgId !== "org_all" && conv.org_id && conv.org_id !== orgId) return;
+          if (projectIdNum !== undefined && !isNaN(projectIdNum) && conv.project_id !== projectIdNum) return;
+        } else if (projectIdNum !== undefined && !isNaN(projectIdNum) && t.project_id !== projectIdNum) {
+          return;
+        }
+
         if (
           (t.subject || "").toLowerCase().includes(lowerQuery) ||
           (t.summary || "").toLowerCase().includes(lowerQuery)
@@ -613,16 +636,34 @@ export class PostgresAdapter implements DatabaseAdapter {
 
     try {
       const results: any[] = [];
+      const hasOrgId = await this.checkTableHasOrgId("conversations");
 
-      // Search messages
+      // 1. Search messages scoped via conversations table
+      const msgParams: any[] = [query];
+      const msgConditions: string[] = [
+        "m.content ILIKE '%' || $1 || '%'",
+        "c.deleted_at IS NULL",
+      ];
+
+      if (hasOrgId && orgId && orgId !== "org_all") {
+        msgParams.push(orgId);
+        msgConditions.push(`c.org_id = $${msgParams.length}`);
+      }
+
+      if (projectIdNum !== undefined && !isNaN(projectIdNum)) {
+        msgParams.push(projectIdNum);
+        msgConditions.push(`c.project_id = $${msgParams.length}`);
+      }
+
       const msgQuery = `
         SELECT m.id, m.content, m.conversation_id, 'message' AS type
         FROM messages m
-        WHERE m.content ILIKE '%' || $1 || '%'
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE ${msgConditions.join(" AND ")}
         ORDER BY m.created_at DESC
         LIMIT 10`;
 
-      const msgResult = await this.executeReadQuery(msgQuery, [query]);
+      const msgResult = await this.executeReadQuery(msgQuery, msgParams);
 
       for (const row of msgResult.rows) {
         results.push({
@@ -635,29 +676,31 @@ export class PostgresAdapter implements DatabaseAdapter {
         });
       }
 
-      // Search tickets
-      let ticketQuery: string;
-      let ticketParams: any[];
+      // 2. Search tickets scoped via conversations table
+      const ticketParams: any[] = [query];
+      const ticketConditions: string[] = [
+        "(t.subject ILIKE '%' || $1 || '%' OR t.summary ILIKE '%' || $1 || '%')",
+        "t.deleted_at IS NULL",
+        "c.deleted_at IS NULL",
+      ];
 
-      if (filters?.projectId) {
-        ticketQuery = `
-          SELECT t.id, t.subject, t.summary, t.conversation_id, 'ticket' AS type
-          FROM tickets t
-          JOIN conversations c ON c.id = t.conversation_id
-          WHERE (t.subject ILIKE '%' || $1 || '%' OR t.summary ILIKE '%' || $1 || '%')
-            AND c.project_id = $2
-          ORDER BY t.id DESC
-          LIMIT 10`;
-        ticketParams = [query, filters.projectId];
-      } else {
-        ticketQuery = `
-          SELECT t.id, t.subject, t.summary, 'ticket' AS type
-          FROM tickets t
-          WHERE t.subject ILIKE '%' || $1 || '%' OR t.summary ILIKE '%' || $1 || '%'
-          ORDER BY t.id DESC
-          LIMIT 10`;
-        ticketParams = [query];
+      if (hasOrgId && orgId && orgId !== "org_all") {
+        ticketParams.push(orgId);
+        ticketConditions.push(`c.org_id = $${ticketParams.length}`);
       }
+
+      if (projectIdNum !== undefined && !isNaN(projectIdNum)) {
+        ticketParams.push(projectIdNum);
+        ticketConditions.push(`c.project_id = $${ticketParams.length}`);
+      }
+
+      const ticketQuery = `
+        SELECT t.id, t.subject, t.summary, t.conversation_id, 'ticket' AS type
+        FROM tickets t
+        JOIN conversations c ON c.id = t.conversation_id
+        WHERE ${ticketConditions.join(" AND ")}
+        ORDER BY t.id DESC
+        LIMIT 10`;
 
       const ticketResult = await this.executeReadQuery(ticketQuery, ticketParams);
 

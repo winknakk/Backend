@@ -14,5 +14,5 @@ export interface IVectorStore {
 }
 
 export interface IRetriever {
-  retrieve(query: string, filters?: { projectId?: string; tenantId?: string }): Promise<KnowledgeResult[]>;
+  retrieve(query: string, filters?: { projectId?: string; tenantId?: string; orgId?: string }): Promise<KnowledgeResult[]>;
 }

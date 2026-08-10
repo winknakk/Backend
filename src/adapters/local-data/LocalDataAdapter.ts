@@ -331,12 +331,13 @@ export class LocalDataAdapter implements DatabaseAdapter {
         const content = m.content || "";
         const lowerContent = content.toLowerCase();
 
-        // Find if this message belongs to the specified project (filter check)
-        if (filters?.projectId) {
-          const conv = conversations.find((c) => c.id1 === m.conversation_id);
-          if (conv && conv.project_id !== filters.projectId) {
-            return; // Skip if project doesn't match filter
-          }
+        // Scope to tenant and project
+        const conv = conversations.find((c) => String(c.id1 || c.id) === String(m.conversation_id));
+        if (filters?.projectId && conv && String(conv.project_id) !== String(filters.projectId)) {
+          return;
+        }
+        if (filters?.orgId && filters.orgId !== "org_all" && conv && conv.org_id && conv.org_id !== filters.orgId) {
+          return;
         }
 
         // Calculate simple keyword overlap
@@ -351,11 +352,6 @@ export class LocalDataAdapter implements DatabaseAdapter {
 
         if (overlapCount > 0) {
           const score = queryWords.length > 0 ? overlapCount / queryWords.length : 0.5;
-          if (m.id1 === "6") {
-            console.log(`[Debug Search] Message #6: content="${lowerContent}"`);
-            console.log(`[Debug Search] queryWords=${JSON.stringify(queryWords)}`);
-            console.log(`[Debug Search] overlapCount=${overlapCount}, score=${score}`);
-          }
           matches.push({
             id: m.id1 || "msg-unknown",
             type: "message",
@@ -375,14 +371,19 @@ export class LocalDataAdapter implements DatabaseAdapter {
     // 2. Search Tickets (historical issues and descriptions)
     try {
       const tickets = this.readTable<any>("Tickets", DbTicketSchema);
+      const conversations = this.readTable<any>("Conversations", DbConversationSchema);
       tickets.forEach((t) => {
         const subject = t.subject || "";
         const summary = t.summary || "";
         const textToSearch = `${subject} ${summary}`.toLowerCase();
 
+        const conv = conversations.find((c) => String(c.id1 || c.id) === String(t.conversation_id));
         if (filters?.projectId) {
-          // If conversation's project does not match, skip
-          // For MVP local data, we check conversation link
+          if (conv && String(conv.project_id) !== String(filters.projectId)) return;
+          if (!conv && t.project_id && String(t.project_id) !== String(filters.projectId)) return;
+        }
+        if (filters?.orgId && filters.orgId !== "org_all" && conv && conv.org_id && conv.org_id !== filters.orgId) {
+          return;
         }
 
         let overlapCount = 0;
