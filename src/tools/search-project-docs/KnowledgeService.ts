@@ -11,16 +11,16 @@ export class KnowledgeService {
   }
 
   /**
-   * Queries retriever directly.
+   * Queries retriever directly with tenant-aware scoping.
    */
-  async searchProjects(query: string, filters?: { projectId?: string }): Promise<KnowledgeResult[]> {
+  async searchProjects(query: string, filters?: { projectId?: string; orgId?: string; tenantId?: string }): Promise<KnowledgeResult[]> {
     return this.retriever.retrieve(query, filters);
   }
 
   /**
-   * Preserves exact API compatibility for tools calling searchKnowledgeBase.
+   * Preserves exact API compatibility for tools calling searchKnowledgeBase with optional orgId.
    */
-  async searchKnowledgeBase(query: string, projectId?: string): Promise<KnowledgeResult[]> {
-    return this.retriever.retrieve(query, { projectId });
+  async searchKnowledgeBase(query: string, projectId?: string, orgId?: string): Promise<KnowledgeResult[]> {
+    return this.retriever.retrieve(query, { projectId, orgId, tenantId: orgId });
   }
 }

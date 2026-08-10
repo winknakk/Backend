@@ -117,17 +117,22 @@ export class PromptXMcpClient {
     message: string,
     conversationContext: { conversationId: string; history: Array<{ role: string; content: string }> },
     tenantContext: { companyId: string; companyName: string },
-    availableTools: Array<{ name: string; description: string }>
+    availableTools: Array<{ name: string; description: string }>,
+    timeoutMs: number = config.PROMPTX_DIAGNOSTIC_TIMEOUT_MS
   ): Promise<PromptXChatResponse> {
-    const response = await this.executeJsonRpc("tools/call", {
-      name: "chat",
-      arguments: {
-        message,
-        conversationContext,
-        tenantContext,
-        availableTools,
+    const response = await this.executeJsonRpc(
+      "tools/call",
+      {
+        name: "chat",
+        arguments: {
+          message,
+          conversationContext,
+          tenantContext,
+          availableTools,
+        },
       },
-    });
+      timeoutMs
+    );
 
     const textContent = response.content?.[0]?.text;
     if (typeof textContent !== "string") {

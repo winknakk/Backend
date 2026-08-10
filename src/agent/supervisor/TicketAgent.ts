@@ -5,6 +5,7 @@ import { createLogger } from "../../observability/logger";
 import { startTimer } from "../../observability/timing";
 import { MetricsService } from "../../observability/MetricsService";
 import { getProjectId } from "../../kernel/context/RequestContextHolder";
+import { DiagnosticAnalyzer } from "../diagnostic/DiagnosticAnalyzer";
 
 const logger = createLogger("TicketAgent");
 
@@ -175,6 +176,22 @@ export class TicketAgent implements IAgent {
     const conversationId = sessionContext.conversationId;
 
     const timer = startTimer();
+
+    // Perform structured Developer Diagnostic Analysis
+    const analyzer = new DiagnosticAnalyzer();
+    const knowledgeResults =
+      sessionContext?.knowledgeResults ||
+      sessionContext?.handoffContext?.results ||
+      [];
+
+    const diagnostic = await analyzer.analyzeAsync({
+      customerText: text,
+      conversationContext: `Channel: ${message.channel}, Sender: ${message.senderId || "User"}`,
+      knowledgeResults,
+      projectId,
+      tenantId: sessionContext?.tenantId || sessionContext?.orgId,
+    });
+
     const ticketResult = await this.mcpToolRouter.callTool(
       "create_ticket",
       {
@@ -184,6 +201,7 @@ export class TicketAgent implements IAgent {
         priority: "P3",
         severity: "Medium",
         projectId: String(projectId),
+        diagnostic,
       },
       sessionContext
     );

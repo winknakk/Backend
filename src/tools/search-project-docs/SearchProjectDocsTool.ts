@@ -7,6 +7,7 @@ import { KnowledgeService } from "./KnowledgeService";
 export const SearchInputSchema = z.object({
   query: z.string().min(2, "Search query must be at least 2 characters"),
   projectId: z.string().optional(),
+  orgId: z.string().optional(),
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
 
@@ -30,7 +31,8 @@ export class SearchProjectDocsTool implements ITool {
 
   async execute(params: Record<string, any>, context?: any): Promise<Record<string, any>> {
     const input = SearchInputSchema.parse(params);
-    const results = await this.knowledgeService.searchKnowledgeBase(input.query, input.projectId);
+    const orgId = input.orgId || context?.tenantId || context?.orgId;
+    const results = await this.knowledgeService.searchKnowledgeBase(input.query, input.projectId, orgId);
     
     // Normalize to standardized execution wrapper
     return {

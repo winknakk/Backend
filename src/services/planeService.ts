@@ -69,6 +69,124 @@ function normalizePlaneTargetDate(value: unknown): string | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString().slice(0, 10);
 }
 
+import { sanitizeSensitiveData } from "../domain/diagnostic/DeveloperDiagnostic";
+
+export function formatDeveloperDiagnosticHtml(diag: any): string {
+  if (!diag) return "";
+
+  const getFieldValue = (
+    field: any,
+    defaultVal = "UNKNOWN"
+  ): { value: string; source: string; confidence: number; isHypothesis: boolean } => {
+    if (!field) return { value: defaultVal, source: "UNKNOWN", confidence: 0, isHypothesis: true };
+    if (typeof field === "string") {
+      return { value: field, source: "AI_INFERENCE", confidence: 50, isHypothesis: true };
+    }
+    return {
+      value: field.value || defaultVal,
+      source: field.source || "AI_INFERENCE",
+      confidence: typeof field.confidence === "number" ? field.confidence : 0,
+      isHypothesis: field.isHypothesis !== false,
+    };
+  };
+
+  const projectField = getFieldValue(diag.project);
+  const moduleField = getFieldValue(diag.module);
+  const featureField = getFieldValue(diag.feature);
+  const layerField = getFieldValue(diag.suspected_layer);
+  const componentField = getFieldValue(diag.suspected_component);
+  const apiField = getFieldValue(diag.suspected_api, "NOT_FOUND_IN_KNOWLEDGE_BASE");
+  const dbField = getFieldValue(diag.suspected_database_object, "NOT_FOUND_IN_KNOWLEDGE_BASE");
+  const rootCauseField = getFieldValue(diag.root_cause_hypothesis);
+
+  const customerReport = sanitizeSensitiveData(diag.customer_report || "");
+  const expectedBehavior = sanitizeSensitiveData(
+    diag.expected_behavior || "System should function normally without errors"
+  );
+  const actualBehavior = sanitizeSensitiveData(diag.actual_behavior || customerReport);
+  const overallConfidence =
+    typeof diag.confidence === "number" ? diag.confidence : rootCauseField.confidence;
+  const nextAction = sanitizeSensitiveData(
+    diag.recommended_next_action || "Review customer logs and reproduce in staging environment"
+  );
+
+  const evidenceList: any[] = Array.isArray(diag.customer_evidence) ? diag.customer_evidence : [];
+  const evidenceHtml =
+    evidenceList.length > 0
+      ? `<h3>🔎 Customer Evidence</h3><ul>` +
+        evidenceList
+          .map((e) => {
+            const type = escapePlaneHtml(e.type || "Evidence");
+            const val = escapePlaneHtml(sanitizeSensitiveData(e.value || ""));
+            const src = escapePlaneHtml(e.source || "CUSTOMER_REPORTED");
+            return `<li><strong>[${src}] ${type}:</strong> <code>${val}</code></li>`;
+          })
+          .join("") +
+        `</ul>`
+      : "";
+
+  const reproSteps: string[] = Array.isArray(diag.reproduction_steps) ? diag.reproduction_steps : [];
+  const reproHtml =
+    reproSteps.length > 0
+      ? `<h3>🧪 Steps to Reproduce</h3><ol>` +
+        reproSteps
+          .map((step) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`)
+          .join("") +
+        `</ol>`
+      : "";
+
+  const kbSources: any[] = Array.isArray(diag.knowledge_sources) ? diag.knowledge_sources : [];
+  const kbHtml =
+    kbSources.length > 0
+      ? `<h3>📚 Evidence Sources (Knowledge Base)</h3><ul>` +
+        kbSources
+          .map((kb) => {
+            const title = escapePlaneHtml(kb.title || "Project Documentation");
+            const score =
+              typeof kb.score === "number" ? ` (Score: ${(kb.score * 100).toFixed(0)}%)` : "";
+            const snippet = kb.snippet
+              ? `<br><em>${escapePlaneHtml(sanitizeSensitiveData(kb.snippet))}</em>`
+              : "";
+            return `<li><strong>${title}</strong>${score}${snippet}</li>`;
+          })
+          .join("") +
+        `</ul>`
+      : "";
+
+  const unknownsList: string[] = Array.isArray(diag.unknowns) ? diag.unknowns : [];
+  const unknownsHtml =
+    unknownsList.length > 0
+      ? `<h3>❓ Unknown Information</h3><ul>` +
+        unknownsList
+          .map((u) => `<li>${escapePlaneHtml(sanitizeSensitiveData(u))}</li>`)
+          .join("") +
+        `</ul>`
+      : "";
+
+  return [
+    `<h3>🎯 Customer Report</h3><p>${escapePlaneHtml(customerReport).replace(/\r?\n/g, "<br>")}</p>`,
+    evidenceHtml,
+    reproHtml,
+    `<h3>🔍 Expected vs Actual</h3><ul>`,
+    `<li><strong>Expected:</strong> ${escapePlaneHtml(expectedBehavior)}</li>`,
+    `<li><strong>Actual:</strong> ${escapePlaneHtml(actualBehavior)}</li>`,
+    `</ul>`,
+    `<h3>🛠️ Developer Diagnostics</h3><ul>`,
+    `<li><strong>Project:</strong> ${escapePlaneHtml(projectField.value)} <em>[${escapePlaneHtml(projectField.source)}]</em></li>`,
+    `<li><strong>Module:</strong> ${escapePlaneHtml(moduleField.value)} <em>[${escapePlaneHtml(moduleField.source)}]</em></li>`,
+    `<li><strong>Feature:</strong> ${escapePlaneHtml(featureField.value)} <em>[${escapePlaneHtml(featureField.source)}]</em></li>`,
+    `<li><strong>Suspected Layer:</strong> ${escapePlaneHtml(layerField.value)} <em>[${escapePlaneHtml(layerField.source)}]</em></li>`,
+    `<li><strong>Suspected Component:</strong> ${escapePlaneHtml(componentField.value)} <em>[${escapePlaneHtml(componentField.source)}]</em></li>`,
+    `<li><strong>Suspected API:</strong> <code>${escapePlaneHtml(apiField.value)}</code> <em>[${escapePlaneHtml(apiField.source)}]</em></li>`,
+    `<li><strong>Suspected Database Object:</strong> <code>${escapePlaneHtml(dbField.value)}</code> <em>[${escapePlaneHtml(dbField.source)}]</em></li>`,
+    `<li><strong>Root Cause Hypothesis:</strong> ${escapePlaneHtml(rootCauseField.value)} <strong style="color:#d97706;">[AI HYPOTHESIS - Confidence: ${overallConfidence}%]</strong></li>`,
+    `</ul>`,
+    kbHtml,
+    unknownsHtml,
+    `<h3>🚀 Recommended Next Investigation</h3><p>${escapePlaneHtml(nextAction)}</p>`,
+  ].join("");
+}
+
 export function buildPlaneWorkItemPayload(
   ticket: Record<string, any>,
   companyName = "Unknown"
@@ -128,13 +246,32 @@ export function buildPlaneWorkItemPayload(
     .map((item) => `<li>${escapePlaneHtml(item)}</li>`)
     .join("");
 
+  // Check if ticket carries structured diagnostic
+  let diagnosticData = ticket.diagnostic;
+  if (!diagnosticData && typeof summary === "string" && summary.startsWith("{") && summary.includes('"customer_report"')) {
+    try {
+      diagnosticData = JSON.parse(summary);
+    } catch {
+      // Not JSON, fallback to plain summary
+    }
+  }
+
+  let mainReportContent = `<h3>Customer report</h3><p>${escapePlaneHtml(sanitizeSensitiveData(summary)).replace(/\r?\n/g, "<br>")}</p>`;
+  if (diagnosticData) {
+    try {
+      mainReportContent = formatDeveloperDiagnosticHtml(diagnosticData);
+    } catch (err: any) {
+      console.warn("[PlaneService] Failed to format diagnostic HTML, falling back to summary:", err.message);
+    }
+  }
+
   const summarySections = [
-    `<h3>Customer report</h3><p>${escapePlaneHtml(summary).replace(/\r?\n/g, "<br>")}</p>`,
+    mainReportContent,
     runningSummary
       ? `<h3>Customer update history</h3><ul>${runningSummaryHtml}</ul>`
       : "",
     lastAiSummary
-      ? `<h3>Latest customer update</h3><p>${escapePlaneHtml(lastAiSummary).replace(/\r?\n/g, "<br>")}</p>`
+      ? `<h3>Latest customer update</h3><p>${escapePlaneHtml(sanitizeSensitiveData(lastAiSummary)).replace(/\r?\n/g, "<br>")}</p>`
       : "",
   ].join("");
 
