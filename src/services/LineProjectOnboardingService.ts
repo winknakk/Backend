@@ -11,6 +11,9 @@ export interface LineQuickReply {
 export interface LineProjectMenuItem {
   projectId: number;
   projectName: string;
+  companyName: string;
+  projectType: string;
+  environment: string;
   isCurrent: boolean;
 }
 
@@ -27,6 +30,18 @@ export interface LineProjectLinkConfirmation {
   currentProjectName: string;
   linkedProjectId: number;
   linkedProjectName: string;
+  linkedCompanyName: string;
+  linkedProjectType: string;
+  linkedEnvironment: string;
+}
+
+interface AvailableLineProject {
+  id: number;
+  name: string;
+  orgId: string;
+  companyName: string;
+  projectType: string;
+  environment: string;
 }
 
 export interface LineOnboardingDecision {
@@ -441,8 +456,8 @@ export class LineProjectOnboardingService {
             "โปรเจกต์ที่เลือกไม่พร้อมใช้งานแล้วค่ะ เลือกจากรายการล่าสุดได้เลยนะคะ"
           );
         }
-        const provisioned = await this.provisionProject(client, orgId, input.userId, target.id);
-        await this.completeSession(client, orgId, input, target.id);
+        const provisioned = await this.provisionProject(client, target.orgId, input.userId, target.id);
+        await this.completeSession(client, target.orgId, input, target.id);
         return {
           action: "REPLY",
           state: "COMPLETED",
@@ -486,8 +501,8 @@ export class LineProjectOnboardingService {
           }
           if (currentProjectId || projects.length === 1) {
             const target = projects.find((project) => project.id === currentProjectId) || projects[0];
-            const provisioned = await this.provisionProject(client, orgId, input.userId, target.id);
-            await this.completeSession(client, orgId, input, target.id);
+            const provisioned = await this.provisionProject(client, target.orgId, input.userId, target.id);
+            await this.completeSession(client, target.orgId, input, target.id);
             return {
               action: "REPLY",
               state: "COMPLETED",
@@ -675,7 +690,7 @@ export class LineProjectOnboardingService {
   private projectMenuDecision(
     reason: string,
     kind: "overview" | "selector",
-    projects: Array<{ id: number; name: string }>,
+    projects: AvailableLineProject[],
     currentProjectId: number | null,
     requestedPage = 0,
     notice?: string
@@ -692,6 +707,9 @@ export class LineProjectOnboardingService {
         projects: pageProjects.map((project) => ({
           projectId: project.id,
           projectName: project.name,
+          companyName: project.companyName,
+          projectType: project.projectType,
+          environment: project.environment,
           isCurrent: project.id === currentProjectId,
         })),
         page,
@@ -702,7 +720,7 @@ export class LineProjectOnboardingService {
   }
 
   private resolveCurrentProjectId(
-    projects: Array<{ id: number; name: string }>,
+    projects: AvailableLineProject[],
     session: any,
     ready: any
   ): number | null {
@@ -721,9 +739,13 @@ export class LineProjectOnboardingService {
     const normalized = LineProjectOnboardingService.normalizeCode(input.messageText || "");
     const digest = this.digestCode(normalized);
     const codeResult = await client.query(
-      `SELECT c.id AS code_id, c.project_id, c.org_id, p.name AS project_name
+      `SELECT c.id AS code_id, c.project_id, c.org_id, p.name AS project_name,
+              COALESCE(co.name, '-') AS company_name,
+              COALESCE(p.project_type, '-') AS project_type,
+              COALESCE(p.environment, '-') AS environment
        FROM project_join_codes c
        JOIN projects p ON p.id = c.project_id AND p.org_id = c.org_id
+       LEFT JOIN companies co ON co.id = p.company_id
        WHERE c.code_digest = $1
          AND c.status = 'active'
          AND (c.expires_at IS NULL OR c.expires_at > NOW())
@@ -772,7 +794,7 @@ export class LineProjectOnboardingService {
       [code.code_id]
     );
     if (currentProject && currentProject.id !== Number(code.project_id)) {
-      await this.completeSession(client, targetOrgId, input, currentProject.id);
+      await this.completeSession(client, currentProject.orgId, input, currentProject.id);
       return {
         action: "REPLY",
         state: "COMPLETED",
@@ -784,6 +806,9 @@ export class LineProjectOnboardingService {
           currentProjectName: currentProject.name,
           linkedProjectId: Number(code.project_id),
           linkedProjectName: code.project_name,
+          linkedCompanyName: code.company_name,
+          linkedProjectType: code.project_type,
+          linkedEnvironment: code.environment,
         },
       };
     }
@@ -845,7 +870,6 @@ export class LineProjectOnboardingService {
          ON s.org_id = p.org_id
         AND s.line_user_id = $1
         AND s.destination = $2
-        AND s.state = 'COMPLETED'
        LEFT JOIN project_channels pc
          ON pc.project_id = p.id
         AND pc.channel_id = $2
@@ -875,16 +899,18 @@ export class LineProjectOnboardingService {
     client: PoolClient,
     orgId: string,
     userId: string
-  ): Promise<Array<{ id: number; name: string }>> {
+  ): Promise<AvailableLineProject[]> {
     const result = await client.query(
-      `SELECT DISTINCT p.id, p.name
+      `SELECT DISTINCT p.id, p.name, p.org_id,
+              COALESCE(co.name, '-') AS company_name,
+              COALESCE(p.project_type, '-') AS project_type,
+              COALESCE(p.environment, '-') AS environment,
+              CASE WHEN p.org_id = $2 THEN 0 ELSE 1 END AS org_priority
        FROM identities i
        JOIN profiles pr ON pr.id = i.profile_id
        JOIN profile_projects pp ON pp.profile_id = pr.id
-       JOIN projects p
-         ON p.id = pp.project_id
-        AND p.org_id = $2
-        AND p.company_id = pr.company_id
+       JOIN projects p ON p.id = pp.project_id
+       LEFT JOIN companies co ON co.id = p.company_id
        WHERE LOWER(i.channel) = 'line'
          AND i.channel_ref = $1
          AND i.deleted_at IS NULL
@@ -896,10 +922,17 @@ export class LineProjectOnboardingService {
              AND COALESCE(pc.is_enabled, TRUE)
              AND COALESCE(pc.active, TRUE)
          )
-       ORDER BY p.name, p.id`,
+       ORDER BY org_priority, p.name, p.id`,
       [userId, orgId]
     );
-    return result.rows.map((row) => ({ id: Number(row.id), name: String(row.name) }));
+    return result.rows.map((row) => ({
+      id: Number(row.id),
+      name: String(row.name),
+      orgId: String(row.org_id || "org_default"),
+      companyName: String(row.company_name || "-"),
+      projectType: String(row.project_type || "-"),
+      environment: String(row.environment || "-"),
+    }));
   }
 
   private async getSession(client: PoolClient, orgId: string, userId: string, destination: string): Promise<any> {
@@ -995,6 +1028,15 @@ export class LineProjectOnboardingService {
     projectId: number
   ): Promise<void> {
     const lastDmActivityAt = new Date().toISOString();
+    await client.query(
+      `UPDATE line_onboarding_sessions
+       SET state = 'AWAITING_CHOICE', selected_project_id = NULL, updated_at = NOW()
+       WHERE line_user_id = $1
+         AND destination = $2
+         AND org_id <> $3
+         AND state = 'COMPLETED'`,
+      [input.userId, input.destination, orgId]
+    );
     await client.query(
       `INSERT INTO line_onboarding_sessions
         (org_id, line_user_id, destination, state, selected_project_id, expires_at, metadata)

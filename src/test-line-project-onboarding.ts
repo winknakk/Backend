@@ -86,7 +86,9 @@ function testOnboardingVoice(): void {
   assert.match(serviceSource, /s\.selected_project_id = c\.project_id/);
   assert.match(serviceSource, /JOIN profile_projects pp ON pp\.profile_id = pr\.id/);
   assert.match(serviceSource, /project_switch_completed/);
-  assert.match(serviceSource, /p\.company_id = pr\.company_id/);
+  assert.doesNotMatch(serviceSource, /p\.company_id = pr\.company_id/);
+  assert.match(serviceSource, /provisionProject\(client, target\.orgId/);
+  assert.match(serviceSource, /companyName: project\.companyName/);
   assert.match(serviceSource, /ticketx:onboarding:switch_project/);
   assert.match(serviceSource, /CAROUSEL_RECALL_AFTER_MS = 24 \* 60 \* 60 \* 1000/);
   assert.match(serviceSource, /pushOnboardingCarousel/);
