@@ -721,11 +721,10 @@ export class LineProjectOnboardingService {
     const normalized = LineProjectOnboardingService.normalizeCode(input.messageText || "");
     const digest = this.digestCode(normalized);
     const codeResult = await client.query(
-      `SELECT c.id AS code_id, c.project_id, p.name AS project_name
+      `SELECT c.id AS code_id, c.project_id, c.org_id, p.name AS project_name
        FROM project_join_codes c
        JOIN projects p ON p.id = c.project_id AND p.org_id = c.org_id
-       WHERE c.org_id = $1
-         AND c.code_digest = $2
+       WHERE c.code_digest = $1
          AND c.status = 'active'
          AND (c.expires_at IS NULL OR c.expires_at > NOW())
          AND EXISTS (
@@ -737,7 +736,7 @@ export class LineProjectOnboardingService {
              AND COALESCE(pc.active, TRUE)
          )
        LIMIT 1`,
-      [orgId, digest]
+      [digest]
     );
 
     if (codeResult.rows.length === 0) {
@@ -759,12 +758,13 @@ export class LineProjectOnboardingService {
     }
 
     const code = codeResult.rows[0];
-    const projectsBeforeLink = await this.findAvailableProjects(client, orgId, input.userId!);
-    const currentSession = await this.getSession(client, orgId, input.userId!, input.destination);
+    const targetOrgId = code.org_id || orgId;
+    const projectsBeforeLink = await this.findAvailableProjects(client, targetOrgId, input.userId!);
+    const currentSession = await this.getSession(client, targetOrgId, input.userId!, input.destination);
     const currentReady = await this.findReadyConversation(client, input.userId!, input.destination);
     const currentProjectId = this.resolveCurrentProjectId(projectsBeforeLink, currentSession, currentReady);
     const currentProject = projectsBeforeLink.find((project) => project.id === currentProjectId);
-    const provisioned = await this.provisionProject(client, orgId, input.userId!, Number(code.project_id));
+    const provisioned = await this.provisionProject(client, targetOrgId, input.userId!, Number(code.project_id));
     await client.query(
       `UPDATE project_join_codes
        SET usage_count = usage_count + 1, last_used_at = NOW()
@@ -772,7 +772,7 @@ export class LineProjectOnboardingService {
       [code.code_id]
     );
     if (currentProject && currentProject.id !== Number(code.project_id)) {
-      await this.completeSession(client, orgId, input, currentProject.id);
+      await this.completeSession(client, targetOrgId, input, currentProject.id);
       return {
         action: "REPLY",
         state: "COMPLETED",
@@ -787,7 +787,7 @@ export class LineProjectOnboardingService {
         },
       };
     }
-    await this.completeSession(client, orgId, input, Number(code.project_id));
+    await this.completeSession(client, targetOrgId, input, Number(code.project_id));
     return {
       action: "REPLY",
       state: "COMPLETED",
@@ -1029,16 +1029,10 @@ export class LineProjectOnboardingService {
          WHERE id = $1 AND org_id = $2
        ),
        existing_identity AS (
-         SELECT i.id, i.profile_id, pr.company_id
+         SELECT i.id, i.profile_id
          FROM identities i
-         JOIN profiles pr ON pr.id = i.profile_id
          WHERE LOWER(i.channel) = 'line' AND i.channel_ref = $3 AND i.deleted_at IS NULL
          LIMIT 1
-       ),
-       compatible_existing AS (
-         SELECT ei.id, ei.profile_id
-         FROM existing_identity ei
-         JOIN target_project tp ON tp.company_id = ei.company_id
        ),
        new_profile AS (
          INSERT INTO profiles (id, company_id, name, metadata, is_pii_erased, is_merged, created_at, updated_at)
@@ -1050,7 +1044,7 @@ export class LineProjectOnboardingService {
          RETURNING id
        ),
        target_profile AS (
-         SELECT profile_id AS id FROM compatible_existing
+         SELECT profile_id AS id FROM existing_identity
          UNION ALL SELECT id FROM new_profile
          LIMIT 1
        ),
@@ -1064,7 +1058,7 @@ export class LineProjectOnboardingService {
          RETURNING id, profile_id
        ),
        current_identity AS (
-         SELECT id, profile_id FROM compatible_existing
+         SELECT id, profile_id FROM existing_identity
          UNION ALL SELECT id, profile_id FROM new_identity
          LIMIT 1
        ),

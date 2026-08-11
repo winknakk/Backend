@@ -133,7 +133,8 @@ const smsNotificationService = new SmsNotificationService(pool);
 const emailNotificationService = new EmailNotificationService();
 const projectJoinCodePepper =
   config.PROJECT_JOIN_CODE_PEPPER ||
-  (config.NODE_ENV === "production" ? "" : config.LINE_CHANNEL_ACCESS_TOKEN);
+  config.LINE_CHANNEL_ACCESS_TOKEN ||
+  "automationx_default_pepper_key_2026";
 const lineProjectOnboardingService = new LineProjectOnboardingService(
   pool,
   projectJoinCodePepper,
