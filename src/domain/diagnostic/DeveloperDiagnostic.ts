@@ -75,6 +75,20 @@ export const AttachmentEvidenceSchema = z.object({
 });
 export type AttachmentEvidence = z.infer<typeof AttachmentEvidenceSchema>;
 
+export const CodeEvidenceSchema = z.object({
+  repositoryId: z.string(),
+  filePath: z.string(),
+  symbolName: z.string().optional(),
+  symbolType: z.string().optional(),
+  lineStart: z.number().optional(),
+  lineEnd: z.number().optional(),
+  language: z.string().optional(),
+  snippet: z.string(),
+  branch: z.string().optional(),
+  commitSha: z.string().optional(),
+});
+export type CodeEvidence = z.infer<typeof CodeEvidenceSchema>;
+
 export const DeveloperDiagnosticSchema = z.object({
   project: z.union([z.string(), DiagnosticFieldSchema]).default("UNKNOWN"),
   module: z.union([z.string(), DiagnosticFieldSchema]).default("UNKNOWN"),
@@ -125,6 +139,7 @@ export const DeveloperDiagnosticSchema = z.object({
   confidence: z.number().min(0).max(100).default(0),
   confidence_type: ConfidenceTypeSchema.default("HEURISTIC_RULE_STRENGTH"),
   knowledge_sources: z.array(KnowledgeCitationSchema).default([]),
+  code_evidence: z.array(CodeEvidenceSchema).default([]),
   unknowns: z.array(z.string()).default([]),
   recommended_next_action: z.string().default("Review customer logs and reproduce in staging environment"),
 });

@@ -22,6 +22,8 @@ import {
   EscalateToPmTool,
 } from "../tools/ToolRegistry";
 import { SearchProjectDocsTool } from "../tools/search-project-docs/SearchProjectDocsTool";
+import { SearchCodebaseTool } from "../tools/SearchCodebaseTool";
+import { GitSyncService } from "../services/GitSyncService";
 import { PieceAdapter } from "../piece-adapter/PieceAdapter";
 import { PieceMcpTool } from "../piece-adapter/PieceMcpTool";
 import { DynamicMcpTool } from "../tools/DynamicMcpTool";
@@ -36,6 +38,7 @@ import { registerAuthRoutes } from "./routes/auth";
 import { registerMasterDataRoutes } from "./routes/masterData";
 import { registerPortalRoutes } from "./routes/portal";
 import { registerLineWebhookRoutes } from "./routes/lineWebhook";
+import { registerGitRepositoryRoutes } from "./routes/gitRepoRoutes";
 import { SLAMatrixService } from "../services/SLAMatrixService";
 import { PolicyEngine } from "../policy/PolicyEngine";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
@@ -344,8 +347,10 @@ async function bootstrap() {
   // Register local tools
   const createTicketTool = new CreateTicketTool(ticketService);
   const searchDocsTool = new SearchProjectDocsTool(knowledgeService);
+  const searchCodebaseTool = new SearchCodebaseTool(knowledgeService);
   toolRegistry.registerTool(createTicketTool);
   toolRegistry.registerTool(searchDocsTool);
+  toolRegistry.registerTool(searchCodebaseTool);
   toolRegistry.registerTool(new GetTicketTool());
   toolRegistry.registerTool(new GetTicketStatusTool());
   toolRegistry.registerTool(new UpdateSummaryTool(planeService));
@@ -1911,6 +1916,7 @@ fastify.register(WebChatGateway);
 // Register Auth, Master Data, & Customer Portal Routes
 fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
+fastify.register(registerGitRepositoryRoutes);
 registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
 registerLineWebhookRoutes(fastify, lineProjectOnboardingService);
 

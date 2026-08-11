@@ -21,7 +21,13 @@
     "build": "npx tsc",
     "lint": "npx eslint \"src/**/*.ts\"",
     "format": "npx prettier --check \"src/**/*.ts\"",
-    "test": "npx tsx test/domain/Identity.test.ts && npx tsx test/domain/Ticket.test.ts && npx tsx test/orchestrator/GatekeeperSecurity.test.ts && npx tsx src/test-handoff.ts && npx tsx src/test-tenants.ts && npx tsx src/test-agent-policy.ts && npx tsx src/test-security.ts && npx tsx src/test-vertical-slice.ts && npx tsx src/test-circuit-breaker.ts && npx tsx src/test-distributed-queue.ts && npx tsx src/test-tenant-cache.ts && npx tsx src/test-graceful-shutdown.ts && npx tsx src/test-distributed-tracing.ts && npx tsx src/test-database-failover.ts && npx tsx src/test-hot-reload.ts && npx tsx src/test-prometheus-metrics.ts"
+    "test:git-foundation": "npx tsx test/git/GitRepositoryFoundation.test.ts",
+    "test:git-sync": "npx tsx test/git/GitSyncService.test.ts",
+    "test:search-codebase": "npx tsx test/git/SearchCodebaseTool.test.ts",
+    "test:diagnostic-code": "npx tsx test/git/DiagnosticCodeEvidence.test.ts",
+    "test:diagnostic-e2e": "npx tsx test/git/DiagnosticE2EOrchestration.test.ts",
+    "test:diagnostic-p4": "npx tsx test/git/DiagnosticProductionReliability.test.ts",
+    "test": "npx tsx test/git/DiagnosticProductionReliability.test.ts && npx tsx test/git/DiagnosticE2EOrchestration.test.ts && npx tsx test/git/DiagnosticCodeEvidence.test.ts && npx tsx test/git/GitSyncService.test.ts && npx tsx test/git/SearchCodebaseTool.test.ts && npx tsx test/git/GitRepositoryFoundation.test.ts && npx tsx test/domain/Identity.test.ts && npx tsx test/domain/Ticket.test.ts && npx tsx test/orchestrator/GatekeeperSecurity.test.ts && npx tsx src/test-handoff.ts && npx tsx src/test-tenants.ts && npx tsx src/test-agent-policy.ts && npx tsx src/test-security.ts && npx tsx src/test-vertical-slice.ts && npx tsx src/test-circuit-breaker.ts && npx tsx src/test-distributed-queue.ts && npx tsx src/test-tenant-cache.ts && npx tsx src/test-graceful-shutdown.ts && npx tsx src/test-distributed-tracing.ts && npx tsx src/test-database-failover.ts && npx tsx src/test-hot-reload.ts && npx tsx src/test-prometheus-metrics.ts"
   },
   "dependencies": {
     "@fastify/websocket": "^11.3.0",

@@ -8,6 +8,11 @@ VALUES
     ('org_demo', 'Demo Tenant', 'demo')
 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, slug = EXCLUDED.slug;
 
+-- Ensure Companies 6 and 7 exist
+INSERT INTO companies (id, name)
+VALUES (6, 'Siam Banking'), (7, 'Acme Retail')
+ON CONFLICT (id) DO NOTHING;
+
 -- Insert Demo Projects per Org
 INSERT INTO projects (id, company_id, name, project_type, environment, org_id)
 VALUES

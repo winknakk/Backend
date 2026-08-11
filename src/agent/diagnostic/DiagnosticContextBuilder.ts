@@ -1,4 +1,4 @@
-import { sanitizeSensitiveData } from "../../domain/diagnostic/DeveloperDiagnostic";
+import { sanitizeSensitiveData, CodeEvidence } from "../../domain/diagnostic/DeveloperDiagnostic";
 import { KnowledgeResult } from "../../schemas/validation";
 import { RawAttachmentInput, ProcessedAttachmentResult } from "./AttachmentIntelligenceAdapter";
 
@@ -13,6 +13,7 @@ export interface DiagnosticContextInput {
   priority?: string;
   attachments?: Array<RawAttachmentInput | ProcessedAttachmentResult>;
   knowledgeResults?: KnowledgeResult[];
+  codeEvidence?: CodeEvidence[];
   projectId?: string | number;
   projectName?: string;
   tenantId?: string;
@@ -29,6 +30,7 @@ export interface BoundedDiagnosticContext {
   ticketMetadata: string;
   attachmentSummary: string;
   ragKnowledgeContext: string;
+  codeEvidenceContext: string;
   tenantId: string;
   projectId: string;
 }
@@ -41,6 +43,7 @@ export class DiagnosticContextBuilder {
   private static readonly MAX_CUSTOMER_TEXT_LENGTH = 2000;
   private static readonly MAX_HISTORY_MESSAGES = 6;
   private static readonly MAX_KNOWLEDGE_SNIPPETS = 4;
+  private static readonly MAX_CODE_EVIDENCE_SNIPPETS = 3;
 
   public static buildBoundedContext(input: DiagnosticContextInput): BoundedDiagnosticContext {
     const tenantId = input.tenantId || "org_default";
@@ -104,12 +107,30 @@ export class DiagnosticContextBuilder {
         .join("\n\n");
     }
 
+    // 6. Build Bounded Live Code Evidence Context with Prompt Injection Defense
+    let codeEvidenceContext = "No live repository code evidence retrieved.";
+    if (input.codeEvidence && input.codeEvidence.length > 0) {
+      const topCode = input.codeEvidence.slice(0, this.MAX_CODE_EVIDENCE_SNIPPETS);
+      codeEvidenceContext = topCode
+        .map((code, idx) => {
+          const file = code.filePath;
+          const symbol = code.symbolName ? ` symbol="${code.symbolName}"` : "";
+          const lines = code.lineStart ? ` lines="${code.lineStart}-${code.lineEnd || ""}"` : "";
+          const commit = code.commitSha ? ` commit="${code.commitSha}"` : "";
+          const snippet = sanitizeSensitiveData(code.snippet.slice(0, 600));
+
+          return `<CODE_EVIDENCE index="${idx + 1}" file="${file}"${symbol}${lines}${commit}>\n${snippet}\n</CODE_EVIDENCE>`;
+        })
+        .join("\n\n");
+    }
+
     return {
       customerReport,
       boundedHistory,
       ticketMetadata,
       attachmentSummary,
       ragKnowledgeContext,
+      codeEvidenceContext,
       tenantId,
       projectId,
     };

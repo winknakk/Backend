@@ -163,6 +163,25 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
         `</ul>`
       : "";
 
+  const codeEvidenceList: any[] = Array.isArray(diag.code_evidence) ? diag.code_evidence : [];
+  const codeHtml =
+    codeEvidenceList.length > 0
+      ? `<h3>💻 Live Code Evidence (Git Repository)</h3><ul>` +
+        codeEvidenceList
+          .map((code) => {
+            const file = escapePlaneHtml(code.filePath || "File");
+            const symbol = code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbolName)}</code>)` : "";
+            const lines = code.lineStart ? ` [Lines ${escapePlaneHtml(code.lineStart)}-${escapePlaneHtml(code.lineEnd || "")}]` : "";
+            const commit = code.commitSha ? ` [Commit: ${escapePlaneHtml(code.commitSha.slice(0, 7))}]` : "";
+            const snippet = code.snippet
+              ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>`
+              : "";
+            return `<li><strong>${file}</strong>${symbol}${lines}${commit}${snippet}</li>`;
+          })
+          .join("") +
+        `</ul>`
+      : "";
+
   return [
     `<h3>🎯 Customer Report</h3><p>${escapePlaneHtml(customerReport).replace(/\r?\n/g, "<br>")}</p>`,
     evidenceHtml,
@@ -182,6 +201,7 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
     `<li><strong>Root Cause Hypothesis:</strong> ${escapePlaneHtml(rootCauseField.value)} <strong style="color:#d97706;">[AI HYPOTHESIS - Confidence: ${overallConfidence}%]</strong></li>`,
     `</ul>`,
     kbHtml,
+    codeHtml,
     unknownsHtml,
     `<h3>🚀 Recommended Next Investigation</h3><p>${escapePlaneHtml(nextAction)}</p>`,
   ].join("");
@@ -624,6 +644,17 @@ export class PlaneService {
 
     if (!ticket) {
       throw new Error(`Ticket not found: ${ticketId}`);
+    }
+
+    const existingPlaneId = ticket.planeIssueId || ticket.plane_issue_id;
+    if (existingPlaneId && !String(existingPlaneId).startsWith("mock-")) {
+      console.log(`[PlaneService] Ticket ${ticketId} is already promoted to Plane Work Item ${existingPlaneId}; skipping duplicate promotion.`);
+      return {
+        ticketId,
+        planeIssueId: String(existingPlaneId),
+        webhookTriggered: true,
+        alreadyPromoted: true,
+      };
     }
 
     let ticketWithSource = ticket;

@@ -6,6 +6,8 @@ import { startTimer } from "../../observability/timing";
 import { MetricsService } from "../../observability/MetricsService";
 import { getProjectId } from "../../kernel/context/RequestContextHolder";
 import { DiagnosticAnalyzer } from "../diagnostic/DiagnosticAnalyzer";
+import { TransactionManager } from "../../shared/repositories/TransactionManager";
+import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicketRepository";
 
 const logger = createLogger("TicketAgent");
 
@@ -174,6 +176,37 @@ export class TicketAgent implements IAgent {
     projectId: string
   ): Promise<AgentResult> {
     const conversationId = sessionContext.conversationId;
+    const conversationIdNum = parseInt(conversationId, 10);
+    const subject = this.buildSubject(text);
+
+    // Fast-path idempotency check: Check if active ticket exists BEFORE running PromptX diagnostic
+    if (!isNaN(conversationIdNum) && conversationIdNum > 0) {
+      try {
+        const txManager = new TransactionManager();
+        const ticketRepo = new PostgresTicketRepository(txManager);
+        const existing = await ticketRepo.findActiveByConversationAndSubject(conversationIdNum, subject);
+        if (existing) {
+          logger.info(
+            { conversationId, subject, ticketId: existing.ticketId, component: "TicketAgent" },
+            "Active ticket already exists for conversation and subject; skipping PromptX re-execution"
+          );
+          return {
+            text: `Ticket already active for this issue (${existing.ticketId})`,
+            handoffContext: {
+              id: existing.id.toString(),
+              ticketId: existing.ticketId,
+              conversationId: existing.conversationId.toString(),
+              subject: existing.subject,
+              summary: existing.summary,
+              status: existing.status,
+              source: "postgres_idempotent",
+            },
+          };
+        }
+      } catch (err: any) {
+        logger.warn({ error: err.message }, "Pre-diagnostic idempotency check query failed; continuing ticket flow");
+      }
+    }
 
     const timer = startTimer();
 
