@@ -3,7 +3,7 @@
 
 UPDATE project_mcp_permissions
 SET policy_rules = CASE
-  WHEN jsonb_object_length(COALESCE(policy_rules->'knowledge_base', '{}'::jsonb) - 'filter_tag') = 0
+  WHEN COALESCE(policy_rules->'knowledge_base', '{}'::jsonb) - 'filter_tag' = '{}'::jsonb
     THEN COALESCE(policy_rules, '{}'::jsonb) - 'knowledge_base'
   ELSE jsonb_set(
     COALESCE(policy_rules, '{}'::jsonb),
