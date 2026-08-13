@@ -228,6 +228,100 @@ export class LineProjectOnboardingService {
     }
   }
 
+  async restoreJoinCode(input: {
+    projectId: number;
+    orgId: string;
+    code: string;
+    createdBy?: string;
+  }): Promise<JoinCodeStatus> {
+    const normalizedCode = LineProjectOnboardingService.normalizeCode(input.code);
+    if (!/^TX[A-Z0-9]{8}$/.test(normalizedCode)) {
+      throw new Error("LINE project code must use the TX-XXXX-XXXX format");
+    }
+
+    const digest = this.digestCode(normalizedCode);
+    const hint = normalizedCode.slice(-4);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1)", [input.projectId]);
+      const projectResult = await client.query(
+        `SELECT id, name
+         FROM projects
+         WHERE id = $1 AND org_id = $2
+         FOR UPDATE`,
+        [input.projectId, input.orgId]
+      );
+      if (projectResult.rows.length === 0) {
+        throw new Error("Project not found in the requested organization");
+      }
+
+      const existingResult = await client.query(
+        `SELECT id, project_id, org_id, usage_count, last_used_at, created_at
+         FROM project_join_codes
+         WHERE code_digest = $1
+         FOR UPDATE`,
+        [digest]
+      );
+      const existing = existingResult.rows[0];
+      if (
+        existing &&
+        (Number(existing.project_id) !== input.projectId || existing.org_id !== input.orgId)
+      ) {
+        throw new Error("The requested code belongs to another Project");
+      }
+
+      await client.query(
+        `UPDATE project_join_codes
+         SET status = 'revoked', revoked_at = NOW()
+         WHERE org_id = $1
+           AND project_id = $2
+           AND status = 'active'
+           AND code_digest <> $3`,
+        [input.orgId, input.projectId, digest]
+      );
+
+      let restoredRow;
+      if (existing) {
+        const restored = await client.query(
+          `UPDATE project_join_codes
+           SET status = 'active', code_hint = $1, expires_at = NULL, revoked_at = NULL
+           WHERE id = $2
+           RETURNING created_at, expires_at, usage_count`,
+          [hint, existing.id]
+        );
+        restoredRow = restored.rows[0];
+      } else {
+        const inserted = await client.query(
+          `INSERT INTO project_join_codes
+            (org_id, project_id, code_digest, code_hint, status, expires_at, created_by)
+           VALUES ($1, $2, $3, $4, 'active', NULL, $5)
+           RETURNING created_at, expires_at, usage_count`,
+          [input.orgId, input.projectId, digest, hint, input.createdBy || null]
+        );
+        restoredRow = inserted.rows[0];
+      }
+
+      await client.query("COMMIT");
+      return {
+        projectId: input.projectId,
+        projectName: projectResult.rows[0].name,
+        active: true,
+        codeHint: hint,
+        createdAt: new Date(restoredRow.created_at).toISOString(),
+        expiresAt: restoredRow.expires_at
+          ? new Date(restoredRow.expires_at).toISOString()
+          : null,
+        usageCount: Number(restoredRow.usage_count || 0),
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async revokeJoinCode(projectId: number, orgId: string): Promise<boolean> {
     const result = await this.pool.query(
       `UPDATE project_join_codes

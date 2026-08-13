@@ -37,6 +37,19 @@ function writeHandoffCode(projectId: number, projectName: string, code: string):
   return outputPath;
 }
 
+function readHandoffCode(projectId: number): string {
+  const inputPath = path.resolve(__dirname, "../../data/LINE-Project-Codes.txt");
+  if (!fs.existsSync(inputPath)) throw new Error("LINE Project code handoff file not found");
+  const escapedProjectId = String(projectId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matcher = new RegExp(
+    `Project ID: ${escapedProjectId}\\r?\\nProject: [^\\r\\n]*\\r?\\nJoin Code: ([^\\r\\n]+)`,
+    "m"
+  );
+  const match = fs.readFileSync(inputPath, "utf8").match(matcher);
+  if (!match) throw new Error(`Project ${projectId} code not found in the handoff file`);
+  return match[1].trim();
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
   if (command === "mappings") {
@@ -97,12 +110,25 @@ async function main(): Promise<void> {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
+  if (command === "restore-handoff") {
+    const result = await service.restoreJoinCode({
+      projectId,
+      orgId: project.org_id || "org_default",
+      code: readHandoffCode(projectId),
+      createdBy: "line-project-code-cli-restore",
+    });
+    process.stdout.write(
+      `Project: ${result.projectName} (${result.projectId})\n` +
+      `Restored active LINE project code from the secure handoff file (hint: ${result.codeHint}).\n`
+    );
+    return;
+  }
   if (command === "revoke") {
     const revoked = await service.revokeJoinCode(projectId, project.org_id || "org_default");
     process.stdout.write(`${revoked ? "Revoked" : "No active code"}\n`);
     return;
   }
-  throw new Error("Command must be rotate, status, or revoke");
+  throw new Error("Command must be rotate, restore-handoff, status, or revoke");
 }
 
 main()

@@ -80,10 +80,33 @@ async function main(): Promise<void> {
   }
 
   const service = new LineProjectOnboardingService(testPool, "integration-test-project-code-pepper", "code_required");
-  const rotated = await service.rotateJoinCode({ projectId: 8, orgId: "org_default", createdBy: "test" });
+  await service.rotateJoinCode({ projectId: 8, orgId: "org_default", createdBy: "test" });
+  const restoredCode = "TX-ABCD-2345";
+  await service.restoreJoinCode({
+    projectId: 8,
+    orgId: "org_default",
+    code: restoredCode,
+    createdBy: "test-restore",
+  });
+  await service.rotateJoinCode({ projectId: 8, orgId: "org_default", createdBy: "test" });
+  const restored = await service.restoreJoinCode({
+    projectId: 8,
+    orgId: "org_default",
+    code: restoredCode,
+    createdBy: "test-restore",
+  });
+  assert.equal(restored.codeHint, "2345");
+  const restoredRows = await testPool.query(
+    `SELECT code_hint, status, expires_at
+     FROM project_join_codes
+     WHERE project_id = 8 AND status = 'active'`
+  );
+  assert.equal(restoredRows.rows.length, 1);
+  assert.equal(restoredRows.rows[0].code_hint, "2345");
+  assert.equal(restoredRows.rows[0].expires_at, null);
   const relinkCode = await service.rotateJoinCode({ projectId: 11, orgId: "org_default", createdBy: "test" });
   const crossOrgCode = await service.rotateJoinCode({ projectId: 101, orgId: "org_excise", createdBy: "test" });
-  assert.match(rotated.code, /^TX-/);
+  assert.match(restoredCode, /^TX-/);
 
   await service.processEvent({
     type: "follow", webhookEventId: "evt-retry-follow", destination: "U_DESTINATION", userId: "U_RETRY",
@@ -102,7 +125,7 @@ async function main(): Promise<void> {
   }
   const validAfterRetries = await service.processEvent({
     type: "message", webhookEventId: "evt-retry-valid", destination: "U_DESTINATION",
-    userId: "U_RETRY", messageText: rotated.code,
+    userId: "U_RETRY", messageText: restoredCode,
   });
   assert.equal(validAfterRetries.state, "COMPLETED");
   assert.equal(validAfterRetries.projectId, 8);
@@ -140,7 +163,7 @@ async function main(): Promise<void> {
   assert.equal(hasCode.state, "AWAITING_CODE");
   const completed = await service.processEvent({
     type: "message", webhookEventId: "evt-code", destination: "U_DESTINATION", userId: "U_NEW",
-    messageText: rotated.code,
+    messageText: restoredCode,
   });
   assert.equal(completed.state, "COMPLETED");
   assert.equal(completed.projectId, 8);
@@ -299,7 +322,7 @@ async function main(): Promise<void> {
   });
   await service.processEvent({
     type: "message", webhookEventId: "evt-cross-default-code", destination: "U_DESTINATION",
-    userId: "U_CROSS_ORG", messageText: rotated.code,
+    userId: "U_CROSS_ORG", messageText: restoredCode,
   });
   await service.processEvent({
     type: "message", webhookEventId: "evt-cross-relink", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
