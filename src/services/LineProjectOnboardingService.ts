@@ -1068,7 +1068,7 @@ export class LineProjectOnboardingService {
     const result = await client.query(
       `WITH target_project AS (
          SELECT id, company_id, org_id FROM projects
-         WHERE id = $1 AND org_id = $2
+         WHERE id = $1
        ),
        existing_identity AS (
          SELECT i.id, i.profile_id
@@ -1085,9 +1085,13 @@ export class LineProjectOnboardingService {
          ON CONFLICT (id) DO NOTHING
          RETURNING id
        ),
+       existing_profile AS (
+         SELECT id FROM profiles WHERE id = 'line_' || SUBSTR(MD5($3), 1, 24)
+       ),
        target_profile AS (
          SELECT profile_id AS id FROM existing_identity
          UNION ALL SELECT id FROM new_profile
+         UNION ALL SELECT id FROM existing_profile
          LIMIT 1
        ),
        new_identity AS (
