@@ -7,8 +7,18 @@ const logger = createLogger("migrations-cli");
 async function main() {
   logger.info("Starting decoupled database migration runner...");
   try {
-    const onlyArg = process.argv.find((value) => value.startsWith("--only="));
-    const only = onlyArg ? onlyArg.slice("--only=".length) : undefined;
+    const onlyEqualsArg = process.argv.find((value) => value.startsWith("--only="));
+    const onlyFlagIndex = process.argv.indexOf("--only");
+    const only = onlyEqualsArg
+      ? onlyEqualsArg.slice("--only=".length)
+      : onlyFlagIndex >= 0
+        ? process.argv[onlyFlagIndex + 1]
+        : undefined;
+
+    if (onlyFlagIndex >= 0 && !only) {
+      throw new Error("Missing migration filename after --only");
+    }
+
     await runMigrations(pool, { only });
     logger.info("Decoupled database migration completed successfully.");
     await pool.end();

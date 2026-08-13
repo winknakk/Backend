@@ -71,29 +71,36 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
           );
           return reply.send({ success: true, project: result.rows[0] });
         } else {
-          const result = await client.query(
-            "INSERT INTO projects (company_id, name, project_type, environment) VALUES ($1, $2, $3, $4) RETURNING *",
-            [company_id || 1, name || "New Project", project_type || "Support Project", environment || "Production"]
-          );
-          const project = result.rows[0];
-          const requestedKnowledgeBaseTag = typeof knowledge_base_tag === "string" ? knowledge_base_tag.trim() : "";
-          const knowledgeBaseTag = requestedKnowledgeBaseTag || `project_${project.id}`;
+          await client.query("BEGIN");
+          try {
+            const result = await client.query(
+              "INSERT INTO projects (company_id, name, project_type, environment) VALUES ($1, $2, $3, $4) RETURNING *",
+              [company_id || 1, name || "New Project", project_type || "Support Project", environment || "Production"]
+            );
+            const project = result.rows[0];
+            const requestedKnowledgeBaseTag = typeof knowledge_base_tag === "string" ? knowledge_base_tag.trim() : "";
+            const knowledgeBaseTag = requestedKnowledgeBaseTag || `project_${project.id}`;
 
-          await client.query(
-            `INSERT INTO project_mcp_permissions (project_id, tool_name, allowed_roles, policy_rules)
-             VALUES ($1, 'search_project_docs', ARRAY['customer', 'agent']::VARCHAR(100)[],
-               jsonb_build_object('knowledge_base', jsonb_build_object('filter_tag', $2::text)))
-             ON CONFLICT (project_id, tool_name) DO UPDATE
-             SET policy_rules = COALESCE(project_mcp_permissions.policy_rules, '{}'::jsonb)
-               || jsonb_build_object(
-                 'knowledge_base',
-                 COALESCE(project_mcp_permissions.policy_rules->'knowledge_base', '{}'::jsonb)
-                 || EXCLUDED.policy_rules->'knowledge_base'
-               )`,
-            [project.id, knowledgeBaseTag]
-          );
+            await client.query(
+              `INSERT INTO project_mcp_permissions (project_id, tool_name, allowed_roles, policy_rules)
+               VALUES ($1, 'search_project_docs', ARRAY['customer', 'agent']::VARCHAR(100)[],
+                 jsonb_build_object('knowledge_base', jsonb_build_object('filter_tag', $2::text)))
+               ON CONFLICT (project_id, tool_name) DO UPDATE
+               SET policy_rules = COALESCE(project_mcp_permissions.policy_rules, '{}'::jsonb)
+                 || jsonb_build_object(
+                   'knowledge_base',
+                   COALESCE(project_mcp_permissions.policy_rules->'knowledge_base', '{}'::jsonb)
+                   || EXCLUDED.policy_rules->'knowledge_base'
+                 )`,
+              [project.id, knowledgeBaseTag]
+            );
 
-          return reply.send({ success: true, project, knowledgeBaseTag });
+            await client.query("COMMIT");
+            return reply.send({ success: true, project, knowledgeBaseTag });
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          }
         }
       } finally {
         client.release();
