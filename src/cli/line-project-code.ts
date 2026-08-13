@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { LineProjectOnboardingService } from "../services/LineProjectOnboardingService";
@@ -8,6 +10,31 @@ function argument(name: string): string | undefined {
   if (inline) return inline.slice(prefix.length);
   const index = process.argv.indexOf(`--${name}`);
   return index >= 0 ? process.argv[index + 1] : undefined;
+}
+
+function hasFlag(name: string): boolean {
+  return process.argv.includes(`--${name}`);
+}
+
+function writeHandoffCode(projectId: number, projectName: string, code: string): string {
+  const outputPath = path.resolve(__dirname, "../../data/LINE-Project-Codes.txt");
+  const block = `Project ID: ${projectId}\nProject: ${projectName}\nJoin Code: ${code}`;
+  const existing = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "";
+  const escapedProjectId = String(projectId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matcher = new RegExp(
+    `Project ID: ${escapedProjectId}\\r?\\nProject: [^\\r\\n]*\\r?\\nJoin Code: [^\\r\\n]*`,
+    "m"
+  );
+  const updated = matcher.test(existing)
+    ? existing.replace(matcher, block)
+    : `${existing.trimEnd()}${existing.trim() ? "\n\n" : ""}${block}\n`;
+
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, updated.endsWith("\n") ? updated : `${updated}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return outputPath;
 }
 
 async function main(): Promise<void> {
@@ -50,6 +77,14 @@ async function main(): Promise<void> {
       createdBy: "line-project-code-cli",
       expiresAt,
     });
+    if (hasFlag("write-handoff-file")) {
+      const outputPath = writeHandoffCode(result.projectId, result.projectName, result.code);
+      process.stdout.write(
+        `Project: ${result.projectName} (${result.projectId})\n` +
+        `New LINE project code stored securely in: ${outputPath}\n`
+      );
+      return;
+    }
     process.stdout.write(
       `Project: ${result.projectName} (${result.projectId})\n` +
       `New LINE project code: ${result.code}\n` +

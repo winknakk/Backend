@@ -77,8 +77,22 @@ assert.equal(boxesWithCornerRadius(choice, "xxl").length, 2);
 const projectMenu = buildLineProjectMenu({
   kind: "selector",
   projects: [
-    { projectId: 8, projectName: "24/7", isCurrent: true },
-    { projectId: 11, projectName: "SSO Project", isCurrent: false },
+    {
+      projectId: 8,
+      projectName: "24/7",
+      companyName: "Avalant Co.,Ltd.",
+      projectType: "Support Project",
+      environment: "Avalant 24/7 Production",
+      isCurrent: true,
+    },
+    {
+      projectId: 101,
+      projectName: "EXC03 - ระบบสารสนเทศกรมสรรพสามิต",
+      companyName: "กรมสรรพสามิต",
+      projectType: "Enterprise Application",
+      environment: "Production",
+      isCurrent: false,
+    },
   ],
   page: 0,
   totalPages: 2,
@@ -90,19 +104,25 @@ assert.equal(projectMenu[0].contents.type, "carousel");
 assert.equal(projectMenu[0].contents.contents.length, 4);
 assert.deepEqual(postbackData(projectMenu[0]), [
   "ticketx:onboarding:switch_project:8",
-  "ticketx:onboarding:switch_project:11",
+  "ticketx:onboarding:switch_project:101",
   "ticketx:onboarding:menu:connect_new",
   "ticketx:onboarding:projects_page:1",
 ]);
 assert.ok(boxesWithCornerRadius(projectMenu[0], "xl").length >= 4);
 assert.ok(boxesWithCornerRadius(projectMenu[0], "xxl").length >= 4);
 assert.ok(textValues(projectMenu[0]).includes("เลือกโปรเจกต์ได้เลยค่ะ"));
+assert.ok(textValues(projectMenu[0]).some((text) => text.includes("บริษัท: กรมสรรพสามิต")));
+assert.ok(textValues(projectMenu[0]).some((text) => text.includes("ประเภท: Enterprise Application")));
+assert.ok(textValues(projectMenu[0]).some((text) => text.includes("สภาพแวดล้อม: Production")));
 
 const linkConfirmation = buildLineProjectLinkConfirmation({
   currentProjectId: 8,
   currentProjectName: "24/7",
   linkedProjectId: 11,
   linkedProjectName: "SSO Project",
+  linkedCompanyName: "Avalant Co.,Ltd.",
+  linkedProjectType: "Support Project",
+  linkedEnvironment: "SSO Production",
 }) as any;
 assert.equal(linkConfirmation.type, "flex");
 assert.deepEqual(postbackData(linkConfirmation), [
@@ -110,6 +130,7 @@ assert.deepEqual(postbackData(linkConfirmation), [
   "ticketx:onboarding:switch_project:8",
 ]);
 assert.equal(boxesWithCornerRadius(linkConfirmation, "xxl").length, 2);
+assert.ok(textValues(linkConfirmation).some((text) => text.includes("บริษัท: Avalant Co.,Ltd.")));
 
 for (const card of LINE_ONBOARDING_CARDS) {
   const directory = lineOnboardingCardDirectory();

@@ -246,6 +246,12 @@ function projectBubble(
   project: LineProjectMenu["projects"][number],
   notice?: string
 ): Record<string, unknown> {
+  const details = [
+    `Project ID: ${project.projectId}`,
+    `บริษัท: ${shortLabel(project.companyName, 54)}`,
+    `ประเภท: ${shortLabel(project.projectType, 54)}`,
+    `สภาพแวดล้อม: ${shortLabel(project.environment, 54)}`,
+  ].join("\n");
   return {
     type: "bubble",
     size: "kilo",
@@ -280,6 +286,14 @@ function projectBubble(
               color: LINE_DESIGN.text,
               wrap: true,
               maxLines: 3,
+            },
+            {
+              type: "text",
+              text: details,
+              size: "xs",
+              color: LINE_DESIGN.muted,
+              wrap: true,
+              maxLines: 8,
             },
             {
               type: "text",
@@ -428,6 +442,12 @@ export function buildLineProjectMenu(menu: LineProjectMenu): Array<Record<string
 export function buildLineProjectLinkConfirmation(
   confirmation: LineProjectLinkConfirmation
 ): Record<string, unknown> {
+  const linkedDetails = [
+    `Project ID: ${confirmation.linkedProjectId}`,
+    `บริษัท: ${shortLabel(confirmation.linkedCompanyName, 54)}`,
+    `ประเภท: ${shortLabel(confirmation.linkedProjectType, 54)}`,
+    `สภาพแวดล้อม: ${shortLabel(confirmation.linkedEnvironment, 54)}`,
+  ].join("\n");
   return {
     type: "flex",
     altText: `เชื่อมโปรเจกต์ ${confirmation.linkedProjectName} แล้ว`,
@@ -452,6 +472,7 @@ export function buildLineProjectLinkConfirmation(
             contents: [
               { type: "text", text: "เชื่อมโปรเจกต์สำเร็จ ✓", size: "xs", weight: "bold", color: LINE_DESIGN.success },
               { type: "text", text: shortLabel(confirmation.linkedProjectName, 80), size: "xl", weight: "bold", color: LINE_DESIGN.text, wrap: true },
+              { type: "text", text: linkedDetails, size: "xs", color: LINE_DESIGN.muted, wrap: true, maxLines: 8 },
               {
                 type: "text",
                 text: `ตอนนี้ยังใช้โปรเจกต์ “${shortLabel(confirmation.currentProjectName, 80)}” อยู่ค่ะ ต้องการเปลี่ยนไปโปรเจกต์ใหม่เลยไหมคะ`,

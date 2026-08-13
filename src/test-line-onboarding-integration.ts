@@ -10,7 +10,11 @@ async function main(): Promise<void> {
   try {
     await client.query(`
       CREATE TEMP TABLE projects (
-        id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, org_id VARCHAR(64) NOT NULL, name TEXT NOT NULL
+        id INTEGER PRIMARY KEY, company_id INTEGER NOT NULL, org_id VARCHAR(64) NOT NULL, name TEXT NOT NULL,
+        project_type TEXT, environment TEXT
+      );
+      CREATE TEMP TABLE companies (
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL
       );
       CREATE TEMP TABLE project_channels (
         project_id INTEGER NOT NULL, channel_id TEXT NOT NULL, channel_type TEXT NOT NULL, is_enabled BOOLEAN, active BOOLEAN
@@ -59,12 +63,17 @@ async function main(): Promise<void> {
         webhook_event_id TEXT PRIMARY KEY, line_user_id TEXT, event_type TEXT, status TEXT DEFAULT 'processing',
         response JSONB, received_at TIMESTAMPTZ DEFAULT NOW(), processed_at TIMESTAMPTZ
       );
+      INSERT INTO companies VALUES
+        (5, 'Avalant Co.,Ltd.'),
+        (101, 'กรมสรรพสามิต');
       INSERT INTO projects VALUES
-        (8, 5, 'org_default', '24/7'),
-        (11, 5, 'org_default', 'SSO Project');
+        (8, 5, 'org_default', '24/7', 'Support Project', 'Avalant 24/7 Production'),
+        (11, 5, 'org_default', 'SSO Project', 'Support Project', 'SSO Production'),
+        (101, 101, 'org_excise', 'EXC03 - ระบบสารสนเทศกรมสรรพสามิต', 'Enterprise Application', 'Production');
       INSERT INTO project_channels VALUES
         (8, 'U_DESTINATION', 'line', TRUE, TRUE),
-        (11, 'U_OTHER_DESTINATION', 'line', TRUE, TRUE);
+        (11, 'U_OTHER_DESTINATION', 'line', TRUE, TRUE),
+        (101, 'U_EXCISE_DESTINATION', 'line', TRUE, TRUE);
     `);
   } finally {
     client.release();
@@ -73,6 +82,7 @@ async function main(): Promise<void> {
   const service = new LineProjectOnboardingService(testPool, "integration-test-project-code-pepper", "code_required");
   const rotated = await service.rotateJoinCode({ projectId: 8, orgId: "org_default", createdBy: "test" });
   const relinkCode = await service.rotateJoinCode({ projectId: 11, orgId: "org_default", createdBy: "test" });
+  const crossOrgCode = await service.rotateJoinCode({ projectId: 101, orgId: "org_excise", createdBy: "test" });
   assert.match(rotated.code, /^TX-/);
 
   await service.processEvent({
@@ -279,6 +289,108 @@ async function main(): Promise<void> {
   });
   assert.equal(passAfterSwitch.action, "PASS_TO_AI");
   assert.equal(passAfterSwitch.projectId, 8);
+
+  await service.processEvent({
+    type: "follow", webhookEventId: "evt-cross-follow", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+  });
+  await service.processEvent({
+    type: "postback", webhookEventId: "evt-cross-choice", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    postbackData: "ticketx:onboarding:has_code",
+  });
+  await service.processEvent({
+    type: "message", webhookEventId: "evt-cross-default-code", destination: "U_DESTINATION",
+    userId: "U_CROSS_ORG", messageText: rotated.code,
+  });
+  await service.processEvent({
+    type: "message", webhookEventId: "evt-cross-relink", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    messageText: "เริ่มใช้งาน",
+  });
+  await service.processEvent({
+    type: "postback", webhookEventId: "evt-cross-connect-new", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    postbackData: "ticketx:onboarding:menu:connect_new",
+  });
+  await service.processEvent({
+    type: "postback", webhookEventId: "evt-cross-has-code", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    postbackData: "ticketx:onboarding:has_code",
+  });
+  const crossOrgLinked = await service.processEvent({
+    type: "message", webhookEventId: "evt-cross-code", destination: "U_DESTINATION",
+    userId: "U_CROSS_ORG", messageText: crossOrgCode.code,
+  });
+  assert.equal(crossOrgLinked.reason, "project_linked_switch_confirmation");
+  assert.equal(crossOrgLinked.projectId, 8);
+  assert.equal(crossOrgLinked.projectLinkConfirmation?.linkedProjectId, 101);
+  assert.equal(crossOrgLinked.projectLinkConfirmation?.linkedCompanyName, "กรมสรรพสามิต");
+  assert.equal(crossOrgLinked.projectLinkConfirmation?.linkedProjectType, "Enterprise Application");
+  assert.equal(crossOrgLinked.projectLinkConfirmation?.linkedEnvironment, "Production");
+
+  const crossOrgSwitch = await service.processEvent({
+    type: "postback", webhookEventId: "evt-cross-switch", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    postbackData: "ticketx:onboarding:switch_project:101",
+  });
+  assert.equal(crossOrgSwitch.reason, "project_switch_completed");
+  assert.equal(crossOrgSwitch.projectId, 101);
+  const crossOrgPass = await service.processEvent({
+    type: "message", webhookEventId: "evt-cross-pass", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    messageText: "ตรวจสอบระบบสรรพสามิต",
+  });
+  assert.equal(crossOrgPass.action, "PASS_TO_AI");
+  assert.equal(crossOrgPass.projectId, 101);
+
+  const crossOrgMenu = await service.processEvent({
+    type: "postback", webhookEventId: "evt-cross-menu", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    postbackData: "ticketx:onboarding:menu:change",
+  });
+  assert.equal(crossOrgMenu.reason, "change_multiple_memberships");
+  assert.deepEqual(
+    crossOrgMenu.projectMenu?.projects.map((project) => ({
+      projectId: project.projectId,
+      companyName: project.companyName,
+      projectType: project.projectType,
+      environment: project.environment,
+      isCurrent: project.isCurrent,
+    })),
+    [
+      {
+        projectId: 101,
+        companyName: "กรมสรรพสามิต",
+        projectType: "Enterprise Application",
+        environment: "Production",
+        isCurrent: true,
+      },
+      {
+        projectId: 8,
+        companyName: "Avalant Co.,Ltd.",
+        projectType: "Support Project",
+        environment: "Avalant 24/7 Production",
+        isCurrent: false,
+      },
+    ]
+  );
+  const completedCrossOrgSessions = await testPool.query(
+    `SELECT org_id, selected_project_id
+     FROM line_onboarding_sessions
+     WHERE line_user_id = 'U_CROSS_ORG' AND destination = 'U_DESTINATION' AND state = 'COMPLETED'`
+  );
+  assert.deepEqual(completedCrossOrgSessions.rows, [{ org_id: "org_excise", selected_project_id: 101 }]);
+  const crossOrgSwitchBack = await service.processEvent({
+    type: "postback", webhookEventId: "evt-cross-switch-back", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    postbackData: "ticketx:onboarding:switch_project:8",
+  });
+  assert.equal(crossOrgSwitchBack.reason, "project_switch_completed");
+  assert.equal(crossOrgSwitchBack.projectId, 8);
+  const crossOrgPassBack = await service.processEvent({
+    type: "message", webhookEventId: "evt-cross-pass-back", destination: "U_DESTINATION", userId: "U_CROSS_ORG",
+    messageText: "กลับมาใช้โปรเจกต์เดิม",
+  });
+  assert.equal(crossOrgPassBack.action, "PASS_TO_AI");
+  assert.equal(crossOrgPassBack.projectId, 8);
+  const completedDefaultSession = await testPool.query(
+    `SELECT org_id, selected_project_id
+     FROM line_onboarding_sessions
+     WHERE line_user_id = 'U_CROSS_ORG' AND destination = 'U_DESTINATION' AND state = 'COMPLETED'`
+  );
+  assert.deepEqual(completedDefaultSession.rows, [{ org_id: "org_default", selected_project_id: 8 }]);
 
   const existingFriendFirstMessage = await service.processEvent({
     type: "message", webhookEventId: "evt-existing-friend", destination: "U_DESTINATION", userId: "U_EXISTING_FRIEND",
