@@ -10,19 +10,19 @@ async function testNewUserOnboarding(): Promise<void> {
 
   const service = new LineProjectOnboardingService(pool, pepper, config.LINE_ONBOARDING_MODE);
 
-  console.log("=== SIMULATING WEBHOOK EVENT FOR NEW USER WITH ACTIVE JOIN CODE (TX-EXC3-2026) ===");
+  console.log("=== SIMULATING WEBHOOK EVENT FOR NEW USER WITH TX-PZMG-CHAC ===");
   
   for (let i = 1; i <= 5; i++) {
     try {
       const decision = await service.processEvent({
-        webhookEventId: `test_valid_code_evt_${Date.now()}_${i}`,
+        webhookEventId: `test_pzmg_evt_${Date.now()}_${i}`,
         type: "message",
         userId: "U0ac4a8a0651e47441473014866ff1960",
         destination: "U48cb9897ca17cda31f68856063ecd999",
-        messageText: "TX-EXC3-2026",
+        messageText: "TX-PZMG-CHAC",
       });
 
-      console.log("SUCCESS! Valid Code Decision result for new user:");
+      console.log("SUCCESS! Valid Code Decision result for new user with TX-PZMG-CHAC:");
       console.log(JSON.stringify(decision, null, 2));
       break;
     } catch (e: any) {
