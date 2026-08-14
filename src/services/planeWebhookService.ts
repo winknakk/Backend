@@ -154,7 +154,15 @@ export class PlaneWebhookService {
       configuredProjectId !== "proj_id" &&
       payloadProjectId !== configuredProjectId
     ) {
-      return { processed: false, matched: false, reason: "project_mismatch", planeIssueId };
+      // Allow sync if the ticket is already linked in our database
+      const isLinked = await pool
+        .query("SELECT 1 FROM tickets WHERE plane_issue_id = $1 LIMIT 1", [planeIssueId])
+        .then((res) => (res.rowCount || 0) > 0)
+        .catch(() => false);
+
+      if (!isLinked) {
+        return { processed: false, matched: false, reason: "project_mismatch", planeIssueId };
+      }
     }
 
     if (action === "delete") {
@@ -224,7 +232,6 @@ export class PlaneWebhookService {
 
   private async dispatchCustomerDoneNotification(planeIssueId: string): Promise<void> {
     try {
-      const { pool } = require("../adapters/postgres/PostgresAdapter");
       const { rows } = await pool.query(
         `SELECT t.id, t.ticket_number, t.subject, t.conversation_id, c.channel, i.channel_ref
          FROM tickets t
@@ -276,7 +283,7 @@ export class PlaneWebhookService {
       throw new Error("Plane reverse sync credentials are not configured");
     }
 
-    const tickets = await this.dbAdapter.listAllTickets();
+    const tickets = await this.dbAdapter.listAllTickets(undefined, undefined, undefined, undefined, "org_all");
     const linkedIssueIds = Array.from(
       new Set(
         tickets

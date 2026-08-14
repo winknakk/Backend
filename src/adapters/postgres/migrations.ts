@@ -35,7 +35,14 @@ export async function runMigrations(pool: pg.Pool, options: { only?: string } = 
 
   let files = fs
     .readdirSync(migrationsDir)
-    .filter((file) => file.endsWith(".sql") && !file.endsWith("_down.sql") && !file.endsWith(".down.sql"))
+    .filter(
+      (file) =>
+        file.endsWith(".sql") &&
+        !file.endsWith("_down.sql") &&
+        !file.endsWith(".down.sql") &&
+        !file.endsWith("_rollback.sql") &&
+        !file.endsWith(".rollback.sql")
+    )
     .sort(); // ensures 001 runs before 002
 
   if (options.only) {
