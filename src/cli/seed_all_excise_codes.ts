@@ -36,7 +36,16 @@ async function seedAllCodes() {
       );
       console.log(`=== Seeded Join Code: ${rawCode} (digest: ${digest.slice(0, 10)}...) ===`);
     }
-    console.log("=== All EXC03 Join Codes successfully seeded ===");
+
+    // Also seed MCP permissions for Project 101 (EXC03)
+    await client!.query(
+      `INSERT INTO project_mcp_permissions (project_id, tool_name, is_enabled, policy_rules, created_at, updated_at)
+       VALUES (101, 'search_project_docs', true, '{"knowledge_base": {"filter_tag": "EXC03"}}'::jsonb, NOW(), NOW())
+       ON CONFLICT (project_id, tool_name) DO UPDATE
+       SET is_enabled = true, policy_rules = '{"knowledge_base": {"filter_tag": "EXC03"}}'::jsonb, updated_at = NOW()`
+    );
+    console.log("=== Seeded project_mcp_permissions for Project 101 (EXC03) ===");
+    console.log("=== All EXC03 Join Codes & Permissions successfully seeded ===");
   } catch (e: any) {
     console.error("Error seeding codes:", e.message);
   } finally {
