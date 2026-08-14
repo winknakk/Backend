@@ -12,6 +12,36 @@ const CenterTokenSchema = z.object({
   token: z.string(),
 });
 
+const CenterOrgReqSchema = z.object({
+  token: z.string(),
+  orgId: z.string(),
+});
+
+const CompleteCenterLoginSchema = z.object({
+  token: z.string(),
+  orgId: z.string().optional(),
+});
+
+const AddCenterRoleSchema = z.object({
+  token: z.string(),
+  orgId: z.string(),
+  email: z.string(),
+  firstname: z.string(),
+  lastname: z.string(),
+  username: z.string().optional(),
+  type: z.string().default("user"),
+  head: z.string().optional(),
+  position_name: z.string().optional(),
+});
+
+const CreateCenterOrgSchema = z.object({
+  token: z.string(),
+  org_name: z.string(),
+  description: z.string().optional(),
+  org_department_code: z.string().optional(),
+  app_id: z.string().optional(),
+});
+
 export async function registerAuthRoutes(fastify: FastifyInstance) {
   const centralAuthService = new CentralAuthService();
 
@@ -27,7 +57,8 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
     try {
       const centerRes = await centralAuthService.loginToCenter(username, password);
       const token = centerRes.token || centerRes.access_token || "";
-      const profile = centralAuthService.parseCenterJwt(token);
+      const idToken = centerRes.IDToken || centerRes.id_token || "";
+      const profile = centralAuthService.parseCenterJwt(token, idToken);
 
       return reply.send({
         success: true,
@@ -51,7 +82,116 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
     });
   });
 
-  // 3. Fallback Local Login
+  // 3. Find Orgs By User (Center CM Service)
+  fastify.post("/api/v1/auth/center/find-orgs", async (request, reply) => {
+    try {
+      const body = CenterTokenSchema.parse(request.body);
+      const orgs = await centralAuthService.findOrgsByUser(body.token);
+      return reply.send({ success: true, orgs });
+    } catch (err: any) {
+      return reply.status(500).send({ error: "Failed to fetch Center organizations", message: err.message });
+    }
+  });
+
+  // 4. Get My Role (Center CM Service)
+  fastify.post("/api/v1/auth/center/get-my-role", async (request, reply) => {
+    try {
+      const body = CenterOrgReqSchema.parse(request.body);
+      const role = await centralAuthService.getMyRole(body.token, body.orgId);
+      return reply.send({ success: true, role });
+    } catch (err: any) {
+      return reply.status(500).send({ error: "Failed to fetch role from Center", message: err.message });
+    }
+  });
+
+  // 5. Get User Roles in Org (Center CM Service)
+  fastify.post("/api/v1/auth/center/get-user-roles", async (request, reply) => {
+    try {
+      const body = CenterOrgReqSchema.parse(request.body);
+      const roles = await centralAuthService.getUserRoles(body.token, body.orgId);
+      return reply.send({ success: true, roles });
+    } catch (err: any) {
+      return reply.status(500).send({ error: "Failed to fetch user roles from Center", message: err.message });
+    }
+  });
+
+  // 6. Add / Assign Role on Center CM Service
+  fastify.post("/api/v1/auth/center/add-role", async (request, reply) => {
+    try {
+      const body = AddCenterRoleSchema.parse(request.body);
+      const result = await centralAuthService.addRoleToCenter(body.token, body);
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(500).send({ error: "Failed to add role on Center CM Service", message: err.message });
+    }
+  });
+
+  // 7. Create New Organization on Center CM Service
+  fastify.post("/api/v1/auth/center/create-org", async (request, reply) => {
+    try {
+      const body = CreateCenterOrgSchema.parse(request.body);
+      const result = await centralAuthService.createOrgOnCenter(body.token, body);
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(500).send({ error: "Failed to create organization on Center CM Service", message: err.message });
+    }
+  });
+
+  // 6. Complete Center Login (Token + Org & Role Resolution)
+  fastify.post("/api/v1/auth/center/complete-login", async (request, reply) => {
+    try {
+      const body = CompleteCenterLoginSchema.parse(request.body);
+      const { token } = body;
+      const idToken = (request.body as any)?.idToken || (request.body as any)?.IDToken || "";
+      const profile = centralAuthService.parseCenterJwt(token, idToken);
+
+      // Attempt to resolve orgId if not provided
+      let effectiveOrgId = body.orgId || profile.orgId;
+      let userOrgs: any[] = [];
+      try {
+        userOrgs = await centralAuthService.findOrgsByUser(token);
+        if (!body.orgId && userOrgs.length > 0 && userOrgs[0].id) {
+          effectiveOrgId = userOrgs[0].id;
+        }
+      } catch (e) {
+        // Fallback to parsed orgId from JWT
+      }
+
+      // Attempt to fetch My Role from Center CM Service
+      let myRole = null;
+      if (effectiveOrgId) {
+        try {
+          myRole = await centralAuthService.getMyRole(token, effectiveOrgId);
+          if (myRole) {
+            profile.firstname = myRole.firstname || profile.firstname;
+            profile.lastname = myRole.lastname || profile.lastname;
+            profile.iam2_id = myRole.iam2_id;
+            profile.position_name = myRole.position_name;
+            profile.type = myRole.type;
+            if (myRole.firstname || myRole.lastname) {
+              profile.name = `${myRole.firstname} ${myRole.lastname}`.trim();
+            }
+          }
+        } catch (e) {
+          // Non-blocking fallback
+        }
+      }
+
+      profile.orgId = effectiveOrgId;
+
+      return reply.send({
+        success: true,
+        token,
+        profile,
+        orgs: userOrgs,
+        myRole,
+      });
+    } catch (err: any) {
+      return reply.status(401).send({ error: "Center Login Completion Failed", message: err.message });
+    }
+  });
+
+  // 7. Fallback Local Login
   fastify.post("/api/v1/auth/login", async (request, reply) => {
     const parseResult = LoginSchema.safeParse(request.body);
     if (!parseResult.success) {
@@ -133,3 +273,4 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
     });
   });
 }
+
