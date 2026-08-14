@@ -847,8 +847,9 @@ export class PostgresAdapter implements DatabaseAdapter {
     const queryParams: any[] = [];
     const conditions: string[] = [];
 
+    const isSpecificProject = Boolean(projectId && projectId.toLowerCase() !== 'all');
     const hasOrgId = await this.checkTableHasOrgId("tickets");
-    if (hasOrgId && orgId && orgId !== "org_all") {
+    if (hasOrgId && orgId && orgId !== "org_all" && !isSpecificProject && !conversationId) {
       queryParams.push(orgId);
       conditions.push(`t.org_id = $${queryParams.length}`);
     }
@@ -859,8 +860,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       queryParams.push(parseInt(conversationId, 10));
       conditions.push(`t.conversation_id = $${queryParams.length}`);
     }
-    if (projectId && projectId.toLowerCase() !== 'all') {
-      const parsed = parseInt(projectId, 10);
+    if (isSpecificProject) {
+      const parsed = parseInt(projectId!, 10);
       if (!isNaN(parsed)) {
         queryParams.push(parsed);
         conditions.push(`t.project_id = $${queryParams.length}`);
@@ -942,13 +943,14 @@ export class PostgresAdapter implements DatabaseAdapter {
     const queryParams: any[] = [];
     const conditions: string[] = ["c.deleted_at IS NULL", "c.status = 'open'"];
 
+    const isSpecificProject = Boolean(projectId && projectId.toLowerCase() !== 'all');
     const hasOrgId = await this.checkTableHasOrgId("conversations");
-    if (hasOrgId && orgId && orgId !== "org_all") {
+    if (hasOrgId && orgId && orgId !== "org_all" && !isSpecificProject) {
       queryParams.push(orgId);
       conditions.push(`c.org_id = $${queryParams.length}`);
     }
-    if (projectId && projectId.toLowerCase() !== 'all') {
-      const parsedProjectId = parseInt(projectId, 10);
+    if (isSpecificProject) {
+      const parsedProjectId = parseInt(projectId!, 10);
       if (!isNaN(parsedProjectId)) {
         queryParams.push(parsedProjectId);
         conditions.push(`c.project_id = $${queryParams.length}`);
