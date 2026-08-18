@@ -1095,6 +1095,26 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
   }
 
+  async updateTicketPlaneSnapshot(
+    ticketId: string,
+    workspaceSlug: string,
+    planeProjectId: string,
+    planeIssueId: string
+  ): Promise<void> {
+    const result = await pool.query(
+      `UPDATE tickets
+       SET plane_workspace_slug = $1,
+           plane_project_id = $2,
+           plane_issue_id = $3,
+           updated_at = NOW()
+       WHERE ticket_number = $4 OR ticket_id = $4 OR id::text = $4`,
+      [workspaceSlug, planeProjectId, planeIssueId, ticketId]
+    );
+    if ((result.rowCount || 0) === 0) {
+      throw new Error(`Ticket not found while updating Plane snapshot: ${ticketId}`);
+    }
+  }
+
   async syncTicketFromPlane(
     planeIssueId: string,
     changes: { status?: string; priority?: string }

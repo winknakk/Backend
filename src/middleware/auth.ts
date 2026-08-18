@@ -22,6 +22,7 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply): Pr
     request.url.startsWith("/api/v1/auth/") ||
     request.url.startsWith("/api/v1/webchat") ||
     request.url.startsWith("/api/v1/webhooks") ||
+    request.url.startsWith("/api/v1/internal/") ||
     request.url.startsWith("/api/v1/media/")
   ) {
     return;

@@ -930,8 +930,27 @@ fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
 });
 
 fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
-  const body = request.body as any;
-  const result = await planeService.promoteTicketToPlane(body.ticketId);
+  const body = (request.body || {}) as any;
+  const rawId =
+    body.ticketId ||
+    body.ticket_id ||
+    body.ticketNumber ||
+    body.ticket_number ||
+    body.id ||
+    body.data?.ticketId ||
+    body.data?.ticket_id ||
+    body.data?.ticketNumber ||
+    body.data?.ticket_number ||
+    body.data?.id;
+
+  if (!rawId) {
+    return reply.code(400).send({
+      error: "Bad Request",
+      message: "Missing ticketId or ticket_number in request body",
+    });
+  }
+
+  const result = await planeService.promoteTicketToPlane(String(rawId));
   return reply.code(200).send(result);
 });
 

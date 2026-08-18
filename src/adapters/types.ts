@@ -96,9 +96,21 @@ export interface DatabaseAdapter {
   getConversationIdent(conversationId: string): Promise<any>;
 
   /**
-   * Updates plane issue ID and status for a ticket.
+   * Updates plane issue ID for a ticket.
    */
   updateTicketPlaneIssue(ticketId: string, planeIssueId: string): Promise<void>;
+
+  /**
+   * Atomically updates historical snapshot (workspace_slug, plane_project_id, plane_issue_id)
+   * ONLY AFTER Plane work item creation succeeds. Optional for legacy providers.
+   */
+  updateTicketPlaneSnapshot?(
+    ticketId: string,
+    workspaceSlug: string,
+    planeProjectId: string,
+    planeIssueId: string
+  ): Promise<void>;
+
 
   /**
    * Applies Plane-originated status/priority changes to a linked ticket.
