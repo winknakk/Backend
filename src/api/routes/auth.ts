@@ -40,6 +40,14 @@ const CreateCenterOrgSchema = z.object({
   description: z.string().optional(),
   org_department_code: z.string().optional(),
   app_id: z.string().optional(),
+  initialManager: z
+    .object({
+      email: z.string(),
+      firstname: z.string().optional(),
+      lastname: z.string().optional(),
+      position_name: z.string().optional(),
+    })
+    .optional(),
 });
 
 export async function registerAuthRoutes(fastify: FastifyInstance) {
@@ -89,7 +97,15 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       const orgs = await centralAuthService.findOrgsByUser(body.token);
       return reply.send({ success: true, orgs });
     } catch (err: any) {
-      return reply.status(500).send({ error: "Failed to fetch Center organizations", message: err.message });
+      const msg = err.message || '';
+      const isAuthError = msg.includes("401") || msg.includes("403") || msg.includes("Unauthorized") || msg.includes("status: 401") || msg.includes("status: 403");
+      return reply.send({
+        success: false,
+        error: isAuthError
+          ? "Center session token expired or unauthorized. Please update your token or re-login."
+          : (msg || "Failed to fetch Center organizations"),
+        isAuthError,
+      });
     }
   });
 
@@ -100,7 +116,15 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       const role = await centralAuthService.getMyRole(body.token, body.orgId);
       return reply.send({ success: true, role });
     } catch (err: any) {
-      return reply.status(500).send({ error: "Failed to fetch role from Center", message: err.message });
+      const msg = err.message || '';
+      const isAuthError = msg.includes("401") || msg.includes("403") || msg.includes("Unauthorized") || msg.includes("status: 401") || msg.includes("status: 403");
+      return reply.send({
+        success: false,
+        error: isAuthError
+          ? "Center session token expired or unauthorized. Please update your token."
+          : (msg || "Failed to fetch role from Center"),
+        isAuthError,
+      });
     }
   });
 
@@ -111,7 +135,15 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       const roles = await centralAuthService.getUserRoles(body.token, body.orgId);
       return reply.send({ success: true, roles });
     } catch (err: any) {
-      return reply.status(500).send({ error: "Failed to fetch user roles from Center", message: err.message });
+      const msg = err.message || '';
+      const isAuthError = msg.includes("401") || msg.includes("403") || msg.includes("Unauthorized") || msg.includes("status: 401") || msg.includes("status: 403");
+      return reply.send({
+        success: false,
+        error: isAuthError
+          ? "Center session token expired or unauthorized. Please update your token."
+          : (msg || "Failed to fetch user roles from Center"),
+        isAuthError,
+      });
     }
   });
 
@@ -122,7 +154,12 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       const result = await centralAuthService.addRoleToCenter(body.token, body);
       return reply.send(result);
     } catch (err: any) {
-      return reply.status(500).send({ error: "Failed to add role on Center CM Service", message: err.message });
+      const isAuthError = err.message?.includes("401") || err.message?.includes("Unauthorized");
+      return reply.send({
+        success: false,
+        error: err.message || "Failed to add role on Center CM Service",
+        isAuthError,
+      });
     }
   });
 
@@ -133,7 +170,12 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       const result = await centralAuthService.createOrgOnCenter(body.token, body);
       return reply.send(result);
     } catch (err: any) {
-      return reply.status(500).send({ error: "Failed to create organization on Center CM Service", message: err.message });
+      const isAuthError = err.message?.includes("401") || err.message?.includes("Unauthorized");
+      return reply.send({
+        success: false,
+        error: err.message || "Failed to create organization on Center CM Service",
+        isAuthError,
+      });
     }
   });
 

@@ -66,6 +66,12 @@ export interface CreateCenterOrgRequest {
   description?: string;
   org_department_code?: string;
   app_id?: string;
+  initialManager?: {
+    email: string;
+    firstname?: string;
+    lastname?: string;
+    position_name?: string;
+  };
 }
 
 export class CentralAuthService {
@@ -286,10 +292,48 @@ export class CentralAuthService {
         if (!fallbackRes.ok) {
           throw new Error(`createOrgOnCenter failed with status: ${res.status}`);
         }
-        return { success: true, org: await fallbackRes.json() };
+        const createdOrgData = await fallbackRes.json();
+        const newOrgId = createdOrgData?.id || createdOrgData?.orgId || createdOrgData?.data?.id;
+
+        // Auto assign initial manager if provided
+        if (payload.initialManager?.email && newOrgId) {
+          try {
+            await this.addRoleToCenter(token, {
+              orgId: newOrgId,
+              email: payload.initialManager.email,
+              firstname: payload.initialManager.firstname || payload.initialManager.email.split('@')[0],
+              lastname: payload.initialManager.lastname || '',
+              type: 'manager',
+              position_name: payload.initialManager.position_name || 'Organization Lead',
+            });
+          } catch (mgrErr: any) {
+            logger.warn({ error: mgrErr.message, orgId: newOrgId }, "Could not auto-assign initial manager to created org");
+          }
+        }
+
+        return { success: true, org: createdOrgData };
       }
 
-      return { success: true, org: await res.json() };
+      const createdOrg = await res.json();
+      const newOrgId = createdOrg?.id || createdOrg?.orgId || createdOrg?.data?.id;
+
+      // Auto assign initial manager if provided
+      if (payload.initialManager?.email && newOrgId) {
+        try {
+          await this.addRoleToCenter(token, {
+            orgId: newOrgId,
+            email: payload.initialManager.email,
+            firstname: payload.initialManager.firstname || payload.initialManager.email.split('@')[0],
+            lastname: payload.initialManager.lastname || '',
+            type: 'manager',
+            position_name: payload.initialManager.position_name || 'Organization Lead',
+          });
+        } catch (mgrErr: any) {
+          logger.warn({ error: mgrErr.message, orgId: newOrgId }, "Could not auto-assign initial manager to created org");
+        }
+      }
+
+      return { success: true, org: createdOrg };
     } catch (err: any) {
       logger.error({ error: err.message, payload }, "Failed to create organization on Center CM Service");
       throw err;
