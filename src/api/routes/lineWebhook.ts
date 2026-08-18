@@ -183,6 +183,24 @@ export function registerLineWebhookRoutes(
     let processed = 0;
     try {
       for (const event of events) {
+        if (event?.type === "unsend") {
+          const unsendMessageId = event?.unsend?.messageId;
+          if (unsendMessageId) {
+            logger.info({ unsendMessageId }, "LINE unsend event received: removing message");
+            try {
+              await pool.query(
+                `DELETE FROM message_attachments WHERE message_id IN (SELECT id FROM messages WHERE external_id = $1)`,
+                [unsendMessageId]
+              );
+              await pool.query(`DELETE FROM messages WHERE external_id = $1`, [unsendMessageId]);
+            } catch (unsendErr: any) {
+              logger.error({ error: unsendErr.message, unsendMessageId }, "Failed to process LINE unsend event");
+            }
+          }
+          processed += 1;
+          continue;
+        }
+
         const sourceType = String(event?.source?.type || "");
         if (sourceType === "group" || sourceType === "room") {
           await forwardPromptXWebhook(config.LINE_GROUP_GATEWAY_WEBHOOK_URL, destination, event);
@@ -209,6 +227,73 @@ export function registerLineWebhookRoutes(
           if (decision.action === "REPLY") {
             await sendLineReply(String(event.replyToken || ""), decision);
           } else if (decision.action === "PASS_TO_AI") {
+            if (event?.type === "message" && event?.message?.type === "image" && event?.message?.id) {
+              const imageId = String(event.message.id);
+              let convId = decision.conversationId;
+              if (!convId && event?.source?.userId) {
+                try {
+                  const convRes = await pool.query(
+                    `SELECT c.id FROM conversations c
+                     JOIN identities i ON c.identity_id = i.id::varchar
+                     WHERE i.channel_ref = $1 AND c.status = 'open' AND c.deleted_at IS NULL
+                     ORDER BY c.id DESC LIMIT 1`,
+                    [event.source.userId]
+                  );
+                  if (convRes.rows.length > 0) {
+                    convId = convRes.rows[0].id;
+                  }
+                } catch (convErr: any) {
+                  logger.warn({ error: convErr.message }, "Failed to resolve conversation for image");
+                }
+              }
+
+              if (convId) {
+                try {
+                  const { LINEAdapter } = await import("../../presentation/http/adapters/LINEAdapter");
+                  const { S3MediaStorageService } = await import("../../media/services/S3MediaStorageService");
+                  const mediaStorage = new S3MediaStorageService({});
+                  const lineToken = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
+                  const lineAdapter = new LINEAdapter(mediaStorage, lineToken);
+
+                  const normalized = await lineAdapter.adaptEvent(event);
+                  if (normalized && normalized.attachments.length > 0) {
+                    const att = normalized.attachments[0];
+                    const savedMsgResult = await pool.query(
+                      `INSERT INTO messages (conversation_id, role, content, message_type, external_id, quote_token, created_at)
+                       VALUES ($1, 'customer', $2, 'image', $3, $4, NOW())
+                       ON CONFLICT (conversation_id, external_id) DO UPDATE SET
+                         message_type = 'image',
+                         quote_token = COALESCE(EXCLUDED.quote_token, messages.quote_token)
+                       RETURNING id`,
+                      [convId, event.message.text || "", imageId, event.message.quoteToken || null]
+                    );
+                    const messageId = savedMsgResult.rows[0]?.id;
+                    if (messageId) {
+                      await pool.query(
+                        `INSERT INTO message_attachments 
+                          (message_id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key, attachment_status, metadata)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, 'READY', $8)
+                         ON CONFLICT DO NOTHING`,
+                        [
+                          messageId,
+                          att.fileUrl,
+                          att.thumbnailUrl || att.fileUrl,
+                          att.fileName,
+                          att.fileType,
+                          att.fileSize,
+                          att.storageKey,
+                          JSON.stringify(att.metadata || { sourceChannel: "line", lineImageId: imageId })
+                        ]
+                      );
+                      logger.info({ messageId, imageId, storageKey: att.storageKey }, "Auto-ingested LINE image attachment");
+                    }
+                  }
+                } catch (imgErr: any) {
+                  logger.error({ error: imgErr.message, imageId }, "Failed to auto-ingest LINE image");
+                }
+              }
+            }
+
             await forwardPromptXWebhook(config.LINE_DM_GATEWAY_WEBHOOK_URL, destination, event, {
               onboardingVerified: true,
               projectId: decision.projectId,

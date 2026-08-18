@@ -19,7 +19,7 @@ function run(): void {
     "Example & Partners"
   );
 
-  assert.strictEqual(payload.name, "[TCK-2026-97545] ระบบล่ม 400 Bad Request เข้าไม่ได้");
+  assert.strictEqual(payload.name, "[TCK-2026-97545] ระบบล่ม 400 Bad Request เข้าไม่ได้ [👤 Customer]");
   assert.strictEqual(payload.external_source, "TicketX");
   assert.strictEqual(payload.external_id, "TCK-2026-97545");
   assert.strictEqual(payload.priority, "urgent");
@@ -38,12 +38,54 @@ function run(): void {
   assert.match(payload.description_html, /&lt;ระบบ&gt;/);
   assert.doesNotMatch(payload.description_html, /<ระบบ>/);
 
+  // Test AI created ticket with label
+  const aiPayload = buildPlaneWorkItemPayload(
+    {
+      ticket_number: "TCK-2026-11111",
+      subject: "AI auto-triage ticket",
+      summary: "AI detected incident",
+      created_by_type: "AI",
+      created_by_name: "PromptX Bot",
+    },
+    "Avalant",
+    ["label-uuid-ai-generated"]
+  );
+  assert.strictEqual(aiPayload.name, "[TCK-2026-11111] AI auto-triage ticket [🤖 AI]");
+  assert.deepStrictEqual(aiPayload.labels, ["label-uuid-ai-generated"]);
+  assert.match(aiPayload.description_html, /🤖 AI Bot \(PromptX Bot\)/);
+
+  // Test Human created ticket
+  const humanPayload = buildPlaneWorkItemPayload(
+    {
+      ticket_number: "TCK-2026-22222",
+      subject: "Human admin ticket",
+      summary: "Admin created this",
+      created_by_type: "HUMAN_AGENT",
+      created_by_name: "Super Admin",
+    },
+    "Avalant",
+    ["label-uuid-human-agent"]
+  );
+  assert.strictEqual(humanPayload.name, "[TCK-2026-22222] Human admin ticket [🎧 Human]");
+  assert.deepStrictEqual(humanPayload.labels, ["label-uuid-human-agent"]);
+  assert.match(humanPayload.description_html, /🎧 Human Agent \(Super Admin\)/);
+
+  // Test duplicate badge prevention when subject already has suffix
+  const duplicateCheck = buildPlaneWorkItemPayload({
+    ticket_number: "TCK-2026-33333",
+    subject: "[TCK-2026-33333] Existing title [🤖 AI]",
+    summary: "Re-sync test",
+    created_by_type: "AI",
+  });
+  assert.strictEqual(duplicateCheck.name, "[TCK-2026-33333] Existing title [🤖 AI]");
+
   const minimal = buildPlaneWorkItemPayload({
     id: 12,
     subject: "General support issue",
     summary: "No due date",
     priority: "None",
   });
+  assert.strictEqual(minimal.name, "[12] General support issue [👤 Customer]");
   assert.strictEqual(minimal.external_id, "12");
   assert.strictEqual(minimal.priority, "none");
   assert.ok(!("target_date" in minimal));

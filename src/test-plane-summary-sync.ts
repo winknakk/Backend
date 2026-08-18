@@ -45,13 +45,14 @@ async function run(): Promise<void> {
   const result = await new PlaneService(dbAdapter, httpClient).syncTicketSummaryToPlane("TCK-TEST");
 
   assert.deepStrictEqual(result, { synced: true, planeIssueId: "work-item-1" });
-  assert.strictEqual(requests[0].method, "GET");
-  assert.strictEqual(requests[1].method, "PATCH");
-  assert.match(requests[1].url, /\/work-items\/work-item-1\/$/);
-  assert.match(requests[1].body.description_html, /Customer update history/);
-  assert.match(requests[1].body.description_html, /<li>Original report<\/li><li>Screen flashes<\/li>/);
-  assert.match(requests[1].body.description_html, /Latest customer update/);
-  assert.match(requests[1].body.description_html, /Screen flashes/);
+  const patchReq = requests.find((r) => r.method === "PATCH");
+  assert.ok(patchReq, "Expected a PATCH request");
+  assert.match(patchReq.url, /\/work-items\/work-item-1\/$/);
+  assert.match(patchReq.body.name, /\[TCK-TEST\] Test work item 511 \[👤 Customer\]/);
+  assert.match(patchReq.body.description_html, /Customer update history/);
+  assert.match(patchReq.body.description_html, /<li>Original report<\/li><li>Screen flashes<\/li>/);
+  assert.match(patchReq.body.description_html, /Latest customer update/);
+  assert.match(patchReq.body.description_html, /Screen flashes/);
 
   console.log("Plane summary sync tests passed");
 }

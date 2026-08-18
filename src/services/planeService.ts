@@ -47,6 +47,7 @@ export interface PlaneWorkItemPayload {
   external_source: "TicketX";
   external_id: string;
   target_date?: string;
+  labels?: string[];
 }
 
 function escapePlaneHtml(value: unknown): string {
@@ -95,21 +96,21 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
     const reproSteps: string[] = Array.isArray(issue.reproduction_steps) ? issue.reproduction_steps : [];
     const reproHtml = reproSteps.length > 0
       ? `<h4>🧪 Steps to Reproduce</h4><ol>` +
-        reproSteps.map((step: string) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`).join("") +
-        `</ol>`
+      reproSteps.map((step: string) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`).join("") +
+      `</ol>`
       : "";
 
     const codeEvidenceList: any[] = Array.isArray(tech.code_evidence) ? tech.code_evidence : [];
     const codeHtml = codeEvidenceList.length > 0
       ? `<h4>💻 Code Evidence (Git Repository)</h4><ul>` +
-        codeEvidenceList.map((code: any) => {
-          const file = escapePlaneHtml(code.file || code.filePath || "File");
-          const symbol = code.symbol || code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbol || code.symbolName)}</code>)` : "";
-          const lines = code.lines || code.lineStart ? ` [Lines ${escapePlaneHtml(code.lines || code.lineStart + (code.lineEnd ? `-${code.lineEnd}` : ""))}]` : "";
-          const snippet = code.snippet ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>` : "";
-          return `<li><strong>${file}</strong>${symbol}${lines}${snippet}</li>`;
-        }).join("") +
-        `</ul>`
+      codeEvidenceList.map((code: any) => {
+        const file = escapePlaneHtml(code.file || code.filePath || "File");
+        const symbol = code.symbol || code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbol || code.symbolName)}</code>)` : "";
+        const lines = code.lines || code.lineStart ? ` [Lines ${escapePlaneHtml(code.lines || code.lineStart + (code.lineEnd ? `-${code.lineEnd}` : ""))}]` : "";
+        const snippet = code.snippet ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>` : "";
+        return `<li><strong>${file}</strong>${symbol}${lines}${snippet}</li>`;
+      }).join("") +
+      `</ul>`
       : "";
 
     const rawReport = tech.raw_customer_report || issue.symptom || "";
@@ -190,72 +191,72 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
   const evidenceHtml =
     evidenceList.length > 0
       ? `<h3>🔎 Customer Evidence</h3><ul>` +
-        evidenceList
-          .map((e) => {
-            const type = escapePlaneHtml(e.type || "Evidence");
-            const val = escapePlaneHtml(sanitizeSensitiveData(e.value || ""));
-            const src = escapePlaneHtml(e.source || "CUSTOMER_REPORTED");
-            return `<li><strong>[${src}] ${type}:</strong> <code>${val}</code></li>`;
-          })
-          .join("") +
-        `</ul>`
+      evidenceList
+        .map((e) => {
+          const type = escapePlaneHtml(e.type || "Evidence");
+          const val = escapePlaneHtml(sanitizeSensitiveData(e.value || ""));
+          const src = escapePlaneHtml(e.source || "CUSTOMER_REPORTED");
+          return `<li><strong>[${src}] ${type}:</strong> <code>${val}</code></li>`;
+        })
+        .join("") +
+      `</ul>`
       : "";
 
   const reproSteps: string[] = Array.isArray(diag.reproduction_steps) ? diag.reproduction_steps : [];
   const reproHtml =
     reproSteps.length > 0
       ? `<h3>🧪 Steps to Reproduce</h3><ol>` +
-        reproSteps
-          .map((step) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`)
-          .join("") +
-        `</ol>`
+      reproSteps
+        .map((step) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`)
+        .join("") +
+      `</ol>`
       : "";
 
   const kbSources: any[] = Array.isArray(diag.knowledge_sources) ? diag.knowledge_sources : [];
   const kbHtml =
     kbSources.length > 0
       ? `<h3>📚 Evidence Sources (Knowledge Base)</h3><ul>` +
-        kbSources
-          .map((kb) => {
-            const title = escapePlaneHtml(kb.title || "Project Documentation");
-            const score =
-              typeof kb.score === "number" ? ` (Score: ${(kb.score * 100).toFixed(0)}%)` : "";
-            const snippet = kb.snippet
-              ? `<br><em>${escapePlaneHtml(sanitizeSensitiveData(kb.snippet))}</em>`
-              : "";
-            return `<li><strong>${title}</strong>${score}${snippet}</li>`;
-          })
-          .join("") +
-        `</ul>`
+      kbSources
+        .map((kb) => {
+          const title = escapePlaneHtml(kb.title || "Project Documentation");
+          const score =
+            typeof kb.score === "number" ? ` (Score: ${(kb.score * 100).toFixed(0)}%)` : "";
+          const snippet = kb.snippet
+            ? `<br><em>${escapePlaneHtml(sanitizeSensitiveData(kb.snippet))}</em>`
+            : "";
+          return `<li><strong>${title}</strong>${score}${snippet}</li>`;
+        })
+        .join("") +
+      `</ul>`
       : "";
 
   const unknownsList: string[] = Array.isArray(diag.unknowns) ? diag.unknowns : [];
   const unknownsHtml =
     unknownsList.length > 0
       ? `<h3>❓ Unknown Information</h3><ul>` +
-        unknownsList
-          .map((u) => `<li>${escapePlaneHtml(sanitizeSensitiveData(u))}</li>`)
-          .join("") +
-        `</ul>`
+      unknownsList
+        .map((u) => `<li>${escapePlaneHtml(sanitizeSensitiveData(u))}</li>`)
+        .join("") +
+      `</ul>`
       : "";
 
   const codeEvidenceList: any[] = Array.isArray(diag.code_evidence) ? diag.code_evidence : [];
   const codeHtml =
     codeEvidenceList.length > 0
       ? `<h3>💻 Live Code Evidence (Git Repository)</h3><ul>` +
-        codeEvidenceList
-          .map((code) => {
-            const file = escapePlaneHtml(code.filePath || "File");
-            const symbol = code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbolName)}</code>)` : "";
-            const lines = code.lineStart ? ` [Lines ${escapePlaneHtml(code.lineStart)}-${escapePlaneHtml(code.lineEnd || "")}]` : "";
-            const commit = code.commitSha ? ` [Commit: ${escapePlaneHtml(code.commitSha.slice(0, 7))}]` : "";
-            const snippet = code.snippet
-              ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>`
-              : "";
-            return `<li><strong>${file}</strong>${symbol}${lines}${commit}${snippet}</li>`;
-          })
-          .join("") +
-        `</ul>`
+      codeEvidenceList
+        .map((code) => {
+          const file = escapePlaneHtml(code.filePath || "File");
+          const symbol = code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbolName)}</code>)` : "";
+          const lines = code.lineStart ? ` [Lines ${escapePlaneHtml(code.lineStart)}-${escapePlaneHtml(code.lineEnd || "")}]` : "";
+          const commit = code.commitSha ? ` [Commit: ${escapePlaneHtml(code.commitSha.slice(0, 7))}]` : "";
+          const snippet = code.snippet
+            ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>`
+            : "";
+          return `<li><strong>${file}</strong>${symbol}${lines}${commit}${snippet}</li>`;
+        })
+        .join("") +
+      `</ul>`
       : "";
 
   return [
@@ -281,6 +282,52 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
     unknownsHtml,
     `<h3>🚀 Recommended Next Investigation</h3><p>${escapePlaneHtml(nextAction)}</p>`,
   ].join("");
+}
+
+export interface PlaneCreatorInfo {
+  label: string;
+  suffix: string;
+  labelName: string;
+  labelColor: string;
+}
+
+export function getPlaneCreatorInfo(
+  rawCreatorType?: string,
+  creatorName?: string
+): PlaneCreatorInfo {
+  const type = String(rawCreatorType || "CUSTOMER").toUpperCase();
+  const name = String(creatorName || "").trim();
+
+  if (type.includes("AI")) {
+    return {
+      label: `🤖 AI Bot${name ? ` (${name})` : ""}`,
+      suffix: `[🤖 AI]`,
+      labelName: "AI-Generated",
+      labelColor: "#6366f1",
+    };
+  }
+  if (type.includes("HUMAN") || type.includes("AGENT")) {
+    return {
+      label: `🎧 Human Agent${name ? ` (${name})` : ""}`,
+      suffix: `[🎧 Human]`,
+      labelName: "Human-Agent",
+      labelColor: "#10b981",
+    };
+  }
+  if (type.includes("PLANE")) {
+    return {
+      label: `✈️ Plane.io User${name ? ` (${name})` : ""}`,
+      suffix: `[✈️ Plane]`,
+      labelName: "Plane-User",
+      labelColor: "#3b82f6",
+    };
+  }
+  return {
+    label: name ? `👤 Customer (${name})` : "👤 Customer",
+    suffix: `[👤 Customer]`,
+    labelName: "Customer",
+    labelColor: "#f59e0b",
+  };
 }
 
 export function extractImageUrls(ticket: any): string[] {
@@ -327,13 +374,13 @@ export function extractImageUrls(ticket: any): string[] {
 
 export function buildPlaneWorkItemPayload(
   ticket: Record<string, any>,
-  companyName = "Unknown"
+  companyName = "Unknown",
+  labelIds?: string[]
 ): PlaneWorkItemPayload {
   const ticketNumber = String(
     ticket.ticket_number || ticket.ticket_id || ticket.id1 || ticket.id || "UNKNOWN"
   ).trim();
   const subject = String(ticket.subject || ticket.title || "No Subject").trim();
-  const visibleTitle = subject.includes(ticketNumber) ? subject : `[${ticketNumber}] ${subject}`;
   const source = String(ticket.channel || ticket.created_via || "TicketX").trim();
   const conversationId = String(ticket.conversation_id || "").trim();
   const severity = String(ticket.severity || "").trim();
@@ -349,16 +396,13 @@ export function buildPlaneWorkItemPayload(
   ).toUpperCase();
   const creatorName = String(ticket.created_by_name || ticket.createdByName || "").trim();
 
-  let creatorLabel = "👤 Customer";
-  if (rawCreatorType.includes("AI")) {
-    creatorLabel = `🤖 AI Bot${creatorName ? ` (${creatorName})` : ""}`;
-  } else if (rawCreatorType.includes("HUMAN") || rawCreatorType.includes("AGENT")) {
-    creatorLabel = `🎧 Human Agent${creatorName ? ` (${creatorName})` : ""}`;
-  } else if (rawCreatorType.includes("PLANE")) {
-    creatorLabel = `✈️ Plane.io User${creatorName ? ` (${creatorName})` : ""}`;
-  } else if (creatorName) {
-    creatorLabel = `👤 Customer (${creatorName})`;
-  }
+  const creatorInfo = getPlaneCreatorInfo(rawCreatorType, creatorName);
+  const creatorLabel = creatorInfo.label;
+  const creatorSuffix = creatorInfo.suffix;
+
+  const baseTitle = subject.includes(ticketNumber) ? subject : `[${ticketNumber}] ${subject}`;
+  const hasCreatorBadge = /\[(🤖\s*AI|🎧\s*Human|👤\s*Customer|✈️\s*Plane)\]/i.test(baseTitle);
+  const visibleTitle = hasCreatorBadge ? baseTitle : `${baseTitle} ${creatorSuffix}`;
 
   const metadata = [
     ["TicketX ID", ticketNumber],
@@ -406,9 +450,9 @@ export function buildPlaneWorkItemPayload(
   const imageUrls = extractImageUrls(ticket);
   const mediaHtml = imageUrls.length > 0
     ? `<h3>📷 Customer Screenshots / Attached Media</h3>` +
-      imageUrls
-        .map((imgUrl) => `<p><img src="${escapePlaneHtml(imgUrl)}" alt="Customer Problem Screenshot" style="max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 8px;" /></p>`)
-        .join("")
+    imageUrls
+      .map((imgUrl) => `<p><img src="${escapePlaneHtml(imgUrl)}" alt="Customer Problem Screenshot" style="max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 8px;" /></p>`)
+      .join("")
     : "";
 
   const summarySections = [
@@ -422,6 +466,14 @@ export function buildPlaneWorkItemPayload(
       : "",
   ].join("");
 
+  const explicitLabels = Array.isArray(labelIds)
+    ? labelIds
+    : Array.isArray(ticket.labels)
+      ? ticket.labels
+      : Array.isArray(ticket.label_ids)
+        ? ticket.label_ids
+        : [];
+
   return {
     name: visibleTitle,
     description_html:
@@ -432,6 +484,7 @@ export function buildPlaneWorkItemPayload(
     external_source: "TicketX",
     external_id: ticketNumber,
     ...(dueDate ? { target_date: dueDate } : {}),
+    ...(explicitLabels.length > 0 ? { labels: explicitLabels } : {}),
   };
 }
 
@@ -476,10 +529,18 @@ export function findMatchingPlaneWorkItem(
   subject: string,
   workItems: Array<{ id?: string; name?: string }>
 ): { id?: string; name?: string } | undefined {
-  const normalizedSubject = subject.trim().toLowerCase().replace(/\s+/g, " ");
+  const normalize = (val: string) =>
+    val
+      .trim()
+      .toLowerCase()
+      .replace(/\[(🤖\s*ai|🎧\s*human|👤\s*customer|✈️\s*plane)\]/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const normalizedSubject = normalize(subject);
   const exactMatches = workItems.filter(
     (workItem) =>
-      workItem.id && String(workItem.name || "").trim().toLowerCase().replace(/\s+/g, " ") === normalizedSubject
+      workItem.id && normalize(String(workItem.name || "")) === normalizedSubject
   );
   if (exactMatches.length === 1) return exactMatches[0];
 
@@ -499,8 +560,7 @@ import { PlaneApiClient } from "./PlaneApiClient";
 
 export class PlaneService {
   private dbAdapter: DatabaseAdapter;
-  private resolver: PlaneProjectResolver;
-  private apiClient: PlaneApiClient;
+  private httpClient: typeof axios;
 
   constructor(dbAdapter: DatabaseAdapter, httpClient: typeof axios = axios) {
     this.dbAdapter = dbAdapter;
@@ -578,7 +638,7 @@ export class PlaneService {
 
     const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    
+
     const states = await this.apiClient.listStates(projectConfig);
     const terminalState = selectPlaneTerminalState(states);
     if (!terminalState?.id) {
@@ -607,7 +667,7 @@ export class PlaneService {
 
     const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    
+
     const states = await this.apiClient.listStates(projectConfig);
     const backlogState = selectPlaneBacklogState(states);
     if (!backlogState?.id) throw new Error("Cannot reopen linked Plane work item: project has no Backlog state");
@@ -633,11 +693,11 @@ export class PlaneService {
 
     const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    
+
     const states = await this.apiClient.listStates(projectConfig);
     const cancelledState = selectPlaneCancelledState(states);
     if (!cancelledState?.id) throw new Error("Cannot synchronize merged Plane work item: project has no Cancelled state");
-    
+
     await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, { state: cancelledState.id });
 
     return {
@@ -647,6 +707,59 @@ export class PlaneService {
       stateName: cancelledState.name,
       stateGroup: cancelledState.group,
     };
+  }
+
+  async getOrCreatePlaneLabel(labelName: string, color = "#6366f1"): Promise<string | undefined> {
+    const trimmed = labelName.trim();
+    if (!trimmed) return undefined;
+
+    const cacheKey = trimmed.toLowerCase();
+    if (this.labelCache.has(cacheKey)) {
+      return this.labelCache.get(cacheKey);
+    }
+
+    try {
+      this.assertPlaneConfigured();
+      const projectBaseUrl = this.getProjectBaseUrl();
+      const requestConfig = this.getPlaneRequestConfig();
+
+      // 1. Fetch existing labels for the project
+      const labelsRes = await this.httpClient.get(`${projectBaseUrl}/labels/`, requestConfig);
+      const labels: Array<{ id: string; name: string }> = Array.isArray(labelsRes.data)
+        ? labelsRes.data
+        : Array.isArray(labelsRes.data?.results)
+          ? labelsRes.data.results
+          : [];
+
+      for (const lbl of labels) {
+        if (lbl.id && lbl.name) {
+          this.labelCache.set(lbl.name.trim().toLowerCase(), String(lbl.id));
+        }
+      }
+
+      if (this.labelCache.has(cacheKey)) {
+        return this.labelCache.get(cacheKey);
+      }
+
+      // 2. Create label if it does not exist
+      const createRes = await this.httpClient.post(
+        `${projectBaseUrl}/labels/`,
+        {
+          name: trimmed,
+          color: color,
+        },
+        requestConfig
+      );
+
+      if (createRes.data && createRes.data.id) {
+        const newId = String(createRes.data.id);
+        this.labelCache.set(cacheKey, newId);
+        return newId;
+      }
+    } catch (err: any) {
+      console.warn(`[PlaneService] Failed to resolve or create Plane label "${labelName}":`, err.response?.data?.message || err.message);
+    }
+    return undefined;
   }
 
   async syncTicketSummaryToPlane(ticketId: string): Promise<PlaneTicketSummaryResult> {
@@ -672,7 +785,11 @@ export class PlaneService {
     }
 
     const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
-    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, payload);
+    await this.httpClient.patch(
+      `${this.getProjectBaseUrl()}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
+      payload,
+      this.getPlaneRequestConfig()
+    );
 
     return { synced: true, planeIssueId: resolvedPlaneIssueId };
   }
@@ -776,7 +893,8 @@ export class PlaneService {
           channel: identity?.channel || ticket.channel,
         };
       } catch {
-        // Source enrichment optional
+        // Source enrichment is optional; Ticket creation must not fail when
+        // an older record has no resolvable conversation identity.
       }
     }
 
@@ -786,23 +904,18 @@ export class PlaneService {
     const result = await this.apiClient.createWorkItem(projectConfig, payload);
     const planeIssueId = result.id;
 
-    // ATOMIC UPDATE: Save historical snapshot IF ticket exists in DB
-    if (lookupId) {
-      try {
-        if (this.dbAdapter.updateTicketPlaneSnapshot) {
-          await this.dbAdapter.updateTicketPlaneSnapshot(
-            lookupId,
-            projectConfig.workspaceSlug,
-            projectConfig.planeProjectId,
-            planeIssueId
-          );
-        } else {
-          await this.dbAdapter.updateTicketPlaneIssue(lookupId, planeIssueId);
-        }
-      } catch {
-        // Optional if ticket inserted later in step_5
-      }
+    // ATOMIC UPDATE: Save historical snapshot ONLY AFTER Plane creation succeeds
+    if (this.dbAdapter.updateTicketPlaneSnapshot) {
+      await this.dbAdapter.updateTicketPlaneSnapshot(
+        ticketId,
+        projectConfig.workspaceSlug,
+        projectConfig.planeProjectId,
+        planeIssueId
+      );
+    } else {
+      await this.dbAdapter.updateTicketPlaneIssue(ticketId, planeIssueId);
     }
+
 
     return {
       id: planeIssueId,
