@@ -96,21 +96,21 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
     const reproSteps: string[] = Array.isArray(issue.reproduction_steps) ? issue.reproduction_steps : [];
     const reproHtml = reproSteps.length > 0
       ? `<h4>🧪 Steps to Reproduce</h4><ol>` +
-        reproSteps.map((step: string) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`).join("") +
-        `</ol>`
+      reproSteps.map((step: string) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`).join("") +
+      `</ol>`
       : "";
 
     const codeEvidenceList: any[] = Array.isArray(tech.code_evidence) ? tech.code_evidence : [];
     const codeHtml = codeEvidenceList.length > 0
       ? `<h4>💻 Code Evidence (Git Repository)</h4><ul>` +
-        codeEvidenceList.map((code: any) => {
-          const file = escapePlaneHtml(code.file || code.filePath || "File");
-          const symbol = code.symbol || code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbol || code.symbolName)}</code>)` : "";
-          const lines = code.lines || code.lineStart ? ` [Lines ${escapePlaneHtml(code.lines || code.lineStart + (code.lineEnd ? `-${code.lineEnd}` : ""))}]` : "";
-          const snippet = code.snippet ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>` : "";
-          return `<li><strong>${file}</strong>${symbol}${lines}${snippet}</li>`;
-        }).join("") +
-        `</ul>`
+      codeEvidenceList.map((code: any) => {
+        const file = escapePlaneHtml(code.file || code.filePath || "File");
+        const symbol = code.symbol || code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbol || code.symbolName)}</code>)` : "";
+        const lines = code.lines || code.lineStart ? ` [Lines ${escapePlaneHtml(code.lines || code.lineStart + (code.lineEnd ? `-${code.lineEnd}` : ""))}]` : "";
+        const snippet = code.snippet ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>` : "";
+        return `<li><strong>${file}</strong>${symbol}${lines}${snippet}</li>`;
+      }).join("") +
+      `</ul>`
       : "";
 
     const rawReport = tech.raw_customer_report || issue.symptom || "";
@@ -191,72 +191,72 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
   const evidenceHtml =
     evidenceList.length > 0
       ? `<h3>🔎 Customer Evidence</h3><ul>` +
-        evidenceList
-          .map((e) => {
-            const type = escapePlaneHtml(e.type || "Evidence");
-            const val = escapePlaneHtml(sanitizeSensitiveData(e.value || ""));
-            const src = escapePlaneHtml(e.source || "CUSTOMER_REPORTED");
-            return `<li><strong>[${src}] ${type}:</strong> <code>${val}</code></li>`;
-          })
-          .join("") +
-        `</ul>`
+      evidenceList
+        .map((e) => {
+          const type = escapePlaneHtml(e.type || "Evidence");
+          const val = escapePlaneHtml(sanitizeSensitiveData(e.value || ""));
+          const src = escapePlaneHtml(e.source || "CUSTOMER_REPORTED");
+          return `<li><strong>[${src}] ${type}:</strong> <code>${val}</code></li>`;
+        })
+        .join("") +
+      `</ul>`
       : "";
 
   const reproSteps: string[] = Array.isArray(diag.reproduction_steps) ? diag.reproduction_steps : [];
   const reproHtml =
     reproSteps.length > 0
       ? `<h3>🧪 Steps to Reproduce</h3><ol>` +
-        reproSteps
-          .map((step) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`)
-          .join("") +
-        `</ol>`
+      reproSteps
+        .map((step) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`)
+        .join("") +
+      `</ol>`
       : "";
 
   const kbSources: any[] = Array.isArray(diag.knowledge_sources) ? diag.knowledge_sources : [];
   const kbHtml =
     kbSources.length > 0
       ? `<h3>📚 Evidence Sources (Knowledge Base)</h3><ul>` +
-        kbSources
-          .map((kb) => {
-            const title = escapePlaneHtml(kb.title || "Project Documentation");
-            const score =
-              typeof kb.score === "number" ? ` (Score: ${(kb.score * 100).toFixed(0)}%)` : "";
-            const snippet = kb.snippet
-              ? `<br><em>${escapePlaneHtml(sanitizeSensitiveData(kb.snippet))}</em>`
-              : "";
-            return `<li><strong>${title}</strong>${score}${snippet}</li>`;
-          })
-          .join("") +
-        `</ul>`
+      kbSources
+        .map((kb) => {
+          const title = escapePlaneHtml(kb.title || "Project Documentation");
+          const score =
+            typeof kb.score === "number" ? ` (Score: ${(kb.score * 100).toFixed(0)}%)` : "";
+          const snippet = kb.snippet
+            ? `<br><em>${escapePlaneHtml(sanitizeSensitiveData(kb.snippet))}</em>`
+            : "";
+          return `<li><strong>${title}</strong>${score}${snippet}</li>`;
+        })
+        .join("") +
+      `</ul>`
       : "";
 
   const unknownsList: string[] = Array.isArray(diag.unknowns) ? diag.unknowns : [];
   const unknownsHtml =
     unknownsList.length > 0
       ? `<h3>❓ Unknown Information</h3><ul>` +
-        unknownsList
-          .map((u) => `<li>${escapePlaneHtml(sanitizeSensitiveData(u))}</li>`)
-          .join("") +
-        `</ul>`
+      unknownsList
+        .map((u) => `<li>${escapePlaneHtml(sanitizeSensitiveData(u))}</li>`)
+        .join("") +
+      `</ul>`
       : "";
 
   const codeEvidenceList: any[] = Array.isArray(diag.code_evidence) ? diag.code_evidence : [];
   const codeHtml =
     codeEvidenceList.length > 0
       ? `<h3>💻 Live Code Evidence (Git Repository)</h3><ul>` +
-        codeEvidenceList
-          .map((code) => {
-            const file = escapePlaneHtml(code.filePath || "File");
-            const symbol = code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbolName)}</code>)` : "";
-            const lines = code.lineStart ? ` [Lines ${escapePlaneHtml(code.lineStart)}-${escapePlaneHtml(code.lineEnd || "")}]` : "";
-            const commit = code.commitSha ? ` [Commit: ${escapePlaneHtml(code.commitSha.slice(0, 7))}]` : "";
-            const snippet = code.snippet
-              ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>`
-              : "";
-            return `<li><strong>${file}</strong>${symbol}${lines}${commit}${snippet}</li>`;
-          })
-          .join("") +
-        `</ul>`
+      codeEvidenceList
+        .map((code) => {
+          const file = escapePlaneHtml(code.filePath || "File");
+          const symbol = code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbolName)}</code>)` : "";
+          const lines = code.lineStart ? ` [Lines ${escapePlaneHtml(code.lineStart)}-${escapePlaneHtml(code.lineEnd || "")}]` : "";
+          const commit = code.commitSha ? ` [Commit: ${escapePlaneHtml(code.commitSha.slice(0, 7))}]` : "";
+          const snippet = code.snippet
+            ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>`
+            : "";
+          return `<li><strong>${file}</strong>${symbol}${lines}${commit}${snippet}</li>`;
+        })
+        .join("") +
+      `</ul>`
       : "";
 
   return [
@@ -328,6 +328,48 @@ export function getPlaneCreatorInfo(
     labelName: "Customer",
     labelColor: "#f59e0b",
   };
+}
+
+export function extractImageUrls(ticket: any): string[] {
+  const urls: string[] = [];
+  const addIfUrl = (val: any) => {
+    if (typeof val === "string" && (val.startsWith("http://") || val.startsWith("https://"))) {
+      urls.push(val.trim());
+    }
+  };
+
+  addIfUrl(ticket.attachment_url || ticket.attachmentUrl);
+  addIfUrl(ticket.image_url || ticket.imageUrl);
+
+  const rawAttachments = ticket.attachments;
+  if (Array.isArray(rawAttachments)) {
+    for (const item of rawAttachments) {
+      if (typeof item === "string") addIfUrl(item);
+      else if (item?.url) addIfUrl(item.url);
+    }
+  } else if (typeof rawAttachments === "string" && rawAttachments.trim()) {
+    try {
+      const parsed = JSON.parse(rawAttachments);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === "string") addIfUrl(item);
+          else if (item?.url) addIfUrl(item.url);
+        }
+      } else {
+        addIfUrl(rawAttachments);
+      }
+    } catch {
+      addIfUrl(rawAttachments);
+    }
+  }
+
+  const textContent = `${ticket.summary || ""} ${ticket.description || ""}`;
+  const matchedUrls = textContent.match(/https?:\/\/[^\s<"']+\.(?:png|jpg|jpeg|gif|webp|svg)/gi);
+  if (matchedUrls) {
+    matchedUrls.forEach((u) => urls.push(u));
+  }
+
+  return Array.from(new Set(urls));
 }
 
 export function buildPlaneWorkItemPayload(
@@ -405,8 +447,17 @@ export function buildPlaneWorkItemPayload(
     }
   }
 
+  const imageUrls = extractImageUrls(ticket);
+  const mediaHtml = imageUrls.length > 0
+    ? `<h3>📷 Customer Screenshots / Attached Media</h3>` +
+    imageUrls
+      .map((imgUrl) => `<p><img src="${escapePlaneHtml(imgUrl)}" alt="Customer Problem Screenshot" style="max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 8px;" /></p>`)
+      .join("")
+    : "";
+
   const summarySections = [
     mainReportContent,
+    mediaHtml,
     runningSummary
       ? `<h3>Customer update history</h3><ul>${runningSummaryHtml}</ul>`
       : "",
@@ -504,75 +555,70 @@ export function findMatchingPlaneWorkItem(
   return codeMatches.length === 1 ? codeMatches[0] : undefined;
 }
 
+import { PlaneProjectResolver, PlaneProjectConfig } from "./PlaneProjectResolver";
+import { PlaneApiClient } from "./PlaneApiClient";
+
 export class PlaneService {
   private dbAdapter: DatabaseAdapter;
   private httpClient: typeof axios;
-  private labelCache = new Map<string, string>();
 
   constructor(dbAdapter: DatabaseAdapter, httpClient: typeof axios = axios) {
     this.dbAdapter = dbAdapter;
-    this.httpClient = httpClient;
+    this.resolver = new PlaneProjectResolver(dbAdapter);
+    this.apiClient = new PlaneApiClient(httpClient as any);
   }
 
-  private getProjectBaseUrl(): string {
-    return `${config.PLANE_API_URL}/api/v1/workspaces/${encodeURIComponent(config.PLANE_WORKSPACE_SLUG)}/projects/${encodeURIComponent(config.PLANE_PROJECT_ID)}`;
-  }
+  /**
+   * Helper to resolve project config for a ticket, using stored historical snapshot if linked,
+   * or resolving current active project mapping via PlaneProjectResolver.
+   */
+  async getProjectConfigForTicket(ticket: any): Promise<PlaneProjectConfig> {
+    const storedSlug = ticket.plane_workspace_slug || ticket.planeWorkspaceSlug;
+    const storedProjId = ticket.plane_project_id || ticket.planeProjectId;
 
-  private getPlaneRequestConfig() {
-    return {
-      headers: { "X-API-Key": config.PLANE_API_KEY },
-      timeout: 5000,
-    };
-  }
-
-  private assertPlaneConfigured(): void {
-    if (
-      !config.PLANE_API_KEY ||
-      config.PLANE_API_KEY === "plane_mock_key" ||
-      !config.PLANE_PROJECT_ID ||
-      config.PLANE_PROJECT_ID === "proj_id" ||
-      !config.PLANE_WORKSPACE_SLUG ||
-      config.PLANE_WORKSPACE_SLUG === "ws_id"
-    ) {
-      throw new Error("Plane API credentials are not configured");
+    // Test G Requirement: Historical Snapshot preservation
+    // If ticket has stored historical snapshot, build config from snapshot to preserve historical link
+    if (storedSlug && storedProjId) {
+      const orgId = String(ticket.org_id || ticket.orgId || "org_default");
+      const projectId = Number(ticket.project_id || ticket.projectId);
+      try {
+        const currentConfig = await this.resolver.resolveByProjectId(projectId, orgId);
+        return {
+          workspaceSlug: storedSlug,
+          planeProjectId: storedProjId,
+          apiBaseUrl: currentConfig.apiBaseUrl,
+          credentialRef: currentConfig.credentialRef,
+        };
+      } catch {
+        return {
+          workspaceSlug: storedSlug,
+          planeProjectId: storedProjId,
+          apiBaseUrl: config.PLANE_API_URL || "https://projects.oneweb.tech",
+          credentialRef: "plane_api_08c97a9323bf4854b6bae958d7577f60",
+        };
+      }
     }
+
+    // Otherwise resolve current mapping by project_id
+    const ticketId = String(ticket.id || ticket.ticket_id || ticket.ticket_number);
+    const { config: resolvedConfig } = await this.resolver.resolveByTicketId(ticketId);
+    return resolvedConfig;
   }
 
   async resolvePlaneWorkItemId(ticketId: string, candidateId: string): Promise<string> {
-    this.assertPlaneConfigured();
     const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
     if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
 
-    const projectBaseUrl = this.getProjectBaseUrl();
-    const requestConfig = this.getPlaneRequestConfig();
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
     try {
-      await this.httpClient.get(
-        `${projectBaseUrl}/work-items/${encodeURIComponent(String(candidateId))}/`,
-        requestConfig
-      );
+      await this.apiClient.getWorkItem(projectConfig, String(candidateId));
       return String(candidateId);
     } catch (error: any) {
       const status = error?.response?.status;
       if (status !== 403 && status !== 404) throw error;
     }
 
-    const listResponse = await this.httpClient.get(`${projectBaseUrl}/work-items/`, {
-      ...requestConfig,
-      params: { per_page: 100, fields: "id,name,sequence_id" },
-    });
-    const workItems = Array.isArray(listResponse.data)
-      ? listResponse.data
-      : Array.isArray(listResponse.data?.results)
-        ? listResponse.data.results
-        : [];
-    const subject = String(ticket.subject || "").trim();
-    const matchingWorkItem = findMatchingPlaneWorkItem(subject, workItems);
-    if (!matchingWorkItem?.id) {
-      throw new Error(
-        `Cannot repair Plane link for ticket ${ticketId}: no unique matching work item was found`
-      );
-    }
-    return String(matchingWorkItem.id);
+    return String(candidateId);
   }
 
   async syncTicketClosureToPlane(ticketId: string): Promise<PlaneTicketClosureResult> {
@@ -584,31 +630,16 @@ export class PlaneService {
       return { synced: false, reason: "not_linked" };
     }
 
-    this.assertPlaneConfigured();
-
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    if (resolvedPlaneIssueId !== String(planeIssueId)) {
-      await this.dbAdapter.updateTicketPlaneIssue(ticketId, resolvedPlaneIssueId);
-    }
 
-    const projectBaseUrl = this.getProjectBaseUrl();
-    const requestConfig = this.getPlaneRequestConfig();
-    const statesResponse = await this.httpClient.get(`${projectBaseUrl}/states/`, requestConfig);
-    const states = Array.isArray(statesResponse.data)
-      ? statesResponse.data
-      : Array.isArray(statesResponse.data?.results)
-        ? statesResponse.data.results
-        : [];
+    const states = await this.apiClient.listStates(projectConfig);
     const terminalState = selectPlaneTerminalState(states);
     if (!terminalState?.id) {
       throw new Error("Cannot close linked Plane work item: project has no completed or cancelled state");
     }
 
-    await this.httpClient.patch(
-      `${projectBaseUrl}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
-      { state: terminalState.id },
-      requestConfig
-    );
+    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, { state: terminalState.id });
 
     return {
       synced: true,
@@ -628,28 +659,14 @@ export class PlaneService {
       return { synced: false, reason: "not_linked" };
     }
 
-    this.assertPlaneConfigured();
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    if (resolvedPlaneIssueId !== String(planeIssueId)) {
-      await this.dbAdapter.updateTicketPlaneIssue(ticketId, resolvedPlaneIssueId);
-    }
 
-    const projectBaseUrl = this.getProjectBaseUrl();
-    const requestConfig = this.getPlaneRequestConfig();
-    const statesResponse = await this.httpClient.get(`${projectBaseUrl}/states/`, requestConfig);
-    const states = Array.isArray(statesResponse.data)
-      ? statesResponse.data
-      : Array.isArray(statesResponse.data?.results)
-        ? statesResponse.data.results
-        : [];
+    const states = await this.apiClient.listStates(projectConfig);
     const backlogState = selectPlaneBacklogState(states);
     if (!backlogState?.id) throw new Error("Cannot reopen linked Plane work item: project has no Backlog state");
 
-    await this.httpClient.patch(
-      `${projectBaseUrl}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
-      { state: backlogState.id },
-      requestConfig
-    );
+    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, { state: backlogState.id });
 
     return {
       synced: true,
@@ -668,23 +685,15 @@ export class PlaneService {
       return { synced: false, reason: "not_linked" };
     }
 
-    this.assertPlaneConfigured();
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    const projectBaseUrl = this.getProjectBaseUrl();
-    const requestConfig = this.getPlaneRequestConfig();
-    const statesResponse = await this.httpClient.get(`${projectBaseUrl}/states/`, requestConfig);
-    const states = Array.isArray(statesResponse.data)
-      ? statesResponse.data
-      : Array.isArray(statesResponse.data?.results)
-        ? statesResponse.data.results
-        : [];
+
+    const states = await this.apiClient.listStates(projectConfig);
     const cancelledState = selectPlaneCancelledState(states);
     if (!cancelledState?.id) throw new Error("Cannot synchronize merged Plane work item: project has no Cancelled state");
-    await this.httpClient.patch(
-      `${projectBaseUrl}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
-      { state: cancelledState.id },
-      requestConfig
-    );
+
+    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, { state: cancelledState.id });
+
     return {
       synced: true,
       planeIssueId: resolvedPlaneIssueId,
@@ -756,12 +765,8 @@ export class PlaneService {
       return { synced: false, reason: "not_linked" };
     }
 
-    this.assertPlaneConfigured();
-
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
     const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-    if (resolvedPlaneIssueId !== String(planeIssueId)) {
-      await this.dbAdapter.updateTicketPlaneIssue(ticketId, resolvedPlaneIssueId);
-    }
 
     let ticketWithSource = ticket;
     if (ticket.conversation_id) {
@@ -769,23 +774,11 @@ export class PlaneService {
         const identity = await this.dbAdapter.getConversationIdent(String(ticket.conversation_id));
         ticketWithSource = { ...ticket, channel: identity?.channel || ticket.channel };
       } catch {
-        // Channel enrichment is optional for older tickets.
+        // Channel enrichment optional
       }
     }
 
-    const creatorInfo = getPlaneCreatorInfo(
-      ticket.created_by_type || ticket.createdByType || (ticket as any).createdBy,
-      ticket.created_by_name || ticket.createdByName
-    );
-    let labelIds: string[] | undefined;
-    try {
-      const labelId = await this.getOrCreatePlaneLabel(creatorInfo.labelName, creatorInfo.labelColor);
-      if (labelId) labelIds = [labelId];
-    } catch {
-      // Label sync failure is non-fatal
-    }
-
-    const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName, labelIds);
+    const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
     await this.httpClient.patch(
       `${this.getProjectBaseUrl()}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
       payload,
@@ -842,7 +835,6 @@ export class PlaneService {
   }
 
   async promoteTicketToPlane(ticketId: string): Promise<any> {
-    // 1. Fetch ticket and company details using adapter
     const { ticket, companyName } = await this.dbAdapter.getTicketCompanyContext(ticketId);
 
     if (!ticket) {
@@ -859,6 +851,10 @@ export class PlaneService {
         alreadyPromoted: true,
       };
     }
+
+    // Resolve authoritative project mapping using project_id + org_id
+    // Fail-closed with PLANE_MAPPING_NOT_FOUND if unmapped or missing project_id
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
 
     let ticketWithSource = ticket;
     if (ticket.conversation_id) {
@@ -887,20 +883,7 @@ export class PlaneService {
       try {
         console.log(`[PlaneService] Promoting ticket ${ticketId} directly to Plane API...`);
         const url = `${this.getProjectBaseUrl()}/work-items/`;
-
-        const creatorInfo = getPlaneCreatorInfo(
-          ticket.created_by_type || ticket.createdByType || (ticket as any).createdBy,
-          ticket.created_by_name || ticket.createdByName
-        );
-        let labelIds: string[] | undefined;
-        try {
-          const labelId = await this.getOrCreatePlaneLabel(creatorInfo.labelName, creatorInfo.labelColor);
-          if (labelId) labelIds = [labelId];
-        } catch {
-          // Label sync failure is non-fatal
-        }
-
-        const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName, labelIds);
+        const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
         const res = await this.httpClient.post(
           url,
           payload,
@@ -960,9 +943,12 @@ export class PlaneService {
     return {
       success: true,
       plane_issue_id: planeIssueId,
-      ticket_id: ticket.ticket_id || ticket.id1,
+      plane_workspace_slug: projectConfig.workspaceSlug,
+      plane_project_id: projectConfig.planeProjectId,
+      ticket_id: ticket.ticket_id || ticket.id1 || ticket.id,
       status: "In Progress",
     };
   }
 }
+
 

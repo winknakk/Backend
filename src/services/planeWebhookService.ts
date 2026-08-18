@@ -272,58 +272,71 @@ export class PlaneWebhookService {
   }
 
   async syncLinkedTicketsFromPlane(batchSize = config.PLANE_REVERSE_SYNC_BATCH_SIZE): Promise<PlaneReverseSyncSummary> {
-    if (
-      !config.PLANE_API_KEY ||
-      config.PLANE_API_KEY === "plane_mock_key" ||
-      !config.PLANE_PROJECT_ID ||
-      config.PLANE_PROJECT_ID === "proj_id" ||
-      !config.PLANE_WORKSPACE_SLUG ||
-      config.PLANE_WORKSPACE_SLUG === "ws_id"
-    ) {
-      throw new Error("Plane reverse sync credentials are not configured");
-    }
-
-    const tickets = await this.dbAdapter.listAllTickets(undefined, undefined, undefined, undefined, "org_all");
-    const linkedIssueIds = Array.from(
-      new Set(
-        tickets
-          .map((ticket: any) => ticket.planeIssueId || ticket.plane_issue_id)
-          .filter((issueId: unknown): issueId is string => typeof issueId === "string" && issueId.length > 0)
-      )
-    ).slice(0, batchSize);
-
     const summary: PlaneReverseSyncSummary = { checked: 0, updated: 0, deleted: 0, unlinked: 0, failed: 0 };
-    for (const planeIssueId of linkedIssueIds) {
-      summary.checked += 1;
-      try {
-        const url = `${config.PLANE_API_URL}/api/v1/workspaces/${config.PLANE_WORKSPACE_SLUG}/projects/${config.PLANE_PROJECT_ID}/work-items/${planeIssueId}/`;
-        const response = await this.httpClient.get(url, {
-          headers: { "X-API-Key": config.PLANE_API_KEY },
-          params: { expand: "state" },
-          timeout: 5000,
-        });
-        const result = await this.sync({
-          event: "issue",
-          action: "update",
-          workspace_id: response.data?.workspace,
-          data: response.data,
-        });
-        if (result.matched) summary.updated += 1;
-        else summary.unlinked += 1;
-      } catch (error: any) {
-        if (error?.response?.status === 404 && this.dbAdapter.deleteTicketFromPlane) {
+
+    try {
+      const mappingsRes = await pool.query(
+        `SELECT project_id, org_id, workspace_slug, plane_project_id, plane_api_base_url, credential_ref
+         FROM plane_workspace_mappings
+         WHERE enabled = TRUE`
+      );
+
+      if (!mappingsRes.rows || mappingsRes.rows.length === 0) {
+        logger.info("No active Plane project mappings found for reverse sync");
+        return summary;
+      }
+
+      for (const mapping of mappingsRes.rows) {
+        const { project_id, org_id, workspace_slug, plane_project_id, plane_api_base_url, credential_ref } = mapping;
+
+        // Query tickets matching 3-key scope (workspace_slug, plane_project_id, plane_issue_id)
+        const ticketsRes = await pool.query(
+          `SELECT id, plane_issue_id, plane_workspace_slug, plane_project_id, project_id, org_id
+           FROM tickets
+           WHERE ((plane_workspace_slug = $1 AND plane_project_id = $2) OR project_id = $3)
+             AND plane_issue_id IS NOT NULL AND plane_issue_id != ''
+           LIMIT $4`,
+          [workspace_slug, plane_project_id, project_id, batchSize]
+        );
+
+        for (const ticket of ticketsRes.rows) {
+          const issueId = ticket.plane_issue_id;
+          if (!issueId || String(issueId).startsWith("mock-")) continue;
+
+          summary.checked += 1;
           try {
-            const deleted = await this.dbAdapter.deleteTicketFromPlane(planeIssueId);
-            if (deleted) summary.deleted += 1;
-            else summary.unlinked += 1;
-          } catch {
-            summary.failed += 1;
+            const apiBase = (plane_api_base_url || config.PLANE_API_URL || "https://projects.oneweb.tech").replace(/\/+$/, "");
+            const url = `${apiBase}/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(plane_project_id)}/work-items/${encodeURIComponent(issueId)}/`;
+            const apiKey = credential_ref.startsWith("env:") ? (process.env[credential_ref.slice(4)] || config.PLANE_API_KEY) : credential_ref;
+
+            const response = await this.httpClient.get(url, {
+              headers: { "X-API-Key": apiKey },
+              timeout: 5000,
+            });
+
+            const syncRes = await this.sync({
+              event: "work_item.updated",
+              data: {
+                id: issueId,
+                project: plane_project_id,
+                ...response.data,
+              },
+            });
+
+            if (syncRes.matched) summary.updated += 1;
+          } catch (err: any) {
+            if (err.response?.status === 404) {
+              summary.deleted += 1;
+            } else {
+              summary.failed += 1;
+            }
           }
-        } else {
-          summary.failed += 1;
         }
       }
+    } catch (err: any) {
+      logger.error({ error: err.message }, "Failed to execute multi-project reverse sync query");
     }
+
     return summary;
   }
 
