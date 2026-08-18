@@ -67,31 +67,39 @@ export class PlaneApiClient {
    * Creates a Work Item in the target Plane Project.
    */
   async createWorkItem(projectConfig: PlaneProjectConfig, payload: PlaneWorkItemPayload): Promise<{ id: string }> {
-    const url = `${this.getProjectBaseUrl(projectConfig)}/work-items/`;
+    const url = `${this.getProjectBaseUrl(projectConfig)}/issues/`;
     logger.info({ url, planeProjectId: projectConfig.planeProjectId }, "Creating work item in Plane project");
 
-    const res = await this.httpClient.post(url, payload, {
-      headers: this.getHeaders(projectConfig),
-      timeout: 8000,
-    });
+    try {
+      const res = await this.httpClient.post(url, payload, {
+        headers: this.getHeaders(projectConfig),
+        timeout: 20000,
+      });
 
-    if (!res.data || !res.data.id) {
-      throw new Error("Plane API creation failed: No ID returned in response payload");
+      if (!res.data || !res.data.id) {
+        throw new Error("Plane API creation failed: No ID returned in response payload");
+      }
+
+      return { id: String(res.data.id) };
+    } catch (err: any) {
+      if (err.response?.status === 409) {
+        logger.info({ external_id: payload.external_id }, "Plane returned 409 Conflict: issue already created");
+        return { id: String(payload.external_id) };
+      }
+      throw err;
     }
-
-    return { id: String(res.data.id) };
   }
 
   /**
    * Updates an existing Work Item in Plane.
    */
   async patchWorkItem(projectConfig: PlaneProjectConfig, planeIssueId: string, payload: any): Promise<void> {
-    const url = `${this.getProjectBaseUrl(projectConfig)}/work-items/${encodeURIComponent(planeIssueId)}/`;
+    const url = `${this.getProjectBaseUrl(projectConfig)}/issues/${encodeURIComponent(planeIssueId)}/`;
     logger.info({ url, planeIssueId }, "Patching work item in Plane project");
 
     await this.httpClient.patch(url, payload, {
       headers: this.getHeaders(projectConfig),
-      timeout: 8000,
+      timeout: 20000,
     });
   }
 
@@ -99,10 +107,10 @@ export class PlaneApiClient {
    * Retrieves a Work Item from Plane by ID.
    */
   async getWorkItem(projectConfig: PlaneProjectConfig, planeIssueId: string): Promise<any> {
-    const url = `${this.getProjectBaseUrl(projectConfig)}/work-items/${encodeURIComponent(planeIssueId)}/`;
+    const url = `${this.getProjectBaseUrl(projectConfig)}/issues/${encodeURIComponent(planeIssueId)}/`;
     const res = await this.httpClient.get(url, {
       headers: this.getHeaders(projectConfig),
-      timeout: 5000,
+      timeout: 20000,
     });
     return res.data;
   }
@@ -114,7 +122,7 @@ export class PlaneApiClient {
     const url = `${this.getProjectBaseUrl(projectConfig)}/states/`;
     const res = await this.httpClient.get(url, {
       headers: this.getHeaders(projectConfig),
-      timeout: 5000,
+      timeout: 20000,
     });
 
     if (Array.isArray(res.data)) return res.data;

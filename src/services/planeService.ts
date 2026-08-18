@@ -540,6 +540,12 @@ export class PlaneService {
     }
 
     // Otherwise resolve current mapping by project_id
+    const projectId = Number(ticket.project_id || ticket.projectId);
+    const orgId = String(ticket.org_id || ticket.orgId || "org_default");
+    if (projectId && !Number.isNaN(projectId)) {
+      return await this.resolver.resolveByProjectId(projectId, orgId);
+    }
+
     const ticketId = String(ticket.id || ticket.ticket_id || ticket.ticket_number);
     const { config: resolvedConfig } = await this.resolver.resolveByTicketId(ticketId);
     return resolvedConfig;
@@ -717,19 +723,41 @@ export class PlaneService {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
   }
 
-  async promoteTicketToPlane(ticketId: string): Promise<any> {
-    const { ticket, companyName } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+  async promoteTicketToPlane(ticketIdOrData: any, optionalData?: any): Promise<any> {
+    let ticket: any = null;
+    let companyName = "Unknown";
+    let lookupId = typeof ticketIdOrData === "string" ? ticketIdOrData : (ticketIdOrData?.ticketId || ticketIdOrData?.ticket_id || ticketIdOrData?.ticket_number);
+
+    if (lookupId) {
+      try {
+        const ctx = await this.dbAdapter.getTicketCompanyContext(lookupId);
+        if (ctx && ctx.ticket) {
+          ticket = ctx.ticket;
+          companyName = ctx.companyName || "Unknown";
+        }
+      } catch {
+        // Fallback to in-flight data if not found in database yet
+      }
+    }
+
+    if (!ticket && typeof ticketIdOrData === "object") {
+      ticket = ticketIdOrData.data || ticketIdOrData;
+    } else if (!ticket && optionalData) {
+      ticket = optionalData.data || optionalData;
+    }
 
     if (!ticket) {
-      throw new Error(`Ticket not found: ${ticketId}`);
+      throw new Error(`Ticket not found: ${lookupId || JSON.stringify(ticketIdOrData)}`);
     }
 
     const existingPlaneId = ticket.planeIssueId || ticket.plane_issue_id;
     if (existingPlaneId && !String(existingPlaneId).startsWith("mock-")) {
-      console.log(`[PlaneService] Ticket ${ticketId} is already promoted to Plane Work Item ${existingPlaneId}; skipping duplicate promotion.`);
+      console.log(`[PlaneService] Ticket ${lookupId} is already promoted to Plane Work Item ${existingPlaneId}; skipping duplicate promotion.`);
       return {
-        ticketId,
+        id: String(existingPlaneId),
+        ticketId: lookupId || ticket.ticket_number,
         planeIssueId: String(existingPlaneId),
+        plane_issue_id: String(existingPlaneId),
         webhookTriggered: true,
         alreadyPromoted: true,
       };
@@ -758,20 +786,26 @@ export class PlaneService {
     const result = await this.apiClient.createWorkItem(projectConfig, payload);
     const planeIssueId = result.id;
 
-    // ATOMIC UPDATE: Save historical snapshot ONLY AFTER Plane creation succeeds
-    if (this.dbAdapter.updateTicketPlaneSnapshot) {
-      await this.dbAdapter.updateTicketPlaneSnapshot(
-        ticketId,
-        projectConfig.workspaceSlug,
-        projectConfig.planeProjectId,
-        planeIssueId
-      );
-    } else {
-      await this.dbAdapter.updateTicketPlaneIssue(ticketId, planeIssueId);
+    // ATOMIC UPDATE: Save historical snapshot IF ticket exists in DB
+    if (lookupId) {
+      try {
+        if (this.dbAdapter.updateTicketPlaneSnapshot) {
+          await this.dbAdapter.updateTicketPlaneSnapshot(
+            lookupId,
+            projectConfig.workspaceSlug,
+            projectConfig.planeProjectId,
+            planeIssueId
+          );
+        } else {
+          await this.dbAdapter.updateTicketPlaneIssue(lookupId, planeIssueId);
+        }
+      } catch {
+        // Optional if ticket inserted later in step_5
+      }
     }
 
-
     return {
+      id: planeIssueId,
       success: true,
       plane_issue_id: planeIssueId,
       plane_workspace_slug: projectConfig.workspaceSlug,
