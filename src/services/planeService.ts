@@ -47,6 +47,7 @@ export interface PlaneWorkItemPayload {
   external_source: "TicketX";
   external_id: string;
   target_date?: string;
+  labels?: string[];
 }
 
 function escapePlaneHtml(value: unknown): string {
@@ -283,15 +284,61 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
   ].join("");
 }
 
+export interface PlaneCreatorInfo {
+  label: string;
+  suffix: string;
+  labelName: string;
+  labelColor: string;
+}
+
+export function getPlaneCreatorInfo(
+  rawCreatorType?: string,
+  creatorName?: string
+): PlaneCreatorInfo {
+  const type = String(rawCreatorType || "CUSTOMER").toUpperCase();
+  const name = String(creatorName || "").trim();
+
+  if (type.includes("AI")) {
+    return {
+      label: `🤖 AI Bot${name ? ` (${name})` : ""}`,
+      suffix: `[🤖 AI]`,
+      labelName: "AI-Generated",
+      labelColor: "#6366f1",
+    };
+  }
+  if (type.includes("HUMAN") || type.includes("AGENT")) {
+    return {
+      label: `🎧 Human Agent${name ? ` (${name})` : ""}`,
+      suffix: `[🎧 Human]`,
+      labelName: "Human-Agent",
+      labelColor: "#10b981",
+    };
+  }
+  if (type.includes("PLANE")) {
+    return {
+      label: `✈️ Plane.io User${name ? ` (${name})` : ""}`,
+      suffix: `[✈️ Plane]`,
+      labelName: "Plane-User",
+      labelColor: "#3b82f6",
+    };
+  }
+  return {
+    label: name ? `👤 Customer (${name})` : "👤 Customer",
+    suffix: `[👤 Customer]`,
+    labelName: "Customer",
+    labelColor: "#f59e0b",
+  };
+}
+
 export function buildPlaneWorkItemPayload(
   ticket: Record<string, any>,
-  companyName = "Unknown"
+  companyName = "Unknown",
+  labelIds?: string[]
 ): PlaneWorkItemPayload {
   const ticketNumber = String(
     ticket.ticket_number || ticket.ticket_id || ticket.id1 || ticket.id || "UNKNOWN"
   ).trim();
   const subject = String(ticket.subject || ticket.title || "No Subject").trim();
-  const visibleTitle = subject.includes(ticketNumber) ? subject : `[${ticketNumber}] ${subject}`;
   const source = String(ticket.channel || ticket.created_via || "TicketX").trim();
   const conversationId = String(ticket.conversation_id || "").trim();
   const severity = String(ticket.severity || "").trim();
@@ -307,16 +354,13 @@ export function buildPlaneWorkItemPayload(
   ).toUpperCase();
   const creatorName = String(ticket.created_by_name || ticket.createdByName || "").trim();
 
-  let creatorLabel = "👤 Customer";
-  if (rawCreatorType.includes("AI")) {
-    creatorLabel = `🤖 AI Bot${creatorName ? ` (${creatorName})` : ""}`;
-  } else if (rawCreatorType.includes("HUMAN") || rawCreatorType.includes("AGENT")) {
-    creatorLabel = `🎧 Human Agent${creatorName ? ` (${creatorName})` : ""}`;
-  } else if (rawCreatorType.includes("PLANE")) {
-    creatorLabel = `✈️ Plane.io User${creatorName ? ` (${creatorName})` : ""}`;
-  } else if (creatorName) {
-    creatorLabel = `👤 Customer (${creatorName})`;
-  }
+  const creatorInfo = getPlaneCreatorInfo(rawCreatorType, creatorName);
+  const creatorLabel = creatorInfo.label;
+  const creatorSuffix = creatorInfo.suffix;
+
+  const baseTitle = subject.includes(ticketNumber) ? subject : `[${ticketNumber}] ${subject}`;
+  const hasCreatorBadge = /\[(🤖\s*AI|🎧\s*Human|👤\s*Customer|✈️\s*Plane)\]/i.test(baseTitle);
+  const visibleTitle = hasCreatorBadge ? baseTitle : `${baseTitle} ${creatorSuffix}`;
 
   const metadata = [
     ["TicketX ID", ticketNumber],
@@ -371,6 +415,14 @@ export function buildPlaneWorkItemPayload(
       : "",
   ].join("");
 
+  const explicitLabels = Array.isArray(labelIds)
+    ? labelIds
+    : Array.isArray(ticket.labels)
+      ? ticket.labels
+      : Array.isArray(ticket.label_ids)
+        ? ticket.label_ids
+        : [];
+
   return {
     name: visibleTitle,
     description_html:
@@ -381,6 +433,7 @@ export function buildPlaneWorkItemPayload(
     external_source: "TicketX",
     external_id: ticketNumber,
     ...(dueDate ? { target_date: dueDate } : {}),
+    ...(explicitLabels.length > 0 ? { labels: explicitLabels } : {}),
   };
 }
 
@@ -425,10 +478,18 @@ export function findMatchingPlaneWorkItem(
   subject: string,
   workItems: Array<{ id?: string; name?: string }>
 ): { id?: string; name?: string } | undefined {
-  const normalizedSubject = subject.trim().toLowerCase().replace(/\s+/g, " ");
+  const normalize = (val: string) =>
+    val
+      .trim()
+      .toLowerCase()
+      .replace(/\[(🤖\s*ai|🎧\s*human|👤\s*customer|✈️\s*plane)\]/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const normalizedSubject = normalize(subject);
   const exactMatches = workItems.filter(
     (workItem) =>
-      workItem.id && String(workItem.name || "").trim().toLowerCase().replace(/\s+/g, " ") === normalizedSubject
+      workItem.id && normalize(String(workItem.name || "")) === normalizedSubject
   );
   if (exactMatches.length === 1) return exactMatches[0];
 
@@ -446,6 +507,7 @@ export function findMatchingPlaneWorkItem(
 export class PlaneService {
   private dbAdapter: DatabaseAdapter;
   private httpClient: typeof axios;
+  private labelCache = new Map<string, string>();
 
   constructor(dbAdapter: DatabaseAdapter, httpClient: typeof axios = axios) {
     this.dbAdapter = dbAdapter;
@@ -632,6 +694,59 @@ export class PlaneService {
     };
   }
 
+  async getOrCreatePlaneLabel(labelName: string, color = "#6366f1"): Promise<string | undefined> {
+    const trimmed = labelName.trim();
+    if (!trimmed) return undefined;
+
+    const cacheKey = trimmed.toLowerCase();
+    if (this.labelCache.has(cacheKey)) {
+      return this.labelCache.get(cacheKey);
+    }
+
+    try {
+      this.assertPlaneConfigured();
+      const projectBaseUrl = this.getProjectBaseUrl();
+      const requestConfig = this.getPlaneRequestConfig();
+
+      // 1. Fetch existing labels for the project
+      const labelsRes = await this.httpClient.get(`${projectBaseUrl}/labels/`, requestConfig);
+      const labels: Array<{ id: string; name: string }> = Array.isArray(labelsRes.data)
+        ? labelsRes.data
+        : Array.isArray(labelsRes.data?.results)
+          ? labelsRes.data.results
+          : [];
+
+      for (const lbl of labels) {
+        if (lbl.id && lbl.name) {
+          this.labelCache.set(lbl.name.trim().toLowerCase(), String(lbl.id));
+        }
+      }
+
+      if (this.labelCache.has(cacheKey)) {
+        return this.labelCache.get(cacheKey);
+      }
+
+      // 2. Create label if it does not exist
+      const createRes = await this.httpClient.post(
+        `${projectBaseUrl}/labels/`,
+        {
+          name: trimmed,
+          color: color,
+        },
+        requestConfig
+      );
+
+      if (createRes.data && createRes.data.id) {
+        const newId = String(createRes.data.id);
+        this.labelCache.set(cacheKey, newId);
+        return newId;
+      }
+    } catch (err: any) {
+      console.warn(`[PlaneService] Failed to resolve or create Plane label "${labelName}":`, err.response?.data?.message || err.message);
+    }
+    return undefined;
+  }
+
   async syncTicketSummaryToPlane(ticketId: string): Promise<PlaneTicketSummaryResult> {
     const { ticket, companyName } = await this.dbAdapter.getTicketCompanyContext(ticketId);
     if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
@@ -658,7 +773,19 @@ export class PlaneService {
       }
     }
 
-    const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
+    const creatorInfo = getPlaneCreatorInfo(
+      ticket.created_by_type || ticket.createdByType || (ticket as any).createdBy,
+      ticket.created_by_name || ticket.createdByName
+    );
+    let labelIds: string[] | undefined;
+    try {
+      const labelId = await this.getOrCreatePlaneLabel(creatorInfo.labelName, creatorInfo.labelColor);
+      if (labelId) labelIds = [labelId];
+    } catch {
+      // Label sync failure is non-fatal
+    }
+
+    const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName, labelIds);
     await this.httpClient.patch(
       `${this.getProjectBaseUrl()}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
       payload,
@@ -760,7 +887,20 @@ export class PlaneService {
       try {
         console.log(`[PlaneService] Promoting ticket ${ticketId} directly to Plane API...`);
         const url = `${this.getProjectBaseUrl()}/work-items/`;
-        const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
+
+        const creatorInfo = getPlaneCreatorInfo(
+          ticket.created_by_type || ticket.createdByType || (ticket as any).createdBy,
+          ticket.created_by_name || ticket.createdByName
+        );
+        let labelIds: string[] | undefined;
+        try {
+          const labelId = await this.getOrCreatePlaneLabel(creatorInfo.labelName, creatorInfo.labelColor);
+          if (labelId) labelIds = [labelId];
+        } catch {
+          // Label sync failure is non-fatal
+        }
+
+        const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName, labelIds);
         const res = await this.httpClient.post(
           url,
           payload,
