@@ -39,7 +39,7 @@ export class ConstantSystemService {
   static async getCenterCmServiceUrl(): Promise<string> {
     const url = await this.getConstant(
       "CENTER_CM_SERVICE_URL",
-      "https://mocha.centerapp.io/cm-service/api/v1"
+      "https://centerapp.io/cm-service/api/v1"
     );
     return url.replace(/\/$/, "");
   }
