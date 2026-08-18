@@ -74,6 +74,82 @@ import { sanitizeSensitiveData } from "../domain/diagnostic/DeveloperDiagnostic"
 export function formatDeveloperDiagnosticHtml(diag: any): string {
   if (!diag) return "";
 
+  // Check if this is the P6 CanonicalDiagnosticObject structure
+  if (diag.issue_details || diag.technical_evidence || (diag.overview && diag.sla)) {
+    const overview = diag.overview || {};
+    const issue = diag.issue_details || {};
+    const sla = diag.sla || {};
+    const tech = diag.technical_evidence || {};
+    const completeness = diag.completeness || {};
+    const evStatus = tech.evidence_status || {};
+
+    const formatBadge = (status?: string) => {
+      const s = (status || "UNKNOWN").toUpperCase();
+      let color = "#6b7280"; // gray
+      if (s === "CONFIRMED") color = "#059669"; // green
+      else if (s === "LIKELY") color = "#d97706"; // amber
+      else if (s === "NOT_FOUND_IN_KNOWLEDGE_BASE") color = "#dc2626"; // red
+      return ` <span style="background-color:${color};color:#ffffff;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;">${escapePlaneHtml(s)}</span>`;
+    };
+
+    const reproSteps: string[] = Array.isArray(issue.reproduction_steps) ? issue.reproduction_steps : [];
+    const reproHtml = reproSteps.length > 0
+      ? `<h4>🧪 Steps to Reproduce</h4><ol>` +
+        reproSteps.map((step: string) => `<li>${escapePlaneHtml(sanitizeSensitiveData(step))}</li>`).join("") +
+        `</ol>`
+      : "";
+
+    const codeEvidenceList: any[] = Array.isArray(tech.code_evidence) ? tech.code_evidence : [];
+    const codeHtml = codeEvidenceList.length > 0
+      ? `<h4>💻 Code Evidence (Git Repository)</h4><ul>` +
+        codeEvidenceList.map((code: any) => {
+          const file = escapePlaneHtml(code.file || code.filePath || "File");
+          const symbol = code.symbol || code.symbolName ? ` (Symbol: <code>${escapePlaneHtml(code.symbol || code.symbolName)}</code>)` : "";
+          const lines = code.lines || code.lineStart ? ` [Lines ${escapePlaneHtml(code.lines || code.lineStart + (code.lineEnd ? `-${code.lineEnd}` : ""))}]` : "";
+          const snippet = code.snippet ? `<br><pre><code>${escapePlaneHtml(sanitizeSensitiveData(code.snippet))}</code></pre>` : "";
+          return `<li><strong>${file}</strong>${symbol}${lines}${snippet}</li>`;
+        }).join("") +
+        `</ul>`
+      : "";
+
+    const rawReport = tech.raw_customer_report || issue.symptom || "";
+    const rawHtml = rawReport
+      ? `<details style="margin-top:12px;padding:8px;background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;"><summary style="cursor:pointer;font-weight:600;">🔽 Raw Customer Report</summary><p style="margin-top:8px;">${escapePlaneHtml(sanitizeSensitiveData(rawReport)).replace(/\r?\n/g, "<br>")}</p></details>`
+      : "";
+
+    return [
+      `<h3>📋 1. ข้อมูลทั่วไป (Overview)</h3><ul>`,
+      overview.ticket_id ? `<li><strong>Ticket ID:</strong> ${escapePlaneHtml(overview.ticket_id)}</li>` : "",
+      overview.project_name ? `<li><strong>Project / System:</strong> ${escapePlaneHtml(overview.project_name)}</li>` : "",
+      overview.notifier ? `<li><strong>Notifier:</strong> ${escapePlaneHtml(overview.notifier)}</li>` : "",
+      overview.channel ? `<li><strong>Channel:</strong> ${escapePlaneHtml(overview.channel)}</li>` : "",
+      overview.impact_scope ? `<li><strong>Impact Scope:</strong> ${escapePlaneHtml(overview.impact_scope)}</li>` : "",
+      `</ul>`,
+
+      `<h3>🔍 2. รายละเอียดสำหรับ Developer (Issue Details)</h3><ul>`,
+      `<li><strong>Feature / Screen / Report:</strong> ${escapePlaneHtml(issue.feature_screen_report || "ยังไม่ได้ระบุ")}</li>`,
+      `<li><strong>Symptom / Actual Behavior:</strong> ${escapePlaneHtml(issue.actual_behavior || issue.symptom || "ยังไม่ได้ระบุ")}</li>`,
+      `<li><strong>Expected Behavior:</strong> ${escapePlaneHtml(issue.expected_behavior || "ระบบต้องทำงานได้ถูกต้องตามปกติ")}</li>`,
+      `</ul>`,
+      reproHtml,
+
+      `<h3>⏱️ 3. ระดับความสำคัญและเวลา (SLA & Severity)</h3><ul>`,
+      `<li><strong>Severity / Priority:</strong> ${escapePlaneHtml(sla.severity || "Normal")} / ${escapePlaneHtml(sla.priority || "P3")}</li>`,
+      sla.sla_hours ? `<li><strong>SLA Target:</strong> ภายใน ${escapePlaneHtml(sla.sla_hours)} ชั่วโมง</li>` : "",
+      sla.due_date ? `<li><strong>Due Date:</strong> ${escapePlaneHtml(sla.due_date)}</li>` : "",
+      `</ul>`,
+
+      `<h3>🛠️ 4. ข้อมูลทางเทคนิคและหลักฐาน (Technical & Evidence)</h3><ul>`,
+      `<li><strong>Suspected Layer:</strong> ${escapePlaneHtml(tech.layer || "Application Layer")}${formatBadge(evStatus.layer)}</li>`,
+      `<li><strong>Suspected Component:</strong> ${escapePlaneHtml(tech.suspected_component || "UNKNOWN")}${formatBadge(evStatus.suspected_component)}</li>`,
+      `<li><strong>Error Code / Message:</strong> <code>${escapePlaneHtml(tech.error_code || "None")}</code>${formatBadge(evStatus.error_code)}</li>`,
+      completeness.status ? `<li><strong>Triage Status:</strong> <code>${escapePlaneHtml(completeness.status)}</code> (Completeness Score: ${escapePlaneHtml(Math.round((completeness.score || 0) * 100))}%)</li>` : "",
+      `</ul>`,
+      codeHtml,
+      rawHtml,
+    ].filter(Boolean).join("");
+  }
+
   const getFieldValue = (
     field: any,
     defaultVal = "UNKNOWN"
