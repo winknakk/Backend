@@ -2,6 +2,8 @@ import { PostgresOutboxRepository } from "./PostgresOutboxRepository";
 import { BullMQJobQueue } from "../queue/BullMQJobQueue";
 import { createLogger } from "../../observability/logger";
 import { deletePlaneWorkItem } from "../../services/planeDeletionService";
+import { PlaneService } from "../../services/planeService";
+import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
 
 const logger = createLogger("OutboxProcessor");
 
@@ -12,12 +14,14 @@ const logger = createLogger("OutboxProcessor");
 export class OutboxProcessor {
   private outboxRepo: PostgresOutboxRepository;
   private jobQueue: BullMQJobQueue;
+  private planeService: PlaneService;
   private intervalId: NodeJS.Timeout | null = null;
   private isProcessing = false;
 
-  constructor() {
+  constructor(planeService?: PlaneService) {
     this.outboxRepo = new PostgresOutboxRepository();
     this.jobQueue = new BullMQJobQueue();
+    this.planeService = planeService || new PlaneService(new PostgresAdapter());
   }
 
   /**
@@ -71,18 +75,41 @@ export class OutboxProcessor {
               type: "ticket.sync.plane",
               data: {
                 ticketId,
-                projectId: "1",
+                projectId: String(payload.projectId || "1"),
               },
               metadata: {
                 requestId: String(id),
               },
             });
+          } else if (event_type === "PlaneWorkItemUpdateRequested") {
+            const ticketId = String(payload.ticketId || payload.dbId);
+            const newStatus = payload.newStatus;
+            const newPriority = payload.newPriority;
+            const oldStatus = payload.oldStatus;
+            const oldPriority = payload.oldPriority;
+
+            logger.info(
+              { ticketId, newStatus, newPriority, outboxId: id },
+              "Synchronizing Ticket status/priority update from DB to Plane Work Item"
+            );
+
+            if (newStatus && newStatus !== oldStatus) {
+              await this.planeService.syncTicketStatusToPlane(ticketId, String(newStatus));
+            }
+            if (newPriority && newPriority !== oldPriority) {
+              await this.planeService.syncTicketPriorityToPlane(ticketId, String(newPriority));
+            }
           } else if (event_type === "PlaneWorkItemDeleteRequested") {
             const planeIssueId = payload.planeIssueId;
             if (!planeIssueId) throw new Error("Plane work-item ID is missing in outbox payload");
 
             logger.info({ planeIssueId, outboxId: id }, "Deleting Plane work item from Ticket deletion event");
-            await deletePlaneWorkItem(String(planeIssueId));
+            await deletePlaneWorkItem(String(planeIssueId), undefined, {
+              projectId: payload.projectId,
+              orgId: payload.orgId,
+              planeWorkspaceSlug: payload.planeWorkspaceSlug,
+              planeProjectId: payload.planeProjectId,
+            });
           } else {
             logger.warn({ event_type }, "Unsupported outbox event type, skipping");
           }

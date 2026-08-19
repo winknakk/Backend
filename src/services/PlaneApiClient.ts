@@ -242,4 +242,25 @@ export class PlaneApiClient {
     if (Array.isArray(res.data?.results)) return res.data.results;
     return [];
   }
+
+  /**
+   * Deletes a Work Item in Plane by ID.
+   */
+  async deleteWorkItem(projectConfig: PlaneProjectConfig, planeIssueId: string): Promise<boolean> {
+    const url = `${this.getProjectBaseUrl(projectConfig)}/issues/${encodeURIComponent(planeIssueId)}/`;
+    logger.info({ url, planeIssueId }, "Deleting work item in Plane project");
+
+    try {
+      await this.httpClient.delete(url, {
+        headers: this.getHeaders(projectConfig),
+        timeout: 10000,
+      });
+      return true;
+    } catch (err: any) {
+      if (err.response?.status === 404 || err.response?.status === 410) {
+        return false;
+      }
+      throw err;
+    }
+  }
 }
