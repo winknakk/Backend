@@ -179,6 +179,21 @@ export class DiagnosticAnalyzer {
     }
 
     const processedAttachments = this.attachmentAdapter.processAll(attachments);
+    for (const att of processedAttachments) {
+      if (att.extractedText) {
+        evidenceList.push({
+          type: "attachment_extracted_text",
+          value: att.extractedText,
+          source: "CUSTOMER_ATTACHMENT",
+        });
+      } else if (att.description) {
+        evidenceList.push({
+          type: "attachment_summary",
+          value: att.description,
+          source: "CUSTOMER_ATTACHMENT",
+        });
+      }
+    }
 
     let detectedProject = input.projectName || (input.projectId ? `Project ${input.projectId}` : "UNKNOWN");
     let detectedModule = "UNKNOWN";
@@ -186,6 +201,28 @@ export class DiagnosticAnalyzer {
 
     if (customerText.toLowerCase().includes("excis")) {
       detectedProject = "EXCIS";
+    }
+
+    if (detectedProject === "UNKNOWN") {
+      unknowns.push("Specific Project ID / Name not identified in customer report");
+    }
+    if (codeEvidenceList.length === 0 && knowledgeResults.length === 0) {
+      unknowns.push("No live codebase or documentation citations matched the reported symptoms");
+    }
+    if (processedAttachments.length === 0) {
+      unknowns.push("No screenshot or log attachment provided by customer");
+    } else {
+      for (const att of processedAttachments) {
+        if (att.extractionStatus === "EXTRACTION_UNAVAILABLE") {
+          unknowns.push(`Attachment ${att.filename || "file"} is a raw binary image without OCR (no local OCR engine executed)`);
+        } else if (att.extractionStatus === "REJECTED_MALICIOUS") {
+          unknowns.push(`Attachment ${att.filename || "file"} rejected: dangerous file extension blocked`);
+        } else if (att.extractionStatus === "REJECTED_OVERSIZED") {
+          unknowns.push(`Attachment ${att.filename || "file"} rejected: exceeds maximum limit`);
+        } else if (att.extractionStatus === "UNSUPPORTED_FORMAT") {
+          unknowns.push(`Attachment ${att.filename || "file"} rejected: unsupported format`);
+        }
+      }
     }
 
     // 2. Identify Suspected Layer & Component with Live Code Evidence
@@ -196,6 +233,29 @@ export class DiagnosticAnalyzer {
     let rootCauseValue = "Requires code inspection to pinpoint failure";
     let confidence = 0;
 
+    // Knowledge result parsing
+    const knowledgeSources: KnowledgeCitation[] = [];
+    for (const kb of knowledgeResults) {
+      const title = kb.metadata?.title || kb.id;
+      const content = kb.content || "";
+      knowledgeSources.push({
+        title,
+        snippet: content.slice(0, 300),
+        score: Math.round((kb.confidence || 0.8) * 100),
+        tenantId: input.tenantId,
+      });
+
+      const apiMatch = content.match(/\b(GET|POST|PUT|DELETE|PATCH)\s+[\/\w\-]+/i) || content.match(/Endpoint:\s*([^\s,]+)/i);
+      if (apiMatch) {
+        suspectedApiValue = apiMatch[1].startsWith("/") ? apiMatch[1] : (apiMatch[0].includes(" ") ? apiMatch[0] : apiMatch[1]);
+      }
+      const tableMatch = content.match(/table\s+([a-zA-Z0-9_]+)/i);
+      if (tableMatch) {
+        suspectedDbObjectValue = tableMatch[1];
+      }
+    }
+
+    const has500Error = customerText.includes("500") || customerText.includes("Internal Server Error") || customerText.includes("Server Error");
     const isReportIssue = customerText.includes("รายงาน") || customerText.includes("report") || customerText.includes("ไม่นำวันที่") || customerText.includes("แสดง");
 
     if (codeEvidenceList.length > 0) {
@@ -212,11 +272,21 @@ export class DiagnosticAnalyzer {
 
       rootCauseValue = `Code evidence located in ${topCode.filePath} lines ${topCode.lineStart || 1}-${topCode.lineEnd || ""}. Requires method logic verification.`;
       confidence = 90;
+    } else if (has500Error) {
+      suspectedLayerValue = "Backend API / Server Layer";
+      suspectedComponentValue = "Backend Service / API Gateway";
+      rootCauseValue = "Internal Server Error (500) encountered during request handling";
+      confidence = 75;
+    } else if (knowledgeResults.length > 0) {
+      suspectedLayerValue = "Backend Reporting / Data Mapping";
+      suspectedComponentValue = "Report Data Provider / Query Mapper";
+      rootCauseValue = "Knowledge base match identified relevant service endpoint";
+      confidence = Math.max(80, Math.round((knowledgeResults[0].confidence || 0.8) * 100));
     } else if (isReportIssue) {
       suspectedLayerValue = "Backend Reporting / Data Mapping";
       suspectedComponentValue = "Report Data Provider / Query Mapper";
       rootCauseValue = "Report generation query or template binding omitted requested fields";
-      confidence = knowledgeResults.length > 0 ? 85 : 65;
+      confidence = 65;
     } else {
       suspectedLayerValue = "UNKNOWN";
       suspectedComponentValue = "UNKNOWN";
@@ -275,14 +345,14 @@ export class DiagnosticAnalyzer {
       suspected_api: {
         value: suspectedApiValue,
         source: "AI_INFERENCE",
-        confidence: 0,
+        confidence: suspectedApiValue !== "NOT_FOUND_IN_KNOWLEDGE_BASE" ? confidence : 0,
         confidence_type: "HEURISTIC_RULE_STRENGTH",
         isHypothesis: true,
       },
       suspected_database_object: {
         value: suspectedDbObjectValue,
         source: "AI_INFERENCE",
-        confidence: 0,
+        confidence: suspectedDbObjectValue !== "NOT_FOUND_IN_KNOWLEDGE_BASE" ? confidence : 0,
         confidence_type: "HEURISTIC_RULE_STRENGTH",
         isHypothesis: true,
       },
@@ -295,7 +365,7 @@ export class DiagnosticAnalyzer {
       },
       confidence,
       confidence_type: codeEvidenceList.length > 0 ? "SYSTEM_VERIFIED" : "HEURISTIC_RULE_STRENGTH",
-      knowledge_sources: [],
+      knowledge_sources: knowledgeSources,
       code_evidence: codeEvidenceList,
       unknowns,
       recommended_next_action: codeEvidenceList.length > 0

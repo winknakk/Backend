@@ -19,7 +19,7 @@ function run(): void {
     "Example & Partners"
   );
 
-  assert.strictEqual(payload.name, "[TCK-2026-97545] ระบบล่ม 400 Bad Request เข้าไม่ได้ [👤 Customer]");
+  assert.strictEqual(payload.name, "[👤 Customer] [TCK-2026-97545] ระบบล่ม 400 Bad Request เข้าไม่ได้");
   assert.strictEqual(payload.external_source, "TicketX");
   assert.strictEqual(payload.external_id, "TCK-2026-97545");
   assert.strictEqual(payload.priority, "urgent");
@@ -50,7 +50,7 @@ function run(): void {
     "Avalant",
     ["label-uuid-ai-generated"]
   );
-  assert.strictEqual(aiPayload.name, "[TCK-2026-11111] AI auto-triage ticket [🤖 AI]");
+  assert.strictEqual(aiPayload.name, "[🤖 AI] [TCK-2026-11111] AI auto-triage ticket");
   assert.deepStrictEqual(aiPayload.labels, ["label-uuid-ai-generated"]);
   assert.match(aiPayload.description_html, /🤖 AI Bot \(PromptX Bot\)/);
 
@@ -66,18 +66,18 @@ function run(): void {
     "Avalant",
     ["label-uuid-human-agent"]
   );
-  assert.strictEqual(humanPayload.name, "[TCK-2026-22222] Human admin ticket [🎧 Human]");
+  assert.strictEqual(humanPayload.name, "[🎧 Human] [TCK-2026-22222] Human admin ticket");
   assert.deepStrictEqual(humanPayload.labels, ["label-uuid-human-agent"]);
   assert.match(humanPayload.description_html, /🎧 Human Agent \(Super Admin\)/);
 
-  // Test duplicate badge prevention when subject already has suffix
+  // Test duplicate badge prevention when subject already has prefix/suffix
   const duplicateCheck = buildPlaneWorkItemPayload({
     ticket_number: "TCK-2026-33333",
     subject: "[TCK-2026-33333] Existing title [🤖 AI]",
     summary: "Re-sync test",
     created_by_type: "AI",
   });
-  assert.strictEqual(duplicateCheck.name, "[TCK-2026-33333] Existing title [🤖 AI]");
+  assert.strictEqual(duplicateCheck.name, "[🤖 AI] [TCK-2026-33333] Existing title");
 
   const minimal = buildPlaneWorkItemPayload({
     id: 12,
@@ -85,7 +85,7 @@ function run(): void {
     summary: "No due date",
     priority: "None",
   });
-  assert.strictEqual(minimal.name, "[12] General support issue [👤 Customer]");
+  assert.strictEqual(minimal.name, "[👤 Customer] [12] General support issue");
   assert.strictEqual(minimal.external_id, "12");
   assert.strictEqual(minimal.priority, "none");
   assert.ok(!("target_date" in minimal));
