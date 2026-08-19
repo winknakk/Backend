@@ -33,6 +33,13 @@ export interface PlaneWebhookSyncResult {
   priority?: string;
 }
 
+export interface PlaneMappingContext {
+  workspaceSlug?: string;
+  planeProjectId?: string;
+  apiBaseUrl?: string;
+  apiKey?: string;
+}
+
 export interface PlaneReverseSyncSummary {
   checked: number;
   updated: number;
@@ -130,12 +137,12 @@ export class PlaneWebhookService {
       doneNotificationDispatcher || ((planeIssueId) => this.dispatchCustomerDoneNotification(planeIssueId));
   }
 
-  async sync(payload: PlaneWebhookPayload): Promise<PlaneWebhookSyncResult> {
+  async sync(payload: PlaneWebhookPayload, mappingContext?: PlaneMappingContext): Promise<PlaneWebhookSyncResult> {
     const event = payload.event?.toLowerCase();
     const action = payload.action?.toLowerCase();
     if (
-      (event !== "issue" && event !== "work_item") ||
-      (action !== "update" && action !== "create" && action !== "delete")
+      (event !== "issue" && event !== "work_item" && !event?.includes("updated") && !event?.includes("created") && !event?.includes("deleted")) ||
+      (action !== "update" && action !== "create" && action !== "delete" && !event)
     ) {
       return { processed: false, matched: false, reason: "unsupported_event" };
     }
@@ -165,7 +172,7 @@ export class PlaneWebhookService {
       }
     }
 
-    if (action === "delete") {
+    if (action === "delete" || event?.includes("delete")) {
       if (!this.dbAdapter.deleteTicketFromPlane) {
         return {
           processed: false,
@@ -185,7 +192,7 @@ export class PlaneWebhookService {
       };
     }
 
-    const state = await this.resolveState(data, payloadProjectId || configuredProjectId);
+    const state = await this.resolveState(data, payloadProjectId || configuredProjectId, mappingContext);
     // Plane can set completed_at on a cancelled work item too. Prefer the
     // explicit state so Cancelled never gets flattened into Done.
     const status = mapPlaneStateToTicketStatus(state) || (data.completed_at ? "Done" : undefined);
@@ -201,7 +208,7 @@ export class PlaneWebhookService {
       (data as any)?.created_by_detail?.first_name ||
       (typeof (data as any)?.created_by === "object" ? ((data as any)?.created_by?.first_name || (data as any)?.created_by?.display_name) : (data as any)?.created_by) ||
       "Plane.io User";
-    
+
     try {
       await pool.query(
         `UPDATE tickets 
@@ -291,7 +298,7 @@ export class PlaneWebhookService {
 
         // Query tickets matching 3-key scope (workspace_slug, plane_project_id, plane_issue_id)
         const ticketsRes = await pool.query(
-          `SELECT id, plane_issue_id, plane_workspace_slug, plane_project_id, project_id, org_id
+          `SELECT id, plane_issue_id, plane_workspace_slug, plane_project_id, project_id, org_id, ticket_number
            FROM tickets
            WHERE ((plane_workspace_slug = $1 AND plane_project_id = $2) OR project_id = $3)
              AND plane_issue_id IS NOT NULL AND plane_issue_id != ''
@@ -314,26 +321,47 @@ export class PlaneWebhookService {
               timeout: 5000,
             });
 
-            const syncRes = await this.sync({
-              event: "work_item.updated",
-              data: {
-                id: issueId,
-                project: plane_project_id,
-                ...response.data,
-              },
-            });
-            if (syncRes.matched) summary.updated += 1;
-          } catch (err: any) {
-            if (err.response?.status === 404) {
-              const delRes = await this.sync({
-                event: "work_item.deleted",
+            const syncRes = await this.sync(
+              {
+                event: "work_item.updated",
                 data: {
                   id: issueId,
                   project: plane_project_id,
+                  ...response.data,
                 },
-              });
-              if (delRes.deleted) {
-                summary.deleted += 1;
+              },
+              {
+                workspaceSlug: workspace_slug,
+                planeProjectId: plane_project_id,
+                apiBaseUrl: apiBase,
+                apiKey: apiKey,
+              }
+            );
+
+            if (syncRes.matched) summary.updated += 1;
+          } catch (err: any) {
+            const isAbsentOrDeleted =
+              err.response?.status === 404 ||
+              err.response?.status === 410 ||
+              (err.response?.status === 403 &&
+                typeof err.response?.data?.detail === "string" &&
+                (err.response.data.detail.includes("permission to view this workitem") ||
+                  err.response.data.detail.includes("not found")));
+
+            if (isAbsentOrDeleted) {
+              try {
+                const deleted = this.dbAdapter.deleteTicketFromPlane
+                  ? await this.dbAdapter.deleteTicketFromPlane(issueId)
+                  : false;
+                if (deleted) {
+                  summary.deleted += 1;
+                  logger.info({ issueId, ticketId: ticket.id, ticketNumber: ticket.ticket_number }, "Deleted ticket from DB because Plane work item was removed (404/403 absent)");
+                } else {
+                  summary.unlinked += 1;
+                }
+              } catch (delErr: any) {
+                logger.error({ error: delErr.message, issueId }, "Failed to delete ticket from DB on Plane 404/403 absent");
+                summary.failed += 1;
               }
             } else {
               summary.failed += 1;
@@ -350,7 +378,8 @@ export class PlaneWebhookService {
 
   private async resolveState(
     data: NonNullable<PlaneWebhookPayload["data"]>,
-    projectId?: string
+    projectId?: string,
+    mappingContext?: PlaneMappingContext
   ): Promise<{ name?: string; group?: string } | undefined> {
     if (data.state_detail) return data.state_detail;
     if (typeof data.state === "object" && data.state) return data.state;
@@ -359,20 +388,55 @@ export class PlaneWebhookService {
     }
     if (!data.state || typeof data.state !== "string") return undefined;
 
+    let ws = mappingContext?.workspaceSlug;
+    let proj = mappingContext?.planeProjectId || projectId;
+    let apiBase = mappingContext?.apiBaseUrl;
+    let apiKey = mappingContext?.apiKey;
+
+    // Look up mapping from database if context is missing
+    if (!ws || !apiKey) {
+      try {
+        const mappingRes = await pool.query(
+          `SELECT workspace_slug, plane_project_id, plane_api_base_url, credential_ref
+           FROM plane_workspace_mappings
+           WHERE (plane_project_id = $1 OR workspace_slug = $2) AND enabled = TRUE
+           LIMIT 1`,
+          [proj || "", ws || ""]
+        );
+        if (mappingRes.rows.length > 0) {
+          const row = mappingRes.rows[0];
+          ws = ws || row.workspace_slug;
+          proj = proj || row.plane_project_id;
+          apiBase = apiBase || row.plane_api_base_url;
+          const ref = row.credential_ref;
+          if (ref) {
+            apiKey = apiKey || (ref.startsWith("env:") ? process.env[ref.slice(4)] : ref);
+          }
+        }
+      } catch {
+        // ignore and fallback
+      }
+    }
+
+    ws = ws || config.PLANE_WORKSPACE_SLUG;
+    proj = proj || config.PLANE_PROJECT_ID;
+    apiBase = (apiBase || config.PLANE_API_URL || "https://projects.oneweb.tech").replace(/\/+$/, "");
+    apiKey = apiKey || config.PLANE_API_KEY;
+
     if (
-      !config.PLANE_API_KEY ||
-      config.PLANE_API_KEY === "plane_mock_key" ||
-      !projectId ||
-      projectId === "proj_id" ||
-      !config.PLANE_WORKSPACE_SLUG ||
-      config.PLANE_WORKSPACE_SLUG === "ws_id"
+      !apiKey ||
+      apiKey === "plane_mock_key" ||
+      !proj ||
+      proj === "proj_id" ||
+      !ws ||
+      ws === "ws_id"
     ) {
       throw new Error("Plane state lookup is not configured");
     }
 
-    const url = `${config.PLANE_API_URL}/api/v1/workspaces/${config.PLANE_WORKSPACE_SLUG}/projects/${projectId}/states/${data.state}/`;
+    const url = `${apiBase}/api/v1/workspaces/${encodeURIComponent(ws)}/projects/${encodeURIComponent(proj)}/states/${encodeURIComponent(data.state)}/`;
     const response = await this.httpClient.get(url, {
-      headers: { "X-API-Key": config.PLANE_API_KEY },
+      headers: { "X-API-Key": apiKey },
       timeout: 5000,
     });
     return { name: response.data?.name, group: response.data?.group };

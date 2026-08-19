@@ -1135,33 +1135,44 @@ export class PostgresAdapter implements DatabaseAdapter {
     if (assignments.length === 0) return { matched: false, statusChanged: false };
 
     values.push(planeIssueId);
-    const result = await pool.query(
-      `WITH target AS (
-         SELECT id, status AS previous_status
-         FROM tickets
-         WHERE plane_issue_id = $${values.length}
-         FOR UPDATE
-       )
-       UPDATE tickets AS t
-       SET ${assignments.join(", ")}, updated_at = NOW()
-       FROM target
-       WHERE t.id = target.id
-       RETURNING target.previous_status, t.status AS current_status`,
-      values
-    );
-    const matched = (result.rowCount || 0) > 0;
-    const statusChanged = Boolean(
-      changes.status &&
-      result.rows.some(
-        (row) => String(row.previous_status || "").trim().toLowerCase() !== String(row.current_status || "").trim().toLowerCase()
-      )
-    );
-    return {
-      matched,
-      statusChanged,
-      previousStatus: result.rows[0]?.previous_status,
-      currentStatus: result.rows[0]?.current_status,
-    };
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SET LOCAL ticketx.skip_plane_sync = 'on'");
+      const result = await client.query(
+        `WITH target AS (
+           SELECT id, status AS previous_status
+           FROM tickets
+           WHERE plane_issue_id = $${values.length}
+           FOR UPDATE
+         )
+         UPDATE tickets AS t
+         SET ${assignments.join(", ")}, updated_at = NOW()
+         FROM target
+         WHERE t.id = target.id
+         RETURNING target.previous_status, t.status AS current_status`,
+        values
+      );
+      await client.query("COMMIT");
+      const matched = (result.rowCount || 0) > 0;
+      const statusChanged = Boolean(
+        changes.status &&
+        result.rows.some(
+          (row) => String(row.previous_status || "").trim().toLowerCase() !== String(row.current_status || "").trim().toLowerCase()
+        )
+      );
+      return {
+        matched,
+        statusChanged,
+        previousStatus: result.rows[0]?.previous_status,
+        currentStatus: result.rows[0]?.current_status,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async deleteTicketFromPlane(planeIssueId: string): Promise<boolean> {

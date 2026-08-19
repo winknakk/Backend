@@ -552,6 +552,42 @@ export function selectPlaneCancelledState(states: PlaneStateSummary[]): PlaneSta
   );
 }
 
+export function selectPlaneTodoState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
+  const candidates = states.filter((state) => state.id);
+  return (
+    candidates.find((state) => ["todo", "to do", "unstarted"].includes(state.name?.trim().toLowerCase() || "")) ||
+    candidates.find((state) => state.group?.trim().toLowerCase() === "unstarted")
+  );
+}
+
+export function selectPlaneInProgressState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
+  const candidates = states.filter((state) => state.id);
+  return (
+    candidates.find((state) => ["in progress", "started", "in_progress"].includes(state.name?.trim().toLowerCase() || "")) ||
+    candidates.find((state) => state.group?.trim().toLowerCase() === "started")
+  );
+}
+
+export function selectPlaneDoneState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
+  const candidates = states.filter((state) => state.id);
+  return (
+    candidates.find((state) => ["done", "completed", "resolved", "closed"].includes(state.name?.trim().toLowerCase() || "")) ||
+    candidates.find((state) => state.group?.trim().toLowerCase() === "completed")
+  );
+}
+
+export function selectPlaneStateForTicketStatus(states: PlaneStateSummary[], status: string): PlaneStateSummary | undefined {
+  const normalized = (status || "").trim().toLowerCase();
+  if (normalized === "backlog") return selectPlaneBacklogState(states);
+  if (normalized === "todo" || normalized === "to do") return selectPlaneTodoState(states) || selectPlaneBacklogState(states);
+  if (normalized === "in progress" || normalized === "in_progress" || normalized === "started") return selectPlaneInProgressState(states);
+  if (normalized === "done" || normalized === "completed" || normalized === "closed" || normalized === "resolved") return selectPlaneDoneState(states) || selectPlaneTerminalState(states);
+  if (normalized === "cancelled" || normalized === "canceled") return selectPlaneCancelledState(states);
+
+  const match = states.find((s) => s.name?.trim().toLowerCase() === normalized || s.group?.trim().toLowerCase() === normalized);
+  return match || selectPlaneBacklogState(states);
+}
+
 export function findMatchingPlaneWorkItem(
   subject: string,
   workItems: Array<{ id?: string; name?: string }>
@@ -571,9 +607,6 @@ export function findMatchingPlaneWorkItem(
   );
   if (exactMatches.length === 1) return exactMatches[0];
 
-  // Ticket titles commonly include an HTTP status code while the Plane creation
-  // flow may shorten surrounding Thai wording. A unique code is a safer repair
-  // key than broad fuzzy matching.
   const httpCode = normalizedSubject.match(/\b[1-5]\d{2}\b/)?.[0];
   if (!httpCode) return undefined;
   const codeMatches = workItems.filter(
@@ -1081,6 +1114,56 @@ export class PlaneService {
       status: "In Progress",
     };
   }
+
+  async syncTicketStatusToPlane(ticketId: string, status: string): Promise<PlaneTicketReopenResult> {
+    const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+    if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
+    const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+    if (!planeIssueId || String(planeIssueId).startsWith("mock-")) {
+      return { synced: false, reason: "not_linked" };
+    }
+
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
+    const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
+
+    const states = await this.apiClient.listStates(projectConfig);
+    const targetState = selectPlaneStateForTicketStatus(states, status);
+    if (!targetState?.id) {
+      throw new Error(`Cannot synchronize Plane work item state: no matching state found for status "${status}"`);
+    }
+
+    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, { state: targetState.id });
+
+    return {
+      synced: true,
+      planeIssueId: resolvedPlaneIssueId,
+      stateId: targetState.id,
+      stateName: targetState.name,
+      stateGroup: targetState.group,
+    };
+  }
+
+  async syncTicketPriorityToPlane(ticketId: string, priority: string): Promise<{ synced: boolean; planeIssueId?: string; priority?: string; reason?: string }> {
+    const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+    if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
+    const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+    if (!planeIssueId || String(planeIssueId).startsWith("mock-")) {
+      return { synced: false, reason: "not_linked" };
+    }
+
+    const planePriority = mapTicketPriorityToPlanePriority(priority);
+    if (!planePriority) return { synced: false, reason: "unsupported_priority" };
+
+    const projectConfig = await this.getProjectConfigForTicket(ticket);
+    const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
+
+    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, { priority: planePriority });
+
+    return {
+      synced: true,
+      planeIssueId: resolvedPlaneIssueId,
+      priority: planePriority,
+    };
+  }
+
 }
-
-
