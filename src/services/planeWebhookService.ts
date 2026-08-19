@@ -278,7 +278,7 @@ export class PlaneWebhookService {
       const mappingsRes = await pool.query(
         `SELECT project_id, org_id, workspace_slug, plane_project_id, plane_api_base_url, credential_ref
          FROM plane_workspace_mappings
-         WHERE enabled = TRUE`
+         WHERE enabled = TRUE AND archived_at IS NULL`
       );
 
       if (!mappingsRes.rows || mappingsRes.rows.length === 0) {
