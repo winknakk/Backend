@@ -7,6 +7,7 @@ import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { mapTicketPriorityToPlanePriority } from "./planeWebhookService";
 import { parseSummaryHistory } from "../shared/summaryHistory";
+import { S3MediaStorageService } from "../media/services/S3MediaStorageService";
 
 export interface PlaneStateSummary {
   id?: string;
@@ -385,6 +386,15 @@ export function extractImageUrls(ticket: any): string[] {
   return Array.from(new Set(urls));
 }
 
+interface CustomerImageAttachment {
+  id: number;
+  external_id: string | null;
+  storage_key: string;
+  file_name: string;
+  file_type: string;
+  file_size: number;
+}
+
 export function buildPlaneWorkItemPayload(
   ticket: Record<string, any>,
   companyName = "Unknown",
@@ -415,10 +425,11 @@ export function buildPlaneWorkItemPayload(
   const creatorSuffix = creatorInfo.suffix || "";
 
   const rawSubject = ticket.plane_title || ticket.planeTitle || subject;
-  const cleanSubject = rawSubject.replace(/^(\[AI-test\]\s*|\[TCK-[^\]]+\]\s*)*/gi, "").trim();
-  const baseTitle = `[AI-test] [${ticketNumber}] ${cleanSubject}`;
-  const hasCreatorBadge = /\[(🤖\s*AI|🎧\s*Human|👤\s*Customer|✈️\s*Plane)\]/i.test(baseTitle);
-  const visibleTitle = hasCreatorBadge ? baseTitle : `${baseTitle} ${creatorSuffix}`;
+  const cleanSubject = rawSubject
+    .replace(/^(\[(🤖\s*AI|AI-test|AI|🎧\s*Human|👤\s*Customer|✈️\s*Plane)\]\s*|\[TCK-[^\]]+\]\s*)*/gi, "")
+    .replace(/\s*\[(🤖\s*AI|🎧\s*Human|👤\s*Customer|✈️\s*Plane)\]\s*$/i, "")
+    .trim();
+  const visibleTitle = `${creatorPrefix} [${ticketNumber}] ${cleanSubject}`;
 
   const metadata = [
     ["TicketX ID", ticketNumber],
@@ -946,6 +957,100 @@ export class PlaneService {
     // Create Work Item in target Plane Project via PlaneApiClient
     const result = await this.apiClient.createWorkItem(projectConfig, payload);
     const planeIssueId = result.id;
+
+    // A LINE image is stored in TicketX immediately, before the debounced AI
+    // request. Copy the image explicitly associated with this incident or the
+    // latest customer image from this conversation into Plane-owned storage,
+    // and embed the permanent Plane asset URL into the description.
+    const lineImageId = String(ticket.line_image_id || ticket.lineImageId || "").trim();
+    if (ticket.conversation_id) {
+      try {
+        let imageRows: CustomerImageAttachment[] = [];
+
+        if (lineImageId) {
+          const { rows } = await pool.query<CustomerImageAttachment>(
+            `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
+             FROM message_attachments ma
+             JOIN messages m ON m.id = ma.message_id
+             WHERE m.conversation_id = $1::integer
+               AND m.role = 'customer'
+               AND m.external_id = $2
+               AND ma.attachment_status = 'READY'
+               AND ma.storage_key IS NOT NULL
+               AND COALESCE(ma.file_type, '') LIKE 'image/%'
+             ORDER BY ma.id ASC`,
+            [ticket.conversation_id, lineImageId]
+          );
+          imageRows = rows;
+        }
+
+        // Auto-detect recent customer image attachments if no specific lineImageId or no rows matched
+        if (imageRows.length === 0) {
+          const { rows } = await pool.query<CustomerImageAttachment>(
+            `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
+             FROM message_attachments ma
+             JOIN messages m ON m.id = ma.message_id
+             WHERE m.conversation_id = $1::integer
+               AND m.role = 'customer'
+               AND ma.attachment_status = 'READY'
+               AND ma.storage_key IS NOT NULL
+               AND COALESCE(ma.file_type, '') LIKE 'image/%'
+               AND ma.created_at >= NOW() - INTERVAL '2 hours'
+             ORDER BY ma.id DESC
+             LIMIT 1`,
+            [ticket.conversation_id]
+          );
+          imageRows = rows;
+        }
+
+        const uploadedAssetUrls: string[] = [];
+        const mediaStorage = new S3MediaStorageService({});
+
+        for (const image of imageRows) {
+          try {
+            const media = await mediaStorage.download(image.storage_key);
+            const uploadRes = await this.apiClient.uploadWorkItemAttachment(projectConfig, planeIssueId, {
+              name: image.file_name || `line_${image.external_id || image.id}.jpg`,
+              type: image.file_type || media.mimeType || "image/jpeg",
+              size: image.file_size || media.buffer.length,
+              content: media.buffer,
+              externalId: `ticketx-message-attachment-${image.id}`,
+            });
+            if (uploadRes?.assetUrl) {
+              uploadedAssetUrls.push(uploadRes.assetUrl);
+            }
+          } catch (uploadErr: any) {
+            console.warn("[PlaneService] Individual image upload failed:", {
+              attachmentId: image.id,
+              error: uploadErr?.message || String(uploadErr),
+            });
+          }
+        }
+
+        // If images were uploaded, embed the permanent Plane asset URLs into description_html
+        if (uploadedAssetUrls.length > 0) {
+          const mediaEmbedHtml = `<h3>📷 Customer Screenshots / Attached Media</h3>` +
+            uploadedAssetUrls
+              .map((url) => `<p><img src="${escapePlaneHtml(url)}" alt="Customer Screenshot" style="max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 8px;" /></p>`)
+              .join("");
+
+          const updatedDesc = `${payload.description_html}\n${mediaEmbedHtml}`;
+          await this.apiClient.patchWorkItem(projectConfig, planeIssueId, {
+            description_html: updatedDesc,
+          });
+          console.log(`[PlaneService] Embedded ${uploadedAssetUrls.length} image(s) into Plane Work Item ${planeIssueId} description.`);
+        }
+      } catch (error: any) {
+        // Evidence upload is best-effort: the work item already exists and
+        // must remain usable even if a media file was removed or Plane storage
+        // is temporarily unavailable.
+        console.warn("[PlaneService] Failed to attach customer image to Plane", {
+          ticketNumber: ticket.ticket_number,
+          lineImageId,
+          error: error?.message || String(error),
+        });
+      }
+    }
 
     // ATOMIC UPDATE: Save historical snapshot IF ticket exists in DB
     if (lookupId) {
