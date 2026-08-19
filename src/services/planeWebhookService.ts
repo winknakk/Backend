@@ -208,7 +208,7 @@ export class PlaneWebhookService {
       (data as any)?.created_by_detail?.first_name ||
       (typeof (data as any)?.created_by === "object" ? ((data as any)?.created_by?.first_name || (data as any)?.created_by?.display_name) : (data as any)?.created_by) ||
       "Plane.io User";
-    
+
     try {
       await pool.query(
         `UPDATE tickets 
@@ -346,7 +346,7 @@ export class PlaneWebhookService {
               (err.response?.status === 403 &&
                 typeof err.response?.data?.detail === "string" &&
                 (err.response.data.detail.includes("permission to view this workitem") ||
-                 err.response.data.detail.includes("not found")));
+                  err.response.data.detail.includes("not found")));
 
             if (isAbsentOrDeleted) {
               try {
