@@ -322,11 +322,19 @@ export class PlaneWebhookService {
                 ...response.data,
               },
             });
-
             if (syncRes.matched) summary.updated += 1;
           } catch (err: any) {
             if (err.response?.status === 404) {
-              summary.deleted += 1;
+              const delRes = await this.sync({
+                event: "work_item.deleted",
+                data: {
+                  id: issueId,
+                  project: plane_project_id,
+                },
+              });
+              if (delRes.deleted) {
+                summary.deleted += 1;
+              }
             } else {
               summary.failed += 1;
             }
