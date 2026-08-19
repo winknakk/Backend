@@ -346,6 +346,14 @@ export function extractImageUrls(ticket: any): string[] {
   addIfUrl(ticket.attachment_url || ticket.attachmentUrl);
   addIfUrl(ticket.image_url || ticket.imageUrl);
 
+  const rawMedia = ticket.media_urls || ticket.mediaUrls;
+  if (Array.isArray(rawMedia)) {
+    for (const item of rawMedia) {
+      if (typeof item === "string") addIfUrl(item);
+      else if (item?.url) addIfUrl(item.url);
+    }
+  }
+
   const rawAttachments = ticket.attachments;
   if (Array.isArray(rawAttachments)) {
     for (const item of rawAttachments) {
