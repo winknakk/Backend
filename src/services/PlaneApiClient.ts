@@ -14,6 +14,14 @@ export interface PlaneWorkItemPayload {
   target_date?: string;
 }
 
+export interface PlaneWorkItemAttachment {
+  name: string;
+  type: string;
+  size: number;
+  content: Buffer;
+  externalId?: string;
+}
+
 export class PlaneApiClient {
   private httpClient: AxiosInstance;
 
@@ -113,6 +121,111 @@ export class PlaneApiClient {
       timeout: 20000,
     });
     return res.data;
+  }
+
+  /**
+   * Copies customer evidence into Plane-owned storage. This deliberately does
+   * not expose TicketX's short-lived signed media URLs in the work item.
+   */
+  async uploadWorkItemAttachment(
+    projectConfig: PlaneProjectConfig,
+    workItemId: string,
+    attachment: PlaneWorkItemAttachment
+  ): Promise<{ assetUrl?: string; attachmentId: string }> {
+    const projectBase = this.getProjectBaseUrl(projectConfig);
+    const encodedId = encodeURIComponent(workItemId);
+    const primaryPath = `${projectBase}/issues/${encodedId}/issue-attachments/`;
+    const fallbackPath = `${projectBase}/work-items/${encodedId}/attachments/`;
+
+    let registration: any;
+    let usedEndpoint = primaryPath;
+
+    try {
+      registration = await this.httpClient.post(
+        primaryPath,
+        {
+          name: attachment.name,
+          type: attachment.type,
+          size: attachment.size,
+          external_id: attachment.externalId,
+          external_source: "TicketX",
+        },
+        { headers: this.getHeaders(projectConfig), timeout: 20000 }
+      );
+    } catch (err: any) {
+      if (err.response?.status === 429) {
+        logger.warn({ workItemId }, "Plane attachment registration hit 429 rate limit, retrying in 2 seconds...");
+        await new Promise((r) => setTimeout(r, 2000));
+        registration = await this.httpClient.post(
+          primaryPath,
+          {
+            name: attachment.name,
+            type: attachment.type,
+            size: attachment.size,
+            external_id: attachment.externalId,
+            external_source: "TicketX",
+          },
+          { headers: this.getHeaders(projectConfig), timeout: 20000 }
+        );
+      } else if (err.response?.status === 404) {
+        logger.info({ workItemId }, "issue-attachments returned 404, falling back to work-items/attachments");
+        usedEndpoint = fallbackPath;
+        registration = await this.httpClient.post(
+          fallbackPath,
+          {
+            name: attachment.name,
+            type: attachment.type,
+            size: attachment.size,
+            external_id: attachment.externalId,
+            external_source: "TicketX",
+          },
+          { headers: this.getHeaders(projectConfig), timeout: 20000 }
+        );
+      } else if (err.response?.status === 409 && err.response?.data?.id) {
+        logger.info({ externalId: attachment.externalId }, "Plane attachment already exists (409 Conflict), using existing asset ID");
+        return {
+          attachmentId: String(err.response.data.id),
+        };
+      } else {
+        throw err;
+      }
+    }
+
+    const uploadData = registration.data?.upload_data;
+    const assetId = registration.data?.asset_id || registration.data?.attachment?.id;
+    if (!uploadData?.url || !uploadData?.fields || !assetId) {
+      throw new Error("Plane attachment registration returned incomplete upload credentials");
+    }
+
+    const form = new FormData();
+    for (const [key, value] of Object.entries(uploadData.fields)) {
+      form.append(key, String(value));
+    }
+    form.append("file", new Blob([attachment.content as any], { type: attachment.type }), attachment.name);
+
+    await this.httpClient.post(uploadData.url, form, { timeout: 30000 });
+
+    const patchUrl = usedEndpoint.endsWith("/")
+      ? `${usedEndpoint}${encodeURIComponent(String(assetId))}/`
+      : `${usedEndpoint}/${encodeURIComponent(String(assetId))}/`;
+
+    await this.httpClient.patch(
+      patchUrl,
+      {},
+      { headers: this.getHeaders(projectConfig), timeout: 20000 }
+    );
+
+    const rawAssetUrl = typeof registration.data?.asset_url === "string"
+      ? registration.data.asset_url
+      : undefined;
+
+    let fullAssetUrl = rawAssetUrl;
+    if (rawAssetUrl && !rawAssetUrl.startsWith("http://") && !rawAssetUrl.startsWith("https://")) {
+      const apiBase = (projectConfig.apiBaseUrl || config.PLANE_API_URL || "https://projects.oneweb.tech").replace(/\/+$/, "");
+      fullAssetUrl = `${apiBase}${rawAssetUrl.startsWith("/") ? "" : "/"}${rawAssetUrl}`;
+    }
+
+    return { assetUrl: fullAssetUrl, attachmentId: String(assetId) };
   }
 
   /**
