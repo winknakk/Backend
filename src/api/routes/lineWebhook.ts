@@ -18,6 +18,7 @@ import {
   LINE_ONBOARDING_CARDS,
   lineOnboardingCardDirectory,
 } from "../../services/LineOnboardingCarouselService";
+import { LineMessageBatchingService } from "../../services/LineMessageBatchingService";
 
 const logger = createLogger("line-webhook");
 
@@ -132,7 +133,8 @@ const adminRouteOptions = { preHandler: requireConfiguredAdminApiKey };
 
 export function registerLineWebhookRoutes(
   fastify: FastifyInstance,
-  onboardingService: LineProjectOnboardingService
+  onboardingService: LineProjectOnboardingService,
+  batchingService: LineMessageBatchingService
 ): void {
   fastify.get("/api/v1/media/line-onboarding/cards/:filename", async (request, reply) => {
     const filename = String((request.params as any).filename || "");
@@ -294,24 +296,60 @@ export function registerLineWebhookRoutes(
               }
             }
 
-            await forwardPromptXWebhook(config.LINE_DM_GATEWAY_WEBHOOK_URL, destination, event, {
-              onboardingVerified: true,
-              projectId: decision.projectId,
-              projectName: decision.projectName,
-              conversationId: decision.conversationId,
-            });
-            if (decision.pushOnboardingCarousel && event?.source?.userId) {
-              try {
-                await sendLinePushMessages(
-                  String(event.source.userId),
-                  [buildLineOnboardingCarousel(config.BACKEND_PUBLIC_URL)],
-                  true
-                );
-              } catch (carouselError: any) {
-                logger.error(
-                  { error: carouselError.message, webhookEventId },
-                  "LINE AI forwarding succeeded but the 24-hour carousel recall push failed"
-                );
+            // Image pre-ingestion (S3 upload) is done immediately above —
+            // LINE image URLs expire quickly and must be fetched before batching.
+
+            if (config.LINE_BATCH_ENABLED && event?.source?.userId) {
+              // Enqueue for debounced batch forwarding.
+              // This is synchronous (no await) — webhook returns HTTP 200 to LINE immediately.
+              batchingService.enqueue(
+                String(event.source.userId),
+                destination,
+                event,
+                {
+                  projectId: decision.projectId,
+                  projectName: decision.projectName,
+                  conversationId: decision.conversationId,
+                  pushOnboardingCarousel: decision.pushOnboardingCarousel,
+                }
+              );
+              // The 24-hour carousel recall push is sent immediately (not batched) —
+              // it is a one-time push notification independent of the AI response.
+              if (decision.pushOnboardingCarousel && event?.source?.userId) {
+                try {
+                  await sendLinePushMessages(
+                    String(event.source.userId),
+                    [buildLineOnboardingCarousel(config.BACKEND_PUBLIC_URL)],
+                    true
+                  );
+                } catch (carouselError: any) {
+                  logger.error(
+                    { error: carouselError.message, webhookEventId },
+                    "LINE message batched but the 24-hour carousel recall push failed"
+                  );
+                }
+              }
+            } else {
+              // Batching disabled or no userId — forward immediately (original behavior)
+              await forwardPromptXWebhook(config.LINE_DM_GATEWAY_WEBHOOK_URL, destination, event, {
+                onboardingVerified: true,
+                projectId: decision.projectId,
+                projectName: decision.projectName,
+                conversationId: decision.conversationId,
+              });
+              if (decision.pushOnboardingCarousel && event?.source?.userId) {
+                try {
+                  await sendLinePushMessages(
+                    String(event.source.userId),
+                    [buildLineOnboardingCarousel(config.BACKEND_PUBLIC_URL)],
+                    true
+                  );
+                } catch (carouselError: any) {
+                  logger.error(
+                    { error: carouselError.message, webhookEventId },
+                    "LINE AI forwarding succeeded but the 24-hour carousel recall push failed"
+                  );
+                }
               }
             }
           }
