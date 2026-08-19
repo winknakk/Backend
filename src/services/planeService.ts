@@ -404,6 +404,7 @@ export function buildPlaneWorkItemPayload(
   const creatorInfo = getPlaneCreatorInfo(rawCreatorType, creatorName);
   const creatorLabel = creatorInfo.label;
   const creatorPrefix = creatorInfo.prefix;
+  const creatorSuffix = creatorInfo.suffix || "";
 
   const rawSubject = ticket.plane_title || ticket.planeTitle || subject;
   const cleanSubject = rawSubject.replace(/^(\[AI-test\]\s*|\[TCK-[^\]]+\]\s*)*/gi, "").trim();
