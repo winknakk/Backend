@@ -24,6 +24,8 @@ async function run(): Promise<void> {
         running_summary: "- Original report\n- Screen flashes",
         last_ai_summary: "Screen flashes",
         plane_issue_id: "work-item-1",
+        plane_workspace_slug: "ask-natapohn",
+        plane_project_id: "e3454524-961a-4b84-8ccb-71575baaa696",
       },
       companyName: "Example",
     }),
@@ -47,8 +49,8 @@ async function run(): Promise<void> {
   assert.deepStrictEqual(result, { synced: true, planeIssueId: "work-item-1" });
   const patchReq = requests.find((r) => r.method === "PATCH");
   assert.ok(patchReq, "Expected a PATCH request");
-  assert.match(patchReq.url, /\/work-items\/work-item-1\/$/);
-  assert.match(patchReq.body.name, /\[TCK-TEST\] Test work item 511 \[👤 Customer\]/);
+  assert.match(patchReq.url, /\/issues\/work-item-1\/$/);
+  assert.match(patchReq.body.name, /\[👤 Customer\] \[TCK-TEST\] Test work item 511/);
   assert.match(patchReq.body.description_html, /Customer update history/);
   assert.match(patchReq.body.description_html, /<li>Original report<\/li><li>Screen flashes<\/li>/);
   assert.match(patchReq.body.description_html, /Latest customer update/);

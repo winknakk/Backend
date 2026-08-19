@@ -29,7 +29,25 @@ async function testLiveCatImagePromotion() {
     ]
   };
 
-  const createRes = await dbAdapter.createTicket(ticketData);
+  const insertRes = await pool.query(
+    `INSERT INTO tickets (ticket_number, project_id, org_id, subject, summary, severity, priority, created_by_name, created_by_type, attachment_url, attachments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING id, ticket_number`,
+    [
+      ticketData.ticket_number,
+      ticketData.project_id,
+      ticketData.org_id,
+      ticketData.subject,
+      ticketData.summary,
+      ticketData.severity,
+      ticketData.priority,
+      ticketData.created_by_name,
+      ticketData.created_by_type,
+      ticketData.attachment_url,
+      JSON.stringify(ticketData.attachments)
+    ]
+  );
+  const createRes = insertRes.rows[0];
   console.log(`Created Ticket ID: ${createRes.id} (Ticket Number: ${createRes.ticket_number})`);
 
   const promoteResult = await planeService.promoteTicketToPlane(createRes.id);

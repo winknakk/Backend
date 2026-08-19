@@ -286,7 +286,8 @@ export function formatDeveloperDiagnosticHtml(diag: any): string {
 
 export interface PlaneCreatorInfo {
   label: string;
-  suffix: string;
+  prefix: string;
+  suffix?: string;
   labelName: string;
   labelColor: string;
 }
@@ -301,6 +302,7 @@ export function getPlaneCreatorInfo(
   if (type.includes("AI")) {
     return {
       label: `🤖 AI Bot${name ? ` (${name})` : ""}`,
+      prefix: `[🤖 AI]`,
       suffix: `[🤖 AI]`,
       labelName: "AI-Generated",
       labelColor: "#6366f1",
@@ -309,6 +311,7 @@ export function getPlaneCreatorInfo(
   if (type.includes("HUMAN") || type.includes("AGENT")) {
     return {
       label: `🎧 Human Agent${name ? ` (${name})` : ""}`,
+      prefix: `[🎧 Human]`,
       suffix: `[🎧 Human]`,
       labelName: "Human-Agent",
       labelColor: "#10b981",
@@ -317,6 +320,7 @@ export function getPlaneCreatorInfo(
   if (type.includes("PLANE")) {
     return {
       label: `✈️ Plane.io User${name ? ` (${name})` : ""}`,
+      prefix: `[✈️ Plane]`,
       suffix: `[✈️ Plane]`,
       labelName: "Plane-User",
       labelColor: "#3b82f6",
@@ -324,6 +328,7 @@ export function getPlaneCreatorInfo(
   }
   return {
     label: name ? `👤 Customer (${name})` : "👤 Customer",
+    prefix: `[👤 Customer]`,
     suffix: `[👤 Customer]`,
     labelName: "Customer",
     labelColor: "#f59e0b",
@@ -398,7 +403,7 @@ export function buildPlaneWorkItemPayload(
 
   const creatorInfo = getPlaneCreatorInfo(rawCreatorType, creatorName);
   const creatorLabel = creatorInfo.label;
-  const creatorSuffix = creatorInfo.suffix;
+  const creatorPrefix = creatorInfo.prefix;
 
   const rawSubject = ticket.plane_title || ticket.planeTitle || subject;
   const cleanSubject = rawSubject.replace(/^(\[AI-test\]\s*|\[TCK-[^\]]+\]\s*)*/gi, "").trim();
@@ -563,9 +568,13 @@ import { PlaneApiClient } from "./PlaneApiClient";
 export class PlaneService {
   private dbAdapter: DatabaseAdapter;
   private httpClient: typeof axios;
+  private resolver: PlaneProjectResolver;
+  private apiClient: PlaneApiClient;
+  private labelCache = new Map<string, string>();
 
   constructor(dbAdapter: DatabaseAdapter, httpClient: typeof axios = axios) {
     this.dbAdapter = dbAdapter;
+    this.httpClient = httpClient;
     this.resolver = new PlaneProjectResolver(dbAdapter);
     this.apiClient = new PlaneApiClient(httpClient as any);
   }
@@ -721,12 +730,20 @@ export class PlaneService {
     }
 
     try {
-      this.assertPlaneConfigured();
-      const projectBaseUrl = this.getProjectBaseUrl();
-      const requestConfig = this.getPlaneRequestConfig();
+      const defaultProjectConfig: PlaneProjectConfig = {
+        workspaceSlug: config.PLANE_WORKSPACE_SLUG || "ask-natapohn",
+        planeProjectId: config.PLANE_PROJECT_ID || "4e840554-dc75-4e39-b87d-db31d8bcc1c9",
+        apiBaseUrl: config.PLANE_API_URL || "https://projects.oneweb.tech",
+        credentialRef: config.PLANE_API_KEY || "plane_api_mock",
+      };
+      const projectBaseUrl = this.apiClient.getProjectBaseUrl(defaultProjectConfig);
+      const requestHeaders = {
+        "Content-Type": "application/json",
+        "X-API-Key": config.PLANE_API_KEY || "",
+      };
 
       // 1. Fetch existing labels for the project
-      const labelsRes = await this.httpClient.get(`${projectBaseUrl}/labels/`, requestConfig);
+      const labelsRes = await this.httpClient.get(`${projectBaseUrl}/labels/`, { headers: requestHeaders });
       const labels: Array<{ id: string; name: string }> = Array.isArray(labelsRes.data)
         ? labelsRes.data
         : Array.isArray(labelsRes.data?.results)
@@ -750,7 +767,7 @@ export class PlaneService {
           name: trimmed,
           color: color,
         },
-        requestConfig
+        { headers: requestHeaders }
       );
 
       if (createRes.data && createRes.data.id) {
@@ -787,11 +804,7 @@ export class PlaneService {
     }
 
     const payload = buildPlaneWorkItemPayload(ticketWithSource, companyName);
-    await this.httpClient.patch(
-      `${this.getProjectBaseUrl()}/work-items/${encodeURIComponent(resolvedPlaneIssueId)}/`,
-      payload,
-      this.getPlaneRequestConfig()
-    );
+    await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, payload);
 
     return { synced: true, planeIssueId: resolvedPlaneIssueId };
   }

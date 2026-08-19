@@ -38,6 +38,7 @@ import { registerAuthRoutes } from "./routes/auth";
 import { registerMasterDataRoutes } from "./routes/masterData";
 import { registerPortalRoutes } from "./routes/portal";
 import { registerLineWebhookRoutes } from "./routes/lineWebhook";
+import { LineMessageBatchingService } from "../services/LineMessageBatchingService";
 import { registerGitRepositoryRoutes } from "./routes/gitRepoRoutes";
 import { SLAMatrixService } from "../services/SLAMatrixService";
 import { PolicyEngine } from "../policy/PolicyEngine";
@@ -1931,7 +1932,19 @@ fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
 fastify.register(registerGitRepositoryRoutes);
 registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
-registerLineWebhookRoutes(fastify, lineProjectOnboardingService);
+const lineMessageBatchingService = new LineMessageBatchingService({
+  LINE_BATCH_ENABLED: config.LINE_BATCH_ENABLED,
+  LINE_BATCH_WINDOW_MS: config.LINE_BATCH_WINDOW_MS,
+  LINE_DM_GATEWAY_WEBHOOK_URL: config.LINE_DM_GATEWAY_WEBHOOK_URL,
+});
+registerLineWebhookRoutes(fastify, lineProjectOnboardingService, lineMessageBatchingService);
+
+// Flush any in-flight LINE message batches before the server closes,
+// so pending messages are forwarded to PromptX rather than silently dropped.
+fastify.addHook("onClose", async () => {
+  await lineMessageBatchingService.flushAll();
+});
+
 
 const start = async () => {
   try {
