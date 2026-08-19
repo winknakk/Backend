@@ -400,7 +400,9 @@ export function buildPlaneWorkItemPayload(
   const creatorLabel = creatorInfo.label;
   const creatorSuffix = creatorInfo.suffix;
 
-  const baseTitle = subject.includes(ticketNumber) ? subject : `[${ticketNumber}] ${subject}`;
+  const rawSubject = ticket.plane_title || ticket.planeTitle || subject;
+  const cleanSubject = rawSubject.replace(/^(\[AI-test\]\s*|\[TCK-[^\]]+\]\s*)*/gi, "").trim();
+  const baseTitle = `[AI-test] [${ticketNumber}] ${cleanSubject}`;
   const hasCreatorBadge = /\[(🤖\s*AI|🎧\s*Human|👤\s*Customer|✈️\s*Plane)\]/i.test(baseTitle);
   const visibleTitle = hasCreatorBadge ? baseTitle : `${baseTitle} ${creatorSuffix}`;
 
@@ -888,9 +890,28 @@ export class PlaneService {
     if (ticket.conversation_id) {
       try {
         const identity = await this.dbAdapter.getConversationIdent(String(ticket.conversation_id));
+        let mediaUrls: string[] = Array.isArray(ticket.media_urls) ? [...ticket.media_urls] : [];
+        try {
+          const messages = await this.dbAdapter.getMessages(String(ticket.conversation_id));
+          const imageMsgs = (messages || []).filter(
+            (m: any) =>
+              m.message_type === "image" ||
+              (typeof m.content === "string" &&
+                m.content.startsWith("http") &&
+                (m.content.includes("/content") || m.content.includes("/media/")))
+          );
+          for (const im of imageMsgs) {
+            if (im.content && !mediaUrls.includes(im.content)) {
+              mediaUrls.push(im.content);
+            }
+          }
+        } catch {
+          // Message lookup optional
+        }
         ticketWithSource = {
           ...ticket,
           channel: identity?.channel || ticket.channel,
+          media_urls: mediaUrls,
         };
       } catch {
         // Source enrichment is optional; Ticket creation must not fail when
@@ -904,16 +925,22 @@ export class PlaneService {
     const result = await this.apiClient.createWorkItem(projectConfig, payload);
     const planeIssueId = result.id;
 
-    // ATOMIC UPDATE: Save historical snapshot ONLY AFTER Plane creation succeeds
-    if (this.dbAdapter.updateTicketPlaneSnapshot) {
-      await this.dbAdapter.updateTicketPlaneSnapshot(
-        ticketId,
-        projectConfig.workspaceSlug,
-        projectConfig.planeProjectId,
-        planeIssueId
-      );
-    } else {
-      await this.dbAdapter.updateTicketPlaneIssue(ticketId, planeIssueId);
+    // ATOMIC UPDATE: Save historical snapshot IF ticket exists in DB
+    if (lookupId) {
+      try {
+        if (this.dbAdapter.updateTicketPlaneSnapshot) {
+          await this.dbAdapter.updateTicketPlaneSnapshot(
+            lookupId,
+            projectConfig.workspaceSlug,
+            projectConfig.planeProjectId,
+            planeIssueId
+          );
+        } else {
+          await this.dbAdapter.updateTicketPlaneIssue(lookupId, planeIssueId);
+        }
+      } catch {
+        // Optional if ticket inserted later in step_5
+      }
     }
 
 

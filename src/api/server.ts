@@ -930,9 +930,21 @@ fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
 });
 
 fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
-  const body = (request.body || {}) as any;
-  const result = await planeService.promoteTicketToPlane(body);
-  return reply.code(200).send(result);
+  try {
+    const body = (request.body || {}) as any;
+    console.log("[Server] Received /api/v1/internal/tickets/promote payload:", JSON.stringify(body));
+    const result = await planeService.promoteTicketToPlane(body);
+    console.log("[Server] Promotion result:", JSON.stringify(result));
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    console.error("[Server] /api/v1/internal/tickets/promote error:", err);
+    return reply.code(500).send({
+      statusCode: 500,
+      error: "Internal Server Error",
+      message: err.message || String(err),
+      stack: err.stack,
+    });
+  }
 });
 
 fastify.post("/api/v1/internal/messages", async (request, reply) => {
