@@ -31,19 +31,24 @@ export const LINE_ONBOARDING_CARDS = [
     postbackData: "ticketx:onboarding:menu:start",
   },
   {
-    fileName: "connect.png",
-    label: "เชื่อม",
-    postbackData: "ticketx:onboarding:menu:connect",
+    fileName: "report.png",
+    label: "แจ้งปัญหา",
+    postbackData: "ticketx:onboarding:menu:report",
   },
   {
-    fileName: "connect-new.png",
-    label: "เชื่อมใหม่",
-    postbackData: "ticketx:onboarding:menu:connect_new",
+    fileName: "status.png",
+    label: "ตรวจสอบสถานะ",
+    postbackData: "ticketx:onboarding:menu:status",
   },
   {
     fileName: "change.png",
     label: "เปลี่ยน",
     postbackData: "ticketx:onboarding:menu:change",
+  },
+  {
+    fileName: "connect-new.png",
+    label: "เชื่อมใหม่",
+    postbackData: "ticketx:onboarding:menu:connect_new",
   },
 ] as const;
 
@@ -217,7 +222,7 @@ export function buildLineOnboardingCarousel(publicUrl: string): Record<string, u
           size: "full",
           aspectRatio: "1:1",
           aspectMode: "cover",
-          action: postbackAction(card.label, card.postbackData),
+          action: postbackAction(card.label, card.postbackData, true),
         },
         footer: {
           type: "box",
@@ -227,7 +232,7 @@ export function buildLineOnboardingCarousel(publicUrl: string): Record<string, u
           paddingStart: "16px",
           paddingEnd: "16px",
           contents: [
-            actionPill({ label: card.label, data: card.postbackData }),
+            actionPill({ label: card.label, data: card.postbackData, showSelection: true }),
           ],
         },
       })),
@@ -307,6 +312,7 @@ function projectBubble(
               ...actionPill({
                 label: project.isCurrent ? "กำลังใช้งาน" : "ใช้โปรเจกต์นี้",
                 data: `ticketx:onboarding:switch_project:${project.projectId}`,
+                showSelection: true,
               }),
               margin: "lg",
             },
@@ -363,6 +369,7 @@ function connectNewBubble(): Record<string, unknown> {
               ...actionPill({
                 label: "เชื่อมโปรเจกต์ใหม่",
                 data: "ticketx:onboarding:menu:connect_new",
+                showSelection: true,
               }),
               margin: "lg",
             },
