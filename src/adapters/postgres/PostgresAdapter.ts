@@ -288,7 +288,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         identityIdStr = identityResult.rows[0].id.toString();
       } else {
         // Create a profile first, then identity
-        const maxProfileRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM profiles");
+        const maxProfileRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM profiles");
         const nextProfileId = maxProfileRes.rows[0].next_id;
 
         const profileResult = await pool.query(
@@ -306,7 +306,7 @@ export class PostgresAdapter implements DatabaseAdapter {
           "id"
         );
 
-        const maxIdentRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM identities");
+        const maxIdentRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM identities");
         const nextIdentId = maxIdentRes.rows[0].next_id.toString();
 
         const newIdentity = await pool.query(
@@ -338,7 +338,7 @@ export class PostgresAdapter implements DatabaseAdapter {
         return convResult.rows[0].id.toString();
       }
 
-      const maxConvRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
+      const maxConvRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM conversations");
       const nextConvId = maxConvRes.rows[0].next_id;
 
       const newConv = await pool.query(

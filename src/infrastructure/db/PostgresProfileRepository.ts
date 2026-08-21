@@ -16,8 +16,8 @@ export class PostgresProfileRepository implements IProfileRepository {
   async save(profile: Profile): Promise<Profile> {
     const data = ProfileMapper.toPersistence(profile);
     const { rows } = await pool.query(
-      `INSERT INTO profiles (id, company_id, name, email, phone, created_at)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()))
+      `INSERT INTO profiles (id, company_id, name, email, phone, created_at, is_pii_erased, is_merged)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, NOW()), false, false)
        ON CONFLICT (id) DO UPDATE SET
          company_id = EXCLUDED.company_id,
          name = EXCLUDED.name,
