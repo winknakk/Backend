@@ -41,7 +41,7 @@ function textValues(value: unknown): string[] {
 const message = buildLineOnboardingCarousel("https://support.example.com") as any;
 assert.equal(message.type, "flex");
 assert.equal(message.contents.type, "carousel");
-assert.equal(message.contents.contents.length, 4);
+assert.equal(message.contents.contents.length, LINE_ONBOARDING_CARDS.length);
 assert.deepEqual(
   message.contents.contents.map((bubble: any) => bubble.hero.action.data),
   LINE_ONBOARDING_CARDS.map((card) => card.postbackData)

@@ -582,11 +582,43 @@ export class LineProjectOnboardingService {
         );
       }
 
-      const menuMatch = /^ticketx:onboarding:menu:(start|connect|connect_new|change)$/.exec(postbackData);
+      const menuMatch = /^ticketx:onboarding:menu:(start|report|status|connect|connect_new|change)$/.exec(postbackData);
       if (menuMatch) {
         const projects = await this.findAvailableProjects(client, orgId, input.userId);
         const currentProjectId = this.resolveCurrentProjectId(projects, session, ready);
         const intent = menuMatch[1];
+
+        if (intent === "report") {
+          if (projects.length === 0) {
+            await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+            return this.choiceDecision("report_without_project");
+          }
+          const target = projects.find((project) => project.id === currentProjectId) || projects[0];
+          return {
+            action: "REPLY",
+            state: "COMPLETED",
+            reason: "report_issue_prompt",
+            projectId: target.id,
+            projectName: target.name,
+            replyText: `แจ้งปัญหาหรืออาการที่พบของโปรเจกต์ “${target.name}” เข้ามาได้เลยนะคะ ระบบจะตรวจสอบและเปิด Ticket ให้ทันทีค่ะ 😊`,
+          };
+        }
+
+        if (intent === "status") {
+          if (projects.length === 0) {
+            await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+            return this.choiceDecision("status_without_project");
+          }
+          const target = projects.find((project) => project.id === currentProjectId) || projects[0];
+          return {
+            action: "REPLY",
+            state: "COMPLETED",
+            reason: "check_status_prompt",
+            projectId: target.id,
+            projectName: target.name,
+            replyText: `ส่งเลขที่ Ticket ที่ต้องการติดตาม หรือพิมพ์ “ตรวจสอบสถานะ” เพื่อให้ระบบสรุปรายการล่าสุดของโปรเจกต์ “${target.name}” ได้เลยนะคะ 🔍`,
+          };
+        }
 
         if (intent === "start") {
           if (projects.length === 0) {

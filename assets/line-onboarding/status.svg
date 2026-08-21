@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#F8F9FB"/>
+  <rect x="40" y="40" width="944" height="944" rx="56" fill="#FFFFFF" stroke="#E1E4EA" stroke-width="4"/>
+  <rect x="322" y="160" width="380" height="380" rx="80" fill="#EEF2FF"/>
+  <!-- Clipboard Checklist & Search Icon -->
+  <rect x="412" y="250" width="200" height="230" rx="20" fill="#FFFFFF" stroke="#4B5FC7" stroke-width="22"/>
+  <rect x="462" y="230" width="100" height="40" rx="10" fill="#4B5FC7"/>
+  <path d="M446 320 L466 340 L510 295" fill="none" stroke="#137A54" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M446 385 L466 405 L510 360" fill="none" stroke="#137A54" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="580" cy="420" r="42" fill="#FFFFFF" stroke="#4B5FC7" stroke-width="18"/>
+  <line x1="610" y1="450" x2="645" y2="485" stroke="#4B5FC7" stroke-width="18" stroke-linecap="round"/>
+  <text x="512" y="690" text-anchor="middle" fill="#20242D" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="72" font-weight="800">ตรวจสอบสถานะ</text>
+  <text x="512" y="775" text-anchor="middle" fill="#667085" font-family="Noto Sans Thai,Leelawadee UI,Tahoma,sans-serif" font-size="38" font-weight="500">ติดตามสถานะตั๋ว &amp; งานซ่อม</text>
+  <circle cx="512" cy="860" r="10" fill="#4B5FC7"/>
+  <path d="M160 860 H472 M552 860 H864" stroke="#E1E4EA" stroke-width="4" stroke-linecap="round"/>
+</svg>

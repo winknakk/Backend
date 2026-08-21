@@ -95,6 +95,25 @@ async function sendLinePushMessages(
   );
 }
 
+async function showLineLoadingAnimation(userId: string, seconds = 3): Promise<void> {
+  if (!userId || !config.LINE_CHANNEL_ACCESS_TOKEN) return;
+  try {
+    await axios.post(
+      "https://api.line.me/v2/bot/chat/loading/start",
+      { chatId: userId, loadingSeconds: seconds },
+      {
+        headers: {
+          Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 3000,
+      }
+    );
+  } catch {
+    // Non-blocking UX loading indicator
+  }
+}
+
 async function forwardPromptXWebhook(
   url: string,
   destination: string,
@@ -211,6 +230,9 @@ export function registerLineWebhookRoutes(
         }
 
         const webhookEventId = String(event?.webhookEventId || "").trim();
+        if (event?.source?.userId) {
+          showLineLoadingAnimation(String(event.source.userId), 3).catch(() => {});
+        }
         const decision = await onboardingService.processEvent({
           type: String(event?.type || "unknown"),
           webhookEventId,
