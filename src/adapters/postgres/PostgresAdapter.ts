@@ -19,6 +19,8 @@ export const pool = new pg.Pool({
   max: config.DB_POOL_MAX,
   idleTimeoutMillis: config.DB_POOL_IDLE_TIMEOUT_MS,
   connectionTimeoutMillis: config.DB_POOL_CONNECTION_TIMEOUT_MS,
+  ssl: false,
+  keepAlive: true,
 });
 
 pool.on("error", (err) => {

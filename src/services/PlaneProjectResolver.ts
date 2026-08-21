@@ -34,7 +34,7 @@ export class PlaneProjectResolver {
     const res = await pool.query(
       `SELECT workspace_slug, plane_project_id, plane_api_base_url, credential_ref, enabled
        FROM plane_workspace_mappings
-       WHERE project_id = $1 AND org_id = $2 AND enabled = TRUE
+       WHERE project_id = $1 AND org_id = $2 AND enabled = TRUE AND archived_at IS NULL
        LIMIT 1;`,
       [projectId, tenantOrgId]
     );

@@ -61,7 +61,7 @@ export const EnvSchema = z.object({
   PLANE_REVERSE_SYNC_BATCH_SIZE: z.coerce.number().int().min(1).max(25).default(25),
   DB_POOL_MAX: z.coerce.number().default(10),
   DB_POOL_IDLE_TIMEOUT_MS: z.coerce.number().default(30000),
-  DB_POOL_CONNECTION_TIMEOUT_MS: z.coerce.number().default(2000),
+  DB_POOL_CONNECTION_TIMEOUT_MS: z.coerce.number().default(20000),
   HUMAN_PENDING_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(60).default(5),
   HUMAN_ACTIVE_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(120).default(15),
   HUMAN_MAX_SESSION_MINUTES: z.coerce.number().int().min(5).max(480).default(60),

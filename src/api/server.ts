@@ -36,6 +36,7 @@ import { EvalTestRunner } from "../aiops/llmops/EvalTestRunner";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerMasterDataRoutes } from "./routes/masterData";
+import { registerAdminPlaneIntegrationRoutes } from "./routes/adminPlaneIntegrationRoutes";
 import { registerPortalRoutes } from "./routes/portal";
 import { registerLineWebhookRoutes } from "./routes/lineWebhook";
 import { LineMessageBatchingService } from "../services/LineMessageBatchingService";
@@ -1930,6 +1931,7 @@ fastify.register(WebChatGateway);
 // Register Auth, Master Data, & Customer Portal Routes
 fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
+fastify.register(registerAdminPlaneIntegrationRoutes);
 fastify.register(registerGitRepositoryRoutes);
 registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
 const lineMessageBatchingService = new LineMessageBatchingService({
