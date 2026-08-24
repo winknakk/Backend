@@ -52,8 +52,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       if (channel === "webchat:outbound") {
         try {
           const payload = JSON.parse(message);
-          const room = `conversation:${payload.conversationId}`;
-          broadcastToRoom(room, {
+          const msgPayload = {
             event: "message",
             data: {
               id: payload.id || randomUUID(),
@@ -62,7 +61,14 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
               createdAt: payload.sentAt || new Date().toISOString(),
               attachments: payload.attachments || []
             }
-          });
+          };
+
+          if (payload.conversationId) {
+            broadcastToRoom(`conversation:${payload.conversationId}`, msgPayload);
+          }
+          if (payload.recipientId) {
+            broadcastToRoom(`recipient:${payload.recipientId}`, msgPayload);
+          }
         } catch (err: any) {
           logger.error({ error: err.message }, "Failed to process Redis pub/sub message");
         }
@@ -112,7 +118,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
         if (!identity) {
           // Dynamic Guest compilation
-          const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM profiles");
+          const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM profiles");
           const nextProfileId = String(nextProfileIdRes.rows[0].next_id);
 
           const guestProfile = new Profile({
@@ -123,7 +129,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           await profileRepo.save(guestProfile);
 
           const nextIdentIdRes = await pool.query(
-            "SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM identities"
+            "SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM identities"
           );
           const nextIdentId = String(nextIdentIdRes.rows[0].next_id);
 
@@ -151,7 +157,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           if (profileCheck.rows.length > 0) {
             profileId = String(profileCheck.rows[0].id);
           } else {
-            const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM profiles");
+            const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM profiles");
             profileId = String(nextProfileIdRes.rows[0].next_id);
             const customerProfile = new Profile({
               id: profileId,
@@ -162,7 +168,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           }
 
           const nextIdentIdRes = await pool.query(
-            "SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM identities"
+            "SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM identities"
           );
           const nextIdentId = String(nextIdentIdRes.rows[0].next_id);
 
@@ -188,7 +194,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         86400
       );
 
-      const nextSessionIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM webchat_sessions");
+      const nextSessionIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM webchat_sessions");
       const nextSessionId = String(nextSessionIdRes.rows[0].next_id);
 
       const webchatSession = new WebChatSession({
@@ -334,7 +340,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         // Ensure active conversation exists on message send
         let conversation = await conversationRepo.findActiveByIdentity(identityId, projectId);
         if (!conversation) {
-          const nextConvRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
+          const nextConvRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM conversations");
           const nextConvId = String(nextConvRes.rows[0].next_id);
 
           conversation = new Conversation({
@@ -395,6 +401,12 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
     });
 
     // Handle initial socket link setup
+    const recipientRoom = `recipient:${channelRef}`;
+    if (!activeConnections.has(recipientRoom)) {
+      activeConnections.set(recipientRoom, new Set());
+    }
+    activeConnections.get(recipientRoom)!.add(socket);
+
     (async () => {
       try {
         const conversation = await conversationRepo.findActiveByIdentity(identityId, projectId);
@@ -411,6 +423,12 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
     })();
 
     socket.on("close", () => {
+      if (activeConnections.has(recipientRoom)) {
+        activeConnections.get(recipientRoom)!.delete(socket);
+        if (activeConnections.get(recipientRoom)!.size === 0) {
+          activeConnections.delete(recipientRoom);
+        }
+      }
       if (room && activeConnections.has(room)) {
         activeConnections.get(room)!.delete(socket);
         if (activeConnections.get(room)!.size === 0) {

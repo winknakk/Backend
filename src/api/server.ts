@@ -323,8 +323,8 @@ fastify.addHook("onRequest", (request, reply, done) => {
 
 fastify.addHook("onRequest", async (request, reply) => {
   reply.header("Access-Control-Allow-Origin", "*");
-  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Org-Id, x-org-id, X-Identity-Id, x-identity-id, X-Project-Id, x-project-id, x-correlation-id, *");
   if (request.method === "OPTIONS") {
     return reply.code(200).send();
   }
@@ -379,14 +379,27 @@ async function bootstrap() {
         serverLogger.info(`[BullMQ Worker] Forwarding WebChat message to PromptX Flow: ${webhookUrl}`);
 
         const response = await axios.post(webhookUrl, {
-          channel: "WebChat",
+          channel: "webchat",
           customer_ref: job.data.senderId,
-          message: job.data.text
-        });
+          message: job.data.text,
+          project_id: "1",
+          org_id: "org_default",
+          destination: "default",
+          received_at: new Date().toISOString()
+        }, { timeout: 45000 });
 
-        const replyText = String(response.data.reply_text || "");
-        const suppressReply = response.data.suppress_reply === true || replyText.trim().length === 0;
-        const convId = response.data.conversation_id;
+        const data = response.data || {};
+        const replyText = String(
+          data.reply_text || 
+          data.reply || 
+          data.text || 
+          data.message || 
+          data.body?.reply_text || 
+          data.data?.reply_text || 
+          ""
+        );
+        const suppressReply = data.suppress_reply === true || replyText.trim().length === 0;
+        const convId = data.conversation_id || data.body?.conversation_id;
 
         serverLogger.info(`[BullMQ Worker] Received sync reply from PromptX Flow: "${replyText}" (convId: ${convId})`);
 

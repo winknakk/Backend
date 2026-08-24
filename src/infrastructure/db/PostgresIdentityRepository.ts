@@ -27,8 +27,8 @@ export class PostgresIdentityRepository implements IIdentityRepository {
   async save(identity: Identity): Promise<Identity> {
     const data = IdentityMapper.toPersistence(identity);
     const { rows } = await pool.query(
-      `INSERT INTO identities (id, profile_id, channel, channel_ref, created_at)
-       VALUES ($1, $2, $3, $4, COALESCE($5, NOW()))
+      `INSERT INTO identities (id, profile_id, channel, channel_ref, created_at, is_pii, is_shared_account)
+       VALUES ($1, $2, $3, $4, COALESCE($5, NOW()), false, false)
        ON CONFLICT (id) DO UPDATE SET
          profile_id = EXCLUDED.profile_id,
          channel = EXCLUDED.channel,
