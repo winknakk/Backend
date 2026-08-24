@@ -19,6 +19,8 @@ import {
   lineOnboardingCardDirectory,
 } from "../../services/LineOnboardingCarouselService";
 import { LineMessageBatchingService } from "../../services/LineMessageBatchingService";
+import { AgentSessionQueueService } from "../../services/AgentSessionQueueService";
+import { AgentSessionQueueWorker } from "../../services/AgentSessionQueueWorker";
 
 const logger = createLogger("line-webhook");
 
@@ -153,7 +155,9 @@ const adminRouteOptions = { preHandler: requireConfiguredAdminApiKey };
 export function registerLineWebhookRoutes(
   fastify: FastifyInstance,
   onboardingService: LineProjectOnboardingService,
-  batchingService: LineMessageBatchingService
+  batchingService: LineMessageBatchingService,
+  queueService?: AgentSessionQueueService,
+  queueWorker?: AgentSessionQueueWorker
 ): void {
   fastify.get("/api/v1/media/line-onboarding/cards/:filename", async (request, reply) => {
     const filename = String((request.params as any).filename || "");
@@ -352,13 +356,43 @@ export function registerLineWebhookRoutes(
                 }
               }
             } else {
-              // Batching disabled or no userId — forward immediately (original behavior)
-              await forwardPromptXWebhook(config.LINE_DM_GATEWAY_WEBHOOK_URL, destination, event, {
-                onboardingVerified: true,
-                projectId: decision.projectId,
-                projectName: decision.projectName,
-                conversationId: decision.conversationId,
-              });
+              // Batching disabled — route through queue service if available or fallback directly
+              if (decision.conversationId && queueService && queueWorker) {
+                const sourceEventId = String(event.webhookEventId || event.message?.id || `event-${Date.now()}`);
+                await queueService.enqueue({
+                  conversationId: decision.conversationId,
+                  sourceEventId,
+                  channel: "line",
+                  senderRef: String(event.source?.userId || "unknown"),
+                  destination,
+                  projectId: decision.projectId,
+                  payload: {
+                    destination,
+                    events: [event],
+                    ticketx: {
+                      onboardingVerified: true,
+                      projectId: decision.projectId,
+                      projectName: decision.projectName,
+                      conversationId: decision.conversationId,
+                    },
+                  },
+                  sequenceAt: new Date(),
+                });
+                queueWorker.dispatchConversation(decision.conversationId).catch((workerErr: any) => {
+                  logger.error(
+                    { error: workerErr.message, conversationId: decision.conversationId },
+                    "[line-webhook] Failed in dispatched queue worker"
+                  );
+                });
+              } else {
+                await forwardPromptXWebhook(config.LINE_DM_GATEWAY_WEBHOOK_URL, destination, event, {
+                  onboardingVerified: true,
+                  projectId: decision.projectId,
+                  projectName: decision.projectName,
+                  conversationId: decision.conversationId,
+                });
+              }
+
               if (decision.pushOnboardingCarousel && event?.source?.userId) {
                 try {
                   await sendLinePushMessages(
@@ -463,5 +497,28 @@ export function registerLineWebhookRoutes(
     const rejected = await onboardingService.rejectManualRequest(requestId, request.tenantContext.orgId);
     if (!rejected) return reply.code(404).send({ error: "Pending onboarding request not found" });
     return reply.send({ success: true, rejected: true });
+  });
+
+  // Admin observability routes for Agent Session Queue
+  fastify.get("/api/v1/admin/queue/status", adminRouteOptions, async (_request, reply) => {
+    if (!queueService) return reply.code(503).send({ error: "Queue service is not configured" });
+    const status = await queueService.getQueueStatus();
+    return reply.send({ success: true, data: status });
+  });
+
+  fastify.get("/api/v1/admin/queue/items", adminRouteOptions, async (request, reply) => {
+    if (!queueService) return reply.code(503).send({ error: "Queue service is not configured" });
+    const query = (request.query || {}) as any;
+    const conversationId = query.conversationId ? Number(query.conversationId) : undefined;
+    const status = query.status ? String(query.status) : undefined;
+    const limit = query.limit ? Number(query.limit) : undefined;
+    const items = await queueService.getQueueItems({ conversationId, status, limit });
+    return reply.send({ success: true, data: items });
+  });
+
+  fastify.post("/api/v1/admin/queue/recover", adminRouteOptions, async (_request, reply) => {
+    if (!queueService) return reply.code(503).send({ error: "Queue service is not configured" });
+    const result = await queueService.recoverExpiredLeases();
+    return reply.send({ success: true, data: result });
   });
 }

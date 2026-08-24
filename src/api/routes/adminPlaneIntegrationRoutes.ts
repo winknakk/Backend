@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { PlaneAdminService } from "../../services/PlaneAdminService";
+import { PlaneAdminService, CreatePlaneIntegrationInput } from "../../services/PlaneAdminService";
 
 interface AdminUserContext {
   role: string;
@@ -89,7 +89,7 @@ export async function registerAdminPlaneIntegrationRoutes(fastify: FastifyInstan
         return reply.status(400).send({ error: "BadRequest", message: "Invalid projectId" });
       }
 
-      const body = request.body || {};
+      const body = (request.body || {}) as any;
       if (!body.workspaceSlug || !body.planeProjectId) {
         return reply.status(400).send({ error: "BadRequest", message: "workspaceSlug and planeProjectId are required" });
       }
@@ -97,7 +97,7 @@ export async function registerAdminPlaneIntegrationRoutes(fastify: FastifyInstan
       try {
         const result = await adminService.createProjectPlaneIntegration(
           projectId,
-          body,
+          body as CreatePlaneIntegrationInput,
           ctx.orgId,
           ctx.isSuperAdmin
         );
@@ -198,7 +198,7 @@ export async function registerAdminPlaneIntegrationRoutes(fastify: FastifyInstan
       if (!ctx) return;
 
       const projectId = parseInt(request.params.projectId, 10);
-      const body = request.body || {};
+      const body = (request.body || {}) as any;
 
       try {
         const result = await adminService.testPlaneIntegration({

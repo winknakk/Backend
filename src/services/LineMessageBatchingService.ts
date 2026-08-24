@@ -1,4 +1,7 @@
 import { createLogger } from "../observability/logger";
+import { createHash } from "crypto";
+import { AgentSessionQueueService } from "./AgentSessionQueueService";
+import { AgentSessionQueueWorker } from "./AgentSessionQueueWorker";
 
 const logger = createLogger("line-batch");
 
@@ -25,14 +28,12 @@ export type BatchConfig = {
 
 /**
  * Debounces multiple LINE DM messages per user into a single batch,
- * then forwards them together to the PromptX DM Gateway as one request.
+ * then enqueues them into the durable AgentSessionQueueService for serialized processing.
  *
- * This prevents the AI from sending one reply per message bubble when
- * a user sends several messages in quick succession.
- *
- * Storage: pure in-memory (Map + setTimeout). This is intentional —
- * the backend is a single Node.js process, and the trade-off of losing
- * an in-flight batch on a server restart is acceptable given the simplicity.
+ * This ensures:
+ * 1. UX: Consecutive user messages within 15s are aggregated into a single bubble/turn.
+ * 2. Concurrency Safety: Each turn is executed sequentially per conversation_id,
+ *    preventing interleaved user messages from breaking LLM tool calling continuation.
  */
 export class LineMessageBatchingService {
   /**
@@ -43,13 +44,17 @@ export class LineMessageBatchingService {
   private readonly windowMs: number;
   private readonly dmGatewayUrl: string;
 
-  constructor(config: BatchConfig) {
+  constructor(
+    config: BatchConfig,
+    private readonly queueService?: AgentSessionQueueService,
+    private readonly queueWorker?: AgentSessionQueueWorker
+  ) {
     this.windowMs = config.LINE_BATCH_WINDOW_MS;
     this.dmGatewayUrl = config.LINE_DM_GATEWAY_WEBHOOK_URL;
   }
 
   /**
-   * Enqueues a LINE DM event for batched forwarding.
+   * Enqueues a LINE DM event for debounced batch forwarding.
    *
    * If a timer is already running for this user, it is cancelled and reset,
    * extending the debounce window. The event is appended to the existing buffer.
@@ -113,43 +118,74 @@ export class LineMessageBatchingService {
     const lastDecision = events[events.length - 1].decision;
     const allLineEvents = events.map((e) => e.event);
 
-    try {
-      const axios = (await import("axios")).default;
-      await axios.post(
-        dmGatewayUrl,
-        {
-          destination,
-          events: allLineEvents,
-          ticketx: {
-            onboardingVerified: true,
-            projectId: lastDecision.projectId,
-            projectName: lastDecision.projectName,
-            conversationId: lastDecision.conversationId,
-            batchSize: allLineEvents.length,
-          },
-        },
-        { headers: { "Content-Type": "application/json" }, timeout: 15000 }
-      );
+    const payload = {
+      destination,
+      events: allLineEvents,
+      ticketx: {
+        onboardingVerified: true,
+        projectId: lastDecision.projectId,
+        projectName: lastDecision.projectName,
+        conversationId: lastDecision.conversationId,
+        batchSize: allLineEvents.length,
+      },
+    };
 
-      logger.info(
-        { userId, destination, batchSize: allLineEvents.length },
-        "[line-batch] Batch forwarded to PromptX gateway"
-      );
+    const convId = lastDecision.conversationId;
+
+    try {
+      if (convId && this.queueService && this.queueWorker) {
+        // Persist a compact deterministic batch key. Joining raw IDs can exceed
+        // the VARCHAR(255) database column for a large batch and would turn a
+        // valid inbound delivery into a failed queue write.
+        const eventIdentity = allLineEvents
+          .map((e: any) => e?.webhookEventId || e?.message?.id)
+          .filter(Boolean)
+          .join("|");
+        const sourceEventId = eventIdentity
+          ? `batch:${createHash("sha256").update(eventIdentity).digest("hex")}`
+          : `batch:${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
+
+        await this.queueService.enqueue({
+          conversationId: convId,
+          sourceEventId,
+          channel: "line",
+          senderRef: userId,
+          destination,
+          projectId: lastDecision.projectId,
+          payload,
+          sequenceAt: new Date(),
+        });
+
+        // Trigger the queue worker for this conversation (runs asynchronously)
+        this.queueWorker.dispatchConversation(convId).catch((err: any) => {
+          logger.error(
+            { error: err.message, convId },
+            "[line-batch] Error in dispatched queue worker"
+          );
+        });
+
+        logger.info(
+          { userId, destination, convId, batchSize: allLineEvents.length },
+          "[line-batch] Batch enqueued into AgentSessionQueueService and worker dispatched"
+        );
+      } else {
+        // Fallback: direct HTTP POST to PromptX gateway if queue service not configured
+        const axios = (await import("axios")).default;
+        await axios.post(dmGatewayUrl, payload, {
+          headers: { "Content-Type": "application/json" },
+          timeout: 15000,
+        });
+
+        logger.info(
+          { userId, destination, batchSize: allLineEvents.length },
+          "[line-batch] Batch forwarded directly to PromptX gateway"
+        );
+      }
     } catch (err: any) {
       logger.error(
         { userId, destination, batchSize: allLineEvents.length, error: err.message },
-        "[line-batch] Failed to forward batch to PromptX gateway"
+        "[line-batch] Failed to forward or enqueue batch"
       );
-    }
-
-    // If the last event had a carousel flag, handle it separately via push
-    // (this preserves the 24-hour recall carousel behavior)
-    if (lastDecision.pushOnboardingCarousel && events[events.length - 1].event?.source?.userId) {
-      const lineUserId = String(events[events.length - 1].event.source.userId);
-      logger.info({ lineUserId }, "[line-batch] Carousel push deferred to caller — not triggered from batch flush");
-      // NOTE: The carousel push is NOT done here because it requires LINE_CHANNEL_ACCESS_TOKEN
-      // and the buildLineOnboardingCarousel function from lineWebhook.ts.
-      // The caller (lineWebhook.ts) handles this immediately upon enqueue via a separate push call.
     }
   }
 
@@ -161,7 +197,10 @@ export class LineMessageBatchingService {
     const keys = Array.from(this.batches.keys());
     if (keys.length === 0) return;
 
-    logger.info({ pendingBatches: keys.length }, "[line-batch] Graceful shutdown — flushing all pending batches");
+    logger.info(
+      { pendingBatches: keys.length },
+      "[line-batch] Graceful shutdown — flushing all pending batches"
+    );
     await Promise.allSettled(keys.map((key) => this.flush(key)));
   }
 

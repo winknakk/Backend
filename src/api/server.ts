@@ -40,6 +40,8 @@ import { registerAdminPlaneIntegrationRoutes } from "./routes/adminPlaneIntegrat
 import { registerPortalRoutes } from "./routes/portal";
 import { registerLineWebhookRoutes } from "./routes/lineWebhook";
 import { LineMessageBatchingService } from "../services/LineMessageBatchingService";
+import { AgentSessionQueueService } from "../services/AgentSessionQueueService";
+import { AgentSessionQueueWorker } from "../services/AgentSessionQueueWorker";
 import { registerGitRepositoryRoutes } from "./routes/gitRepoRoutes";
 import { SLAMatrixService } from "../services/SLAMatrixService";
 import { PolicyEngine } from "../policy/PolicyEngine";
@@ -1934,17 +1936,34 @@ fastify.register(registerMasterDataRoutes);
 fastify.register(registerAdminPlaneIntegrationRoutes);
 fastify.register(registerGitRepositoryRoutes);
 registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
-const lineMessageBatchingService = new LineMessageBatchingService({
-  LINE_BATCH_ENABLED: config.LINE_BATCH_ENABLED,
-  LINE_BATCH_WINDOW_MS: config.LINE_BATCH_WINDOW_MS,
-  LINE_DM_GATEWAY_WEBHOOK_URL: config.LINE_DM_GATEWAY_WEBHOOK_URL,
+const agentSessionQueueService = new AgentSessionQueueService(pool);
+const agentSessionQueueWorker = new AgentSessionQueueWorker(agentSessionQueueService, {
+  dmGatewayUrl: config.LINE_DM_GATEWAY_WEBHOOK_URL,
+  leaseDurationMs: 120000,
+  maxAttempts: 2,
+  watchdogIntervalMs: 30000,
 });
-registerLineWebhookRoutes(fastify, lineProjectOnboardingService, lineMessageBatchingService);
+const lineMessageBatchingService = new LineMessageBatchingService(
+  {
+    LINE_BATCH_ENABLED: config.LINE_BATCH_ENABLED,
+    LINE_BATCH_WINDOW_MS: config.LINE_BATCH_WINDOW_MS,
+    LINE_DM_GATEWAY_WEBHOOK_URL: config.LINE_DM_GATEWAY_WEBHOOK_URL,
+  },
+  agentSessionQueueService,
+  agentSessionQueueWorker
+);
+registerLineWebhookRoutes(
+  fastify,
+  lineProjectOnboardingService,
+  lineMessageBatchingService,
+  agentSessionQueueService,
+  agentSessionQueueWorker
+);
 
-// Flush any in-flight LINE message batches before the server closes,
-// so pending messages are forwarded to PromptX rather than silently dropped.
+// Flush any in-flight LINE message batches and gracefully stop worker before server closes
 fastify.addHook("onClose", async () => {
   await lineMessageBatchingService.flushAll();
+  await agentSessionQueueWorker.stop();
 });
 
 
