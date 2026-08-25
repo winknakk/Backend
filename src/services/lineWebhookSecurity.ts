@@ -13,18 +13,23 @@ export function resolveLineWebhookPayload(input: {
   headerSignature?: unknown;
 }): ResolvedLineWebhookPayload {
   const requestBody = (input.body || {}) as any;
-  const forwardedRawBody = typeof requestBody.rawBody === "string" ? requestBody.rawBody : null;
+  const target =
+    requestBody && typeof requestBody === "object" && requestBody.data && typeof requestBody.data === "object"
+      ? requestBody.data
+      : requestBody;
+
+  const forwardedRawBody = typeof target.rawBody === "string" ? target.rawBody : null;
   if (forwardedRawBody) {
     return {
       rawBody: Buffer.from(forwardedRawBody, "utf8"),
-      signature: String(requestBody.signature || ""),
+      signature: String(target.signature || input.headerSignature || ""),
       body: JSON.parse(forwardedRawBody),
       forwardedByRouter: true,
     };
   }
   return {
     rawBody: input.requestRawBody || Buffer.from(JSON.stringify(requestBody), "utf8"),
-    signature: String(input.headerSignature || ""),
+    signature: String(input.headerSignature || target.signature || ""),
     body: requestBody,
     forwardedByRouter: false,
   };

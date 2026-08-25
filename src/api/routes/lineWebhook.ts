@@ -62,17 +62,31 @@ async function sendLineReply(replyToken: string, decision: LineOnboardingDecisio
     : decision.quickReplies?.length
       ? [buildLineChoicePrompt(decision.replyText || "เลือกวิธีดำเนินการได้เลยค่ะ", decision.quickReplies)]
     : [buildLineReply(decision)];
-  await axios.post(
-    "https://api.line.me/v2/bot/message/reply",
-    { replyToken, messages },
-    {
-      headers: {
-        Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
+  try {
+    await axios.post(
+      "https://api.line.me/v2/bot/message/reply",
+      { replyToken, messages },
+      {
+        headers: {
+          Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 10000,
+      }
+    );
+  } catch (err: any) {
+    logger.error(
+      {
+        status: err.response?.status,
+        data: err.response?.data,
+        message: err.message,
+        replyToken,
+        tokenPrefix: config.LINE_CHANNEL_ACCESS_TOKEN?.slice(0, 15),
       },
-      timeout: 10000,
-    }
-  );
+      "LINE reply API call failed"
+    );
+    throw err;
+  }
 }
 
 async function sendLinePush(userId: string, text: string): Promise<void> {
@@ -417,8 +431,18 @@ export function registerLineWebhookRoutes(
       }
       return reply.code(200).send({ success: true, processed });
     } catch (error: any) {
-      logger.error({ error: error.message }, "LINE webhook processing failed");
-      return reply.code(503).send({ error: "LINE webhook processing failed" });
+      logger.error(
+        {
+          error: error.message,
+          stack: error.stack,
+          response: error.response?.data,
+        },
+        "LINE webhook processing failed"
+      );
+      return reply.code(503).send({
+        error: "LINE webhook processing failed",
+        details: error.response?.data || error.message,
+      });
     }
   });
 

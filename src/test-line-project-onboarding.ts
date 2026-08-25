@@ -37,6 +37,14 @@ function testLineSignature(): void {
   assert.deepEqual(forwarded.body, { destination: "U123", events: [] });
   assert.equal(verifyLineSignature(forwarded.rawBody, forwarded.signature, secret), true);
 
+  const forwardedNested = resolveLineWebhookPayload({
+    body: { data: { rawBody: rawBody.toString("utf8"), signature } },
+    requestRawBody: Buffer.from('{"wrapper":true}', "utf8"),
+  });
+  assert.equal(forwardedNested.forwardedByRouter, true);
+  assert.deepEqual(forwardedNested.body, { destination: "U123", events: [] });
+  assert.equal(verifyLineSignature(forwardedNested.rawBody, forwardedNested.signature, secret), true);
+
   const direct = resolveLineWebhookPayload({
     body: { destination: "U123", events: [] },
     requestRawBody: rawBody,

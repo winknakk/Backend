@@ -17,8 +17,8 @@ async function testNewUserOnboarding(): Promise<void> {
       const decision = await service.processEvent({
         webhookEventId: `test_pzmg_evt_${Date.now()}_${i}`,
         type: "message",
-        userId: "U0ac4a8a0651e47441473014866ff1960",
-        destination: "U48cb9897ca17cda31f68856063ecd999",
+        userId: "U_brand_new_" + Date.now(),
+        destination: "Ue5c4a87416737ab2650f7f0d8ca3d593",
         messageText: "TX-PZMG-CHAC",
       });
 
