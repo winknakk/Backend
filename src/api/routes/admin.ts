@@ -280,7 +280,12 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       const messages = await humanReplyService.getMessages(params.id);
 
       // Use request-aware media service so publicCdnBaseUrl matches the actual host
-      const mediaService = getMediaStorageService(request);
+      let mediaService: any = null;
+      try {
+        mediaService = getMediaStorageService(request);
+      } catch (mediaErr: any) {
+        console.warn("[admin.ts] Media service initialization warning:", mediaErr.message);
+      }
 
       const hydratedMessages = await Promise.all(messages.map(async (m: any) => {
         const msgId = m.id || m.Id;
@@ -299,8 +304,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
             let fileUrl = att.file_url;
             let thumbnailUrl = att.thumbnail_url || att.file_url;
 
-            // If storage_key exists, generate fresh presigned URL
-            if (att.storage_key) {
+            // If storage_key exists and mediaService is ready, generate fresh presigned URL
+            if (att.storage_key && mediaService) {
               try {
                 const freshUrl = await mediaService.generatePresignedUrl(att.storage_key, 86400);
                 fileUrl = freshUrl;

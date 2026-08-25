@@ -1044,26 +1044,56 @@ export class PostgresAdapter implements DatabaseAdapter {
 
   async getMessages(conversationId: string): Promise<any[]> {
     if (!this.isValidConversationId(conversationId)) return [];
-    const query = `
-      SELECT id, conversation_id, role, content, message_type, reply_to_message_id, delivery_status, reactions, is_pinned, quote_token, created_at AS timestamp
-      FROM messages
-      WHERE conversation_id = $1::integer
-      ORDER BY created_at ASC
-    `;
-    const res = await pool.query(query, [conversationId]);
-    return res.rows.map((r) => ({
-      id: r.id,
-      conversation_id: r.conversation_id,
-      role: r.role,
-      content: r.content,
-      message_type: r.message_type || "text",
-      reply_to_message_id: r.reply_to_message_id,
-      delivery_status: r.delivery_status || "delivered",
-      reactions: r.reactions || {},
-      is_pinned: r.is_pinned || false,
-      quote_token: r.quote_token || null,
-      timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
-    }));
+    try {
+      const query = `
+        SELECT id, conversation_id, role, content, message_type, reply_to_message_id, delivery_status, reactions, is_pinned, quote_token, created_at AS timestamp
+        FROM messages
+        WHERE conversation_id = $1::integer
+        ORDER BY created_at ASC
+      `;
+      const res = await pool.query(query, [conversationId]);
+      return res.rows.map((r) => ({
+        id: r.id,
+        conversation_id: r.conversation_id,
+        role: r.role,
+        content: r.content,
+        message_type: r.message_type || "text",
+        reply_to_message_id: r.reply_to_message_id,
+        delivery_status: r.delivery_status || "delivered",
+        reactions: r.reactions || {},
+        is_pinned: r.is_pinned || false,
+        quote_token: r.quote_token || null,
+        timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
+      }));
+    } catch (err: any) {
+      // Fallback query if newer columns (delivery_status, reactions, is_pinned, quote_token, reply_to_message_id) are not yet migrated
+      console.warn(`[PostgresAdapter] Extended getMessages query failed, falling back to core columns:`, err.message);
+      try {
+        const fallbackQuery = `
+          SELECT id, conversation_id, role, content, created_at AS timestamp
+          FROM messages
+          WHERE conversation_id = $1::integer
+          ORDER BY created_at ASC
+        `;
+        const res = await pool.query(fallbackQuery, [conversationId]);
+        return res.rows.map((r) => ({
+          id: r.id,
+          conversation_id: r.conversation_id,
+          role: r.role,
+          content: r.content,
+          message_type: "text",
+          reply_to_message_id: null,
+          delivery_status: "delivered",
+          reactions: {},
+          is_pinned: false,
+          quote_token: null,
+          timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
+        }));
+      } catch (fallbackErr: any) {
+        console.error(`[PostgresAdapter] Core getMessages fallback failed:`, fallbackErr.message);
+        return [];
+      }
+    }
   }
 
 
