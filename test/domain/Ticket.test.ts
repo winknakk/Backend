@@ -32,11 +32,13 @@ describe("Ticket Aggregate Root Invariant Unit Tests", () => {
     });
 
     ticket.cancelTicket("Duplicate ticket submitted by customer");
-    assert.strictEqual(ticket.status, "cancelled");
+    // Lifecycle vocabulary since migration 040; "cancelled" would now
+    // violate tickets_status_lifecycle_check.
+    assert.strictEqual(ticket.status, "CANCELLED");
     assert.strictEqual(ticket.cancellationReason, "Duplicate ticket submitted by customer");
   });
 
-  it("should successfully restore cancelled ticket to open status", () => {
+  it("should successfully restore cancelled ticket to REOPENED", () => {
     const ticket = new Ticket({
       id: 3,
       ticketId: "TCK-2026-0003",
@@ -48,7 +50,8 @@ describe("Ticket Aggregate Root Invariant Unit Tests", () => {
     });
 
     ticket.restore();
-    assert.strictEqual(ticket.status, "open");
+    // restore() is a REOPENED transition, not a return to "open".
+    assert.strictEqual(ticket.status, "REOPENED");
     assert.strictEqual(ticket.cancellationReason, undefined);
   });
 });

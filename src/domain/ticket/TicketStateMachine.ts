@@ -90,14 +90,17 @@ export class TicketStateMachine {
     const planeStatus = req.planeStatus ?? lifecycleToPlaneStatus(req.to);
 
     const updated = await pool.query(
+      // $1 is both assigned to a varchar column and compared against text
+      // literals, so it needs an explicit cast — Postgres otherwise reports
+      // "inconsistent types deduced for parameter $1".
       `UPDATE tickets
-          SET status = $1,
-              plane_status = COALESCE($2, plane_status),
+          SET status = $1::varchar,
+              plane_status = COALESCE($2::varchar, plane_status),
               lifecycle_changed_at = NOW(),
-              resolved_at = CASE WHEN $1 = 'RESOLVED' THEN NOW() ELSE resolved_at END,
-              closed_at = CASE WHEN $1 IN ('CLOSED','CANCELLED') THEN NOW() ELSE closed_at END,
+              resolved_at = CASE WHEN $1::varchar = 'RESOLVED' THEN NOW() ELSE resolved_at END,
+              closed_at = CASE WHEN $1::varchar IN ('CLOSED','CANCELLED') THEN NOW() ELSE closed_at END,
               updated_at = NOW()
-        WHERE id = $3 AND status = $4
+        WHERE id = $3::integer AND status = $4::varchar
         RETURNING id`,
       [req.to, planeStatus, ticket.id, from]
     );

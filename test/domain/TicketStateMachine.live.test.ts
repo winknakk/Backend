@@ -180,6 +180,14 @@ describe("TicketStateMachine (live database)", () => {
 
     await pool.query(`UPDATE tickets SET status = 'RESOLVED' WHERE id = $1`, [ticketId]);
 
+    // Earlier tests in this suite share the ticket, so the audit assertion
+    // below counts only rows written from here on.
+    const auditBaseline = await pool.query(
+      `SELECT COALESCE(MAX(id), 0) AS max_id FROM ticket_events WHERE ticket_id = $1`,
+      [ticketId]
+    );
+    const sinceId = Number(auditBaseline.rows[0].max_id);
+
     // The customer confirms and reopens at the same instant. Both are valid
     // from RESOLVED, so only the conditional UPDATE can separate them.
     const [a, b] = await Promise.all([
@@ -189,8 +197,34 @@ describe("TicketStateMachine (live database)", () => {
 
     const winners = [a, b].filter((r) => r.applied);
     assert.strictEqual(winners.length, 1, "exactly one concurrent transition may win");
+
+    // The loser is refused at one of two points depending on timing: if it
+    // read the ticket before the winner committed, the conditional UPDATE
+    // matches no rows (CONCURRENT_MODIFICATION); if it read afterwards, the
+    // transition is no longer valid from the new state (INVALID_TRANSITION).
+    // Both are correct refusals — the invariant is that only one wins and the
+    // other writes nothing.
     const loser = [a, b].find((r) => !r.applied)!;
-    assert.strictEqual(loser.code, "CONCURRENT_MODIFICATION");
+    assert.ok(
+      ["CONCURRENT_MODIFICATION", "INVALID_TRANSITION"].includes(loser.code!),
+      `unexpected refusal code: ${loser.code}`
+    );
+
+    // And the ticket must hold exactly the winner's target, not a blend.
+    const final = await pool.query(`SELECT status FROM tickets WHERE id = $1`, [ticketId]);
+    assert.strictEqual(final.rows[0].status, winners[0].to);
+
+    // Exactly one audit row for this contested transition.
+    const events = await pool.query(
+      `SELECT count(*)::int c FROM ticket_events
+        WHERE ticket_id = $1 AND id > $2 AND event_type = 'STATUS_TRANSITION'`,
+      [ticketId, sinceId]
+    );
+    assert.strictEqual(
+      events.rows[0].c,
+      1,
+      "exactly one audit row: the winner is recorded, the loser writes nothing"
+    );
   });
 
   it("applyPlaneStatus: Plane Done resolves but never closes", async (t) => {
