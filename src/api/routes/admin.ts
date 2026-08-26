@@ -6,6 +6,7 @@ import { IngestionService } from "../../aiops/ragops/IngestionService";
 import { EvalTestRunner } from "../../aiops/llmops/EvalTestRunner";
 import { TrafficSplitter } from "../../aiops/prompt-control/TrafficSplitter";
 import { authHook } from "../../middleware/auth";
+import { resolveProjectFilter, canAccessProject } from "../../middleware/tenantScope";
 import { DocumentIngestionPayloadSchema, AbTestWeightSchema, EvalTestCaseSchema } from "../../schemas/aiops";
 import { DatabaseAdapter } from "../../adapters/types";
 import { HumanReplyService } from "../../services/humanReplyService";
@@ -77,10 +78,20 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
   // Add authentication hook for all admin endpoints
   fastify.addHook("onRequest", authHook);
 
-  // Validate conversationId and projectId parameters
+  // Validate conversationId and authorize projectId.
+  //
+  // registerAdminRoutes is called directly on the root instance rather than
+  // through fastify.register(), so hooks added here are NOT encapsulated and
+  // fire for every route in the application, including the login surface.
+  // The guard below keeps this hook to the routes it is meant for.
   fastify.addHook("preHandler", async (request, reply) => {
     const params = request.params as any;
     const routeUrl = (request as any).routeOptions?.url || "";
+
+    if (!routeUrl.startsWith("/api/admin") && !routeUrl.startsWith("/api/v1/admin")) {
+      return;
+    }
+
     if (params && params.id !== undefined && routeUrl) {
       if (routeUrl.includes("/api/admin/conversations/:id")) {
         const id = String(params.id);
@@ -95,45 +106,51 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     }
 
     const query = request.query as any;
-    if (query && query.projectId !== undefined) {
-      const pId = String(query.projectId);
-      if (pId.toLowerCase() !== 'all') {
-        const parsed = parseInt(pId, 10);
-        if (isNaN(parsed) || parsed <= 0 || pId === "null" || pId === "undefined" || pId === "") {
-          // If conversationId is provided and valid, allow it to pass so it can be resolved from the conversation context.
-          const parsedConv = parseInt(String(query.conversationId), 10);
-          const hasValidConvId = query.conversationId && !isNaN(parsedConv) && parsedConv > 0;
-          if (!hasValidConvId) {
-            return reply.code(400).send({
-              error: "Bad Request",
-              message: `Invalid projectId: ${pId}`,
-            });
-          }
-        }
 
-        if (
-          routeUrl.includes("/api/admin/conversations/:id")
-          && params?.id !== undefined
-          && !isNaN(parsed)
-          && parsed > 0
-        ) {
-          const conversationId = parseInt(String(params.id), 10);
-          const scopedConversation = await pool.query(
-            `SELECT 1
-             FROM conversations
-             WHERE id = $1
-               AND project_id = $2
-               AND deleted_at IS NULL
-             LIMIT 1`,
-            [conversationId, parsed]
-          );
-          if (scopedConversation.rowCount === 0) {
-            return reply.code(404).send({
-              error: "Not Found",
-              message: `Conversation ${conversationId} does not belong to project ${parsed}`,
-            });
-          }
-        }
+    // Authorize the requested project against the caller's own scope.
+    //
+    // This block previously only checked that the conversation belonged to
+    // the *requested* project — but the requested project was whatever the
+    // caller typed, so it constrained nothing. resolveProjectFilter checks it
+    // against the authenticated principal instead, and bounds projectId=all
+    // to the projects that principal may actually see.
+    const filter = resolveProjectFilter(request, reply, query?.projectId);
+    if (!filter) {
+      return reply; // resolveProjectFilter already sent 400/403
+    }
+
+    // Conversation-scoped routes: confirm the conversation is inside the
+    // caller's scope, using the conversation's real project rather than the
+    // one supplied on the query string.
+    if (routeUrl.includes("/api/admin/conversations/:id") && params?.id !== undefined) {
+      const conversationId = parseInt(String(params.id), 10);
+      const owning = await pool.query(
+        `SELECT project_id FROM conversations WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+        [conversationId]
+      );
+
+      if (owning.rowCount === 0) {
+        return reply.code(404).send({
+          error: "Not Found",
+          message: `Conversation ${conversationId} not found`,
+        });
+      }
+
+      if (!canAccessProject(request, owning.rows[0].project_id)) {
+        return reply.code(404).send({
+          error: "Not Found",
+          message: `Conversation ${conversationId} not found`,
+        });
+      }
+
+      // Callers may still name a project explicitly; if they do it must match
+      // the conversation's own project.
+      const requested = parseInt(String(query?.projectId), 10);
+      if (Number.isInteger(requested) && requested > 0 && requested !== Number(owning.rows[0].project_id)) {
+        return reply.code(404).send({
+          error: "Not Found",
+          message: `Conversation ${conversationId} does not belong to project ${requested}`,
+        });
       }
     }
   });

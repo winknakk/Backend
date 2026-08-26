@@ -825,6 +825,34 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
   }
 
+
+  /**
+   * Hard tenant boundary applied on top of any caller-supplied filter.
+   *
+   * Returns a SQL condition restricting rows to the projects the request is
+   * allowed to see, or null when the caller is unrestricted. Callers that
+   * pass a plain orgId string (legacy signature) get null, preserving their
+   * existing behaviour.
+   */
+  private buildProjectBoundary(
+    tenantCtx: TenantContext | string | undefined,
+    column: string,
+    queryParams: any[]
+  ): string | null {
+    if (!tenantCtx || typeof tenantCtx === "string") return null;
+
+    const allowed = tenantCtx.allowedProjectIds;
+    if (allowed === null || allowed === undefined) return null;
+
+    if (allowed.length === 0) {
+      // Authenticated but granted nothing: match no rows rather than all.
+      return "FALSE";
+    }
+
+    queryParams.push(allowed as number[]);
+    return `${column} = ANY($${queryParams.length}::int[])`;
+  }
+
   async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string, tenantCtx?: TenantContext | string): Promise<any[]> {
     const orgId = typeof tenantCtx === "string" ? tenantCtx : (tenantCtx?.orgId || "org_default");
     const fallback = async () => {
@@ -868,6 +896,14 @@ export class PostgresAdapter implements DatabaseAdapter {
         queryParams.push(parsed);
         conditions.push(`t.project_id = $${queryParams.length}`);
       }
+    }
+    // Applied regardless of what the caller asked for. Note the org filter
+    // above is skipped whenever a specific project is named, so without this
+    // a caller could read another organization's tickets simply by supplying
+    // that organization's project id.
+    const ticketBoundary = this.buildProjectBoundary(tenantCtx, "t.project_id", queryParams);
+    if (ticketBoundary) {
+      conditions.push(ticketBoundary);
     }
     if (identityId) {
       const parsed = parseInt(identityId, 10);
@@ -957,6 +993,13 @@ export class PostgresAdapter implements DatabaseAdapter {
         queryParams.push(parsedProjectId);
         conditions.push(`c.project_id = $${queryParams.length}`);
       }
+    }
+    // See the note in listAllTickets: the org filter above is bypassed when a
+    // specific project is named, so this boundary is what actually contains
+    // the request.
+    const convBoundary = this.buildProjectBoundary(tenantCtx, "c.project_id", queryParams);
+    if (convBoundary) {
+      conditions.push(convBoundary);
     }
 
     let query = `

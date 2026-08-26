@@ -62,6 +62,7 @@ import { InboundMessageSchema } from "../schemas/validation";
 import rootLogger, { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
 import { authHook } from "../middleware/auth";
+import { tenantScopeHook, resolveProjectFilter } from "../middleware/tenantScope";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
 import { SmsNotificationService } from "../services/SmsNotificationService";
@@ -360,6 +361,10 @@ fastify.addHook("onRequest", async (request, reply) => {
 
 fastify.addHook("onRequest", rateLimitHook);
 fastify.addHook("onRequest", authHook);
+// preHandler, not onRequest: it must observe request.principal (authHook) and
+// the base tenantContext (tenantPlugin, registered as a plugin and therefore
+// hooked during boot rather than here).
+fastify.addHook("preHandler", tenantScopeHook);
 fastify.addHook("preValidation", webhookSignatureHook);
 fastify.addHook("onRequest", async (request) => {
   if (request.url === "/webhook/message" && request.method === "POST") {
