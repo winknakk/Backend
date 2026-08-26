@@ -219,9 +219,10 @@ export class HumanReplyService {
       }
     } else {
       const webhookUrl =
-        config.ACTIVEPIECES_WORKFLOW_PROVIDER === "postgres_v2"
+        config.PROMPTX_HUMAN_REPLY_WEBHOOK_URL ||
+        (config.ACTIVEPIECES_WORKFLOW_PROVIDER === "postgres_v2"
           ? config.ACTIVEPIECES_HUMAN_REPLY_WEBHOOK_URL_V2
-          : config.ACTIVEPIECES_HUMAN_REPLY_WEBHOOK_URL;
+          : config.ACTIVEPIECES_HUMAN_REPLY_WEBHOOK_URL);
 
       try {
         await axios.post(

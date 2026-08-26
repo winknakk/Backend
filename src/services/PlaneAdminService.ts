@@ -380,11 +380,11 @@ export class PlaneAdminService {
   }): Promise<PlaneTestResult> {
     let ws = params.workspaceSlug?.trim();
     let projId = params.planeProjectId?.trim();
-    let apiBase = (params.apiBaseUrl || config.PLANE_API_URL || "https://projects.oneweb.tech").replace(/\/+$/, "");
+    let apiBase = params.apiBaseUrl?.trim();
     let secret = params.credential?.secret || params.apiKey;
 
     // If params not supplied in body, load from existing project mapping in DB
-    if ((!ws || !projId || !secret) && params.projectId) {
+    if ((!ws || !projId || !secret || !apiBase) && params.projectId) {
       const existing = await pool.query(
         `SELECT workspace_slug, plane_project_id, plane_api_base_url, plane_api_key, credential_ref 
          FROM plane_workspace_mappings 
@@ -396,10 +396,17 @@ export class PlaneAdminService {
         const row = existing.rows[0];
         ws = ws || row.workspace_slug;
         projId = projId || row.plane_project_id;
+        // apiBase always had a default, so the mapping's own base URL was never
+        // reachable here and a workspace on api.plane.so was tested against the
+        // self-hosted default instead.
         apiBase = apiBase || row.plane_api_base_url;
-        secret = secret || row.plane_api_key || row.credential_ref;
+        // credential_ref is what PlaneApiClient actually sends at runtime, so it
+        // must be tested first; plane_api_key is only a legacy fallback.
+        secret = secret || row.credential_ref || row.plane_api_key;
       }
     }
+
+    apiBase = (apiBase || config.PLANE_API_URL || "https://projects.oneweb.tech").replace(/\/+$/, "");
 
     if (!ws || !projId || !secret) {
       return {
