@@ -35,6 +35,18 @@ const PUBLIC_ROUTES = [
   "/api/v1/media/",
 ];
 
+/**
+ * Routes reached via a WebSocket upgrade. Browsers cannot set headers on a
+ * WebSocket handshake, so these accept the credential as a `token` query
+ * parameter in addition to the Authorization header.
+ */
+const WEBSOCKET_ROUTES = ["/api/admin/socket"];
+
+function isWebSocketRoute(url: string): boolean {
+  const path = url.split("?")[0];
+  return WEBSOCKET_ROUTES.includes(path);
+}
+
 function isPublicRoute(url: string): boolean {
   const path = url.split("?")[0];
   return PUBLIC_ROUTES.some((route) => (route.endsWith("/") ? path.startsWith(route) : path === route || path.startsWith(`${route}/`)));
@@ -69,6 +81,33 @@ const SERVICE_PRINCIPAL: AuthPrincipal = {
 };
 
 /**
+ * Resolves a bearer credential to a principal, or null.
+ *
+ * Single implementation shared by the HTTP hook and the WebSocket handshake,
+ * so the two transports cannot drift apart on what counts as authenticated.
+ */
+export function authenticateToken(token: string): AuthPrincipal | null {
+  const candidate = (token || "").trim();
+  if (!candidate) return null;
+
+  if (sessionTokenService) {
+    const principal = sessionTokenService.verify(candidate);
+    if (principal) return principal;
+  }
+
+  if (config.API_KEY && constantTimeEquals(candidate, config.API_KEY)) {
+    return SERVICE_PRINCIPAL;
+  }
+
+  return null;
+}
+
+/** True when the server has no way to authenticate anyone at all. */
+export function isAuthConfigured(): boolean {
+  return Boolean(config.API_KEY || sessionTokenService);
+}
+
+/**
  * Fastify onRequest hook enforcing authentication.
  *
  * Accepts either a signed operator session token (admin UI) or the shared
@@ -94,24 +133,23 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply): Pr
   }
 
   const authHeader = request.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    logger.warn({ url: request.url, ip: request.ip }, "Missing or malformed Authorization header");
+  let token = "";
+
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  } else if (isWebSocketRoute(request.url)) {
+    token = String((request.query as any)?.token || "").trim();
+  }
+
+  if (!token) {
+    logger.warn({ url: request.url, ip: request.ip }, "Missing or malformed credential");
     reply.status(401).send({ error: "Unauthorized", message: "Authentication required" });
     return;
   }
 
-  const token = authHeader.slice(7).trim();
-
-  if (sessionTokenService) {
-    const principal = sessionTokenService.verify(token);
-    if (principal) {
-      request.principal = principal;
-      return;
-    }
-  }
-
-  if (config.API_KEY && constantTimeEquals(token, config.API_KEY)) {
-    request.principal = SERVICE_PRINCIPAL;
+  const principal = authenticateToken(token);
+  if (principal) {
+    request.principal = principal;
     return;
   }
 

@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import type { FastifyInstance } from "fastify";
 import axios from "axios";
 import { config } from "../config/env";
 import { AdapterFactory } from "../adapters/AdapterFactory";
@@ -61,8 +62,10 @@ import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
 import rootLogger, { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
-import { authHook } from "../middleware/auth";
-import { tenantScopeHook, resolveProjectFilter } from "../middleware/tenantScope";
+import { authHook, authenticateToken } from "../middleware/auth";
+import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
+import { tenantScopeHook, resolveProjectFilter, resolveTenantScope } from "../middleware/tenantScope";
+import { adminSocketRegistry } from "./AdminSocketRegistry";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
 import { SmsNotificationService } from "../services/SmsNotificationService";
@@ -99,7 +102,7 @@ fastify.addContentTypeParser("application/json", { parseAs: "buffer" }, (request
 fastify.register(websocketPlugin);
 fastify.register(tenantPlugin);
 const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
-const adminConnections = new Map<any, string>();
+
 
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
@@ -200,11 +203,10 @@ async function requestHumanTakeover(input: {
       expiresAt: takeoverState.leaseExpiresAt,
     },
   });
-  for (const [adminSocket] of adminConnections) {
-    if (adminSocket.readyState === 1) {
-      adminSocket.send(notification);
-    }
-  }
+  // Scoped to the conversation's project. This loop previously sent to every
+  // connected admin socket, so a takeover request in one project was
+  // delivered to operators of every other project.
+  adminSocketRegistry.broadcastToProject(conversationProjectId, notification);
 
   await redisPub.publish(
     "webchat:outbound",
@@ -923,26 +925,107 @@ fastify.post("/api/v1/internal/notifications/sms", async (request, reply) => {
   return reply.code(200).send({ success: true, sent: result });
 });
 
-fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
-  // Verify authentication on WebSocket connection
-  const wsToken = (req.query as any)?.token || req.headers["authorization"]?.replace("Bearer ", "");
-  if (config.API_KEY && wsToken !== config.API_KEY) {
-    const socket = (connection as any).socket;
-    serverLogger.warn({ ip: req.ip }, "Unauthorized WebSocket connection attempt rejected");
-    socket.close(4001, "Unauthorized");
+/**
+ * Admin realtime socket.
+ *
+ * Registered through fastify.register() rather than declared inline: routes
+ * added at module scope are processed before @fastify/websocket installs its
+ * onRoute hook, so `{ websocket: true }` was silently ignored and the route
+ * answered the upgrade with a plain HTTP 200. It never upgraded at all.
+ */
+export async function registerAdminSocketRoute(fastify: FastifyInstance): Promise<void> {
+  fastify.get("/api/admin/socket", { websocket: true }, async (connection: any, req: any) => {
+  // @fastify/websocket v11 passes the WebSocket directly; older versions
+  // wrapped it in { socket }. Support both so the guard cannot be skipped by
+  // an undefined reference.
+  const socket = (connection as any).socket || (connection as any);
+
+  const closeWith = (code: number, reason: string) => {
+    try {
+      socket.close(code, reason);
+    } catch {
+      /* socket already gone */
+    }
+  };
+
+  // authHook already authenticated the upgrade request, but @fastify/websocket
+  // does not carry request decorations through to this handler, so the
+  // credential is re-verified here via the same shared helper. Browsers cannot
+  // set headers on a handshake, hence the ?token= parameter.
+  //
+  // The previous guard read `if (config.API_KEY && token !== API_KEY)`, which
+  // short-circuited to "accept" whenever API_KEY was unset — which it was.
+  // @fastify/websocket does not populate req.query for upgrade requests, so
+  // the parameters are read from the raw URL.
+  const wsParams = new URL(req.url || "", "http://localhost").searchParams;
+
+  const rawToken = String(
+    wsParams.get("token") || (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "")
+  ).trim();
+
+  const principal: AuthPrincipal | null = authenticateToken(rawToken);
+  if (!principal) {
+    serverLogger.warn({ ip: req.ip }, "Rejected WebSocket connection with invalid credential");
+    closeWith(4001, "Unauthorized");
     return;
   }
 
-  const socket = (connection as any).socket;
-  const projectId = String((req.query as any)?.projectId || req.headers["x-project-id"] || "1");
-  serverLogger.info({ projectId }, "Admin WebSocket connection established");
-  adminConnections.set(socket, projectId);
+  let scope;
+  try {
+    scope = await resolveTenantScope(principal);
+  } catch (err: any) {
+    serverLogger.error({ error: err.message }, "Failed to resolve tenant scope for WebSocket");
+    closeWith(4011, "Scope unavailable");
+    return;
+  }
+
+  // A socket may narrow itself to one project, but never widen beyond its
+  // principal's scope. The requested project used to be trusted verbatim.
+  const requestedProjectId = String(wsParams.get("projectId") || "").trim();
+  let projectIds: number[] | null = scope.unrestricted ? null : scope.projectIds;
+
+  if (requestedProjectId && requestedProjectId.toLowerCase() !== "all") {
+    if (!/^[0-9]+$/.test(requestedProjectId)) {
+      closeWith(4003, "Invalid projectId");
+      return;
+    }
+    const requested = parseInt(requestedProjectId, 10);
+    if (!scope.unrestricted && !scope.projectIds.includes(requested)) {
+      serverLogger.warn(
+        { ip: req.ip, principal: principal.subject, requested, allowed: scope.projectIds },
+        "Rejected WebSocket subscription to an out-of-scope project"
+      );
+      closeWith(4003, "Forbidden");
+      return;
+    }
+    projectIds = [requested];
+  }
+
+  if (projectIds !== null && projectIds.length === 0) {
+    serverLogger.warn({ principal: principal.subject }, "Rejected WebSocket for account with no project access");
+    closeWith(4003, "Forbidden");
+    return;
+  }
+
+  serverLogger.info(
+    { principal: principal.subject, role: principal.role, projectIds: projectIds ?? "all" },
+    "Admin WebSocket connection established"
+  );
+  adminSocketRegistry.add(socket, { principal, projectIds });
 
   socket.on("close", () => {
-    adminConnections.delete(socket);
-    serverLogger.info("Admin WebSocket connection closed");
+    adminSocketRegistry.remove(socket);
+    serverLogger.info({ principal: principal.subject }, "Admin WebSocket connection closed");
+  });
+
+  socket.on("error", (err: any) => {
+    // Without this listener a socket-level error becomes an unhandled 'error'
+    // event, which terminates the process (see RUN-02).
+    serverLogger.warn({ error: err?.message }, "Admin WebSocket error");
+    adminSocketRegistry.remove(socket);
   });
 });
+}
 
 fastify.post("/api/v1/webhooks/human_notify", async (request, reply) => {
   const body = request.body as any;
@@ -1931,11 +2014,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         messageType
       }
     });
-    for (const [adminSocket] of adminConnections) {
-      if (adminSocket.readyState === 1) {
-        adminSocket.send(notifyPayload);
-      }
-    }
+    adminSocketRegistry.broadcastToProject(conversationProjectId, notifyPayload);
 
     return reply.code(200).send({
       identity,
@@ -1973,6 +2052,7 @@ registerAdminRoutes(fastify, {
 fastify.register(WebChatGateway);
 
 // Register Auth, Master Data, & Customer Portal Routes
+fastify.register(registerAdminSocketRoute);
 fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
 fastify.register(registerAdminPlaneIntegrationRoutes);
