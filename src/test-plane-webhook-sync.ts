@@ -8,8 +8,12 @@ import {
   PlaneWebhookService,
   verifyPlaneWebhookSignature,
 } from "./services/planeWebhookService";
+import { planeStatusToLifecycle } from "./domain/ticket/TicketLifecycle";
 
 async function run(): Promise<void> {
+  // These map a Plane webhook state onto Plane's own vocabulary, which is
+  // what tickets.plane_status stores. The lifecycle mapping is separate and
+  // lives in TicketLifecycle.planeStatusToLifecycle.
   assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Backlog", group: "backlog" }), "Backlog");
   assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Done", group: "completed" }), "Done");
   assert.strictEqual(mapPlaneStateToTicketStatus({ name: "Todo", group: "unstarted" }), "Todo");
@@ -63,30 +67,38 @@ async function run(): Promise<void> {
   });
   const result = await service.sync(payload);
 
+  // Since migration 040 the adapter only receives priority. Status goes
+  // through TicketStateMachine, which owns the asymmetric reverse mapping
+  // (Plane "Done" -> TicketX RESOLVED, never CLOSED) and the audit trail.
   assert.deepStrictEqual(captured, {
     planeIssueId: "plane-issue-1",
-    changes: { status: "Done", priority: "High" },
+    changes: { priority: "High" },
   });
   assert.strictEqual(result.processed, true);
-  assert.strictEqual(result.matched, true);
-  assert.strictEqual(doneNotificationCount, 1);
 
-  await service.sync(payload);
-  assert.strictEqual(doneNotificationCount, 1, "Repeated Done sync must not notify twice");
+  // The state machine needs a real ticket row to act on, which this fake
+  // adapter does not provide, so the lifecycle half of this path is covered
+  // against the live database in test/domain/TicketStateMachine.live.test.ts
+  // ("applyPlaneStatus: Plane Done resolves but never closes"), including
+  // that a repeated Done does not notify twice.
 
-  await service.sync({
-    event: "issue",
-    action: "update",
-    data: {
-      id: "plane-issue-1",
-      completed_at: "2026-07-31T00:00:00.000Z",
-      state_detail: { name: "Cancelled", group: "cancelled" },
-    },
-  });
-  assert.deepStrictEqual(captured, {
-    planeIssueId: "plane-issue-1",
-    changes: { status: "Cancelled", priority: undefined },
-  });
+  // Plane sets completed_at on cancelled work items too. Cancelled must never
+  // be flattened into Done — that would take the ticket down the resolution
+  // path and ask the customer to confirm a fix that never happened.
+  //
+  // The adapter no longer sees status, so the property is asserted where it
+  // now lives: the state resolver, and the lifecycle mapping it feeds.
+  assert.strictEqual(
+    mapPlaneStateToTicketStatus({ name: "Cancelled", group: "cancelled" }),
+    "Cancelled",
+    "a cancelled Plane state must stay Cancelled even when completed_at is set"
+  );
+  assert.strictEqual(
+    planeStatusToLifecycle("Cancelled", "IN_PROGRESS"),
+    "CANCELLED",
+    "Cancelled must map to CANCELLED, never RESOLVED"
+  );
+  assert.notStrictEqual(planeStatusToLifecycle("Cancelled", "IN_PROGRESS"), "RESOLVED");
 
   const deleteResult = await service.sync({
     event: "issue",
