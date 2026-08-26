@@ -4,6 +4,7 @@ import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
 import { runWithContext } from "../../kernel/context/RequestContextHolder";
 import { JobPayload } from "../../queue/types";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("ProcessIncomingMessageWorker");
 
@@ -12,7 +13,7 @@ export class ProcessIncomingMessageWorker {
   private redisConnection: Redis;
 
   constructor(handler: (job: JobPayload) => Promise<any>) {
-    this.redisConnection = new Redis(config.REDIS_URL, {
+    this.redisConnection = createRedisClient("process-incoming-message-worker", {
       maxRetriesPerRequest: null, // Required by BullMQ
       enableOfflineQueue: true,
     });
@@ -99,7 +100,7 @@ export class ProcessIncomingMessageWorker {
                 if (convRes.rows.length > 0) {
                   const conversationId = convRes.rows[0].id;
                   const ticketRes = await pool.query(
-                    "SELECT id FROM tickets WHERE conversation_id = $1 AND LOWER(status) NOT IN ('closed', 'done', 'cancelled', 'canceled', 'merged') LIMIT 1",
+                    "SELECT id FROM tickets WHERE conversation_id = $1 AND status NOT IN ('CLOSED', 'CANCELLED', 'CUSTOMER_CONFIRMED') LIMIT 1",
                     [conversationId]
                   );
                   

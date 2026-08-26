@@ -116,15 +116,17 @@ export class PostgresAdapter implements DatabaseAdapter {
       }
 
       const { rows } = await pool.query(
-        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, created_via, project_id, severity, due_date, org_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9, $10)
+        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, plane_status, priority, created_via, project_id, severity, due_date, org_id, lifecycle_changed_at)
+         VALUES ($1, $2, $3, $4, $5, 'Backlog', $6, 'ai', $7, $8, $9, $10, NOW())
          RETURNING *`,
         [
           ticketNumber,
           parsedConvId,
           input.subject,
           input.summary,
-          "Backlog",
+          // Lifecycle NEW. Plane's own state (Backlog) is set separately in
+          // plane_status; tickets.status is the customer lifecycle now.
+          "NEW",
           mapPlanePriorityToTicketPriority(input.priority) || input.priority,
           parsedProjectId,
           input.severity,
@@ -825,6 +827,34 @@ export class PostgresAdapter implements DatabaseAdapter {
     }
   }
 
+
+  /**
+   * Hard tenant boundary applied on top of any caller-supplied filter.
+   *
+   * Returns a SQL condition restricting rows to the projects the request is
+   * allowed to see, or null when the caller is unrestricted. Callers that
+   * pass a plain orgId string (legacy signature) get null, preserving their
+   * existing behaviour.
+   */
+  private buildProjectBoundary(
+    tenantCtx: TenantContext | string | undefined,
+    column: string,
+    queryParams: any[]
+  ): string | null {
+    if (!tenantCtx || typeof tenantCtx === "string") return null;
+
+    const allowed = tenantCtx.allowedProjectIds;
+    if (allowed === null || allowed === undefined) return null;
+
+    if (allowed.length === 0) {
+      // Authenticated but granted nothing: match no rows rather than all.
+      return "FALSE";
+    }
+
+    queryParams.push(allowed as number[]);
+    return `${column} = ANY($${queryParams.length}::int[])`;
+  }
+
   async listAllTickets(conversationId?: string, projectId?: string, profileId?: string, identityId?: string, tenantCtx?: TenantContext | string): Promise<any[]> {
     const orgId = typeof tenantCtx === "string" ? tenantCtx : (tenantCtx?.orgId || "org_default");
     const fallback = async () => {
@@ -869,11 +899,19 @@ export class PostgresAdapter implements DatabaseAdapter {
         conditions.push(`t.project_id = $${queryParams.length}`);
       }
     }
+    // Applied regardless of what the caller asked for. Note the org filter
+    // above is skipped whenever a specific project is named, so without this
+    // a caller could read another organization's tickets simply by supplying
+    // that organization's project id.
+    const ticketBoundary = this.buildProjectBoundary(tenantCtx, "t.project_id", queryParams);
+    if (ticketBoundary) {
+      conditions.push(ticketBoundary);
+    }
     if (identityId) {
       const parsed = parseInt(identityId, 10);
       if (isNaN(parsed)) return [];
       queryParams.push(parsed);
-      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length}::varchar)`);
+      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length})`);
     }
     if (profileId) {
       const parsed = parseInt(profileId, 10);
@@ -957,6 +995,13 @@ export class PostgresAdapter implements DatabaseAdapter {
         queryParams.push(parsedProjectId);
         conditions.push(`c.project_id = $${queryParams.length}`);
       }
+    }
+    // See the note in listAllTickets: the org filter above is bypassed when a
+    // specific project is named, so this boundary is what actually contains
+    // the request.
+    const convBoundary = this.buildProjectBoundary(tenantCtx, "c.project_id", queryParams);
+    if (convBoundary) {
+      conditions.push(convBoundary);
     }
 
     let query = `

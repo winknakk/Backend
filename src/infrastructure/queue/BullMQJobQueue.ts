@@ -4,6 +4,7 @@ import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
 import { IJobQueue, JobPayload, JobStatus } from "../../queue/types";
 import { ProcessIncomingMessageWorker } from "../../application/jobs/ProcessIncomingMessageWorker";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("BullMQJobQueue");
 
@@ -18,7 +19,7 @@ export class BullMQJobQueue implements IJobQueue {
   private worker: ProcessIncomingMessageWorker | null = null;
 
   constructor() {
-    this.redisConnection = new Redis(config.REDIS_URL, {
+    this.redisConnection = createRedisClient("bullmq-job-queue", {
       maxRetriesPerRequest: null, // Required by BullMQ
       enableOfflineQueue: true,
     });

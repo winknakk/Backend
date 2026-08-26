@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import type { FastifyInstance } from "fastify";
 import axios from "axios";
 import { config } from "../config/env";
 import { AdapterFactory } from "../adapters/AdapterFactory";
@@ -61,7 +62,10 @@ import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
 import rootLogger, { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
-import { authHook } from "../middleware/auth";
+import { authHook, authenticateToken, internalApiGuard } from "../middleware/auth";
+import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
+import { tenantScopeHook, resolveProjectFilter, resolveTenantScope } from "../middleware/tenantScope";
+import { adminSocketRegistry } from "./AdminSocketRegistry";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
 import { SmsNotificationService } from "../services/SmsNotificationService";
@@ -97,8 +101,44 @@ fastify.addContentTypeParser("application/json", { parseAs: "buffer" }, (request
 });
 fastify.register(websocketPlugin);
 fastify.register(tenantPlugin);
-const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
-const adminConnections = new Map<any, string>();
+/**
+ * Publisher for outbound WebChat delivery.
+ *
+ * Only constructed when Redis is actually the configured provider. It used to
+ * be created unconditionally, so with the default in-memory providers the
+ * process emitted a continuous stream of
+ * "[ioredis] Unhandled error event: connect ECONNREFUSED 127.0.0.1:6379".
+ * That noise is what buried the fatal error behind RUN-02.
+ */
+const redisEnabled = config.QUEUE_PROVIDER === "redis" || config.CACHE_PROVIDER === "redis";
+const redisPub: Redis | null = redisEnabled
+  ? new Redis(config.REDIS_URL, { maxRetriesPerRequest: null })
+  : null;
+
+if (redisPub) {
+  // Without a listener, ioredis emits an unhandled 'error' event.
+  redisPub.on("error", (err: any) => {
+    serverLogger.warn({ error: err?.message }, "Redis publisher error");
+  });
+} else {
+  serverLogger.info(
+    { queueProvider: config.QUEUE_PROVIDER, cacheProvider: config.CACHE_PROVIDER },
+    "Redis publisher disabled; WebChat outbound events will not be published"
+  );
+}
+
+/** Publishes only when Redis is configured; a no-op otherwise. */
+async function publishOutbound(channel: string, payload: string): Promise<void> {
+  if (!redisPub) return;
+  try {
+    await redisPub.publish(channel, payload);
+  } catch (err: any) {
+    // Delivery over Redis is best-effort: the message is already persisted,
+    // and failing here must not abort the caller's request.
+    serverLogger.warn({ error: err.message, channel }, "Failed to publish outbound event");
+  }
+}
+
 
 // 1. Initialize Core Services (Adapter & Service Layers)
 const dbAdapter = AdapterFactory.getAdapter();
@@ -176,7 +216,7 @@ async function requestHumanTakeover(input: {
   try {
     const result = await pool.query(
       `SELECT p.name, c.project_id FROM conversations c
-       JOIN identities i ON c.identity_id = i.id::varchar
+       JOIN identities i ON c.identity_id = i.id
        JOIN profiles p ON i.profile_id = p.id
        WHERE c.id = $1::integer`,
       [conversationId]
@@ -199,13 +239,12 @@ async function requestHumanTakeover(input: {
       expiresAt: takeoverState.leaseExpiresAt,
     },
   });
-  for (const [adminSocket] of adminConnections) {
-    if (adminSocket.readyState === 1) {
-      adminSocket.send(notification);
-    }
-  }
+  // Scoped to the conversation's project. This loop previously sent to every
+  // connected admin socket, so a takeover request in one project was
+  // delivered to operators of every other project.
+  adminSocketRegistry.broadcastToProject(conversationProjectId, notification);
 
-  await redisPub.publish(
+  await publishOutbound(
     "webchat:outbound",
     JSON.stringify({
       conversationId,
@@ -231,7 +270,7 @@ async function requestHumanTakeover(input: {
     });
   }
 
-  let smsTargetPhone = "0633628242";
+  let smsTargetPhone = "";
   try {
     const projAdminResult = await pool.query(
       `SELECT phone_number FROM operators o
@@ -321,17 +360,85 @@ fastify.addHook("onRequest", (request, reply, done) => {
   });
 });
 
+// Origins permitted to make credentialed browser requests. Reflecting an
+// arbitrary Origin alongside Access-Control-Allow-Credentials would let any
+// site issue authenticated cross-origin calls, so the header is only echoed
+// back for origins on this list.
+const allowedOrigins = new Set(
+  config.CORS_ALLOWED_ORIGINS.split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0)
+);
+
 fastify.addHook("onRequest", async (request, reply) => {
-  reply.header("Access-Control-Allow-Origin", "*");
-  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Org-Id, x-org-id, X-Identity-Id, x-identity-id, X-Project-Id, x-project-id, x-correlation-id, *");
-  if (request.method === "OPTIONS") {
-    return reply.code(200).send();
+  const origin = request.headers.origin;
+
+  // Vary is required whenever the response depends on Origin, otherwise a
+  // shared cache can serve one origin's CORS headers to another.
+  reply.header("Vary", "Origin");
+
+  if (origin && allowedOrigins.has(origin)) {
+    reply.header("Access-Control-Allow-Origin", origin);
+    reply.header("Access-Control-Allow-Credentials", "true");
+    reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+    reply.header(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, X-Org-Id, x-org-id, X-Identity-Id, x-identity-id, X-Project-Id, x-project-id, x-correlation-id, x-request-id, x-trace-id"
+    );
+    reply.header("Access-Control-Max-Age", "600");
+  } else if (origin) {
+    serverLogger.warn({ origin, url: request.url }, "Rejected cross-origin request from unlisted origin");
   }
+
+  if (request.method === "OPTIONS") {
+    // A preflight from an unlisted origin gets no CORS headers, so the browser
+    // blocks the real request regardless of the status code returned here.
+    return reply.code(origin && allowedOrigins.has(origin) ? 204 : 403).send();
+  }
+});
+
+/**
+ * Global error handler.
+ *
+ * Without one, Fastify serialises the thrown error straight to the client —
+ * a database failure surfaced as {"statusCode":500,"code":"22P02",...},
+ * disclosing the driver, the error taxonomy and sometimes the query. Clients
+ * now get a correlation id they can quote; the detail stays in the log.
+ */
+fastify.setErrorHandler((error: any, request, reply) => {
+  const statusCode = error.statusCode && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 500;
+  const correlationId = (reply.getHeader("x-correlation-id") as string) || request.id;
+
+  if (statusCode >= 500) {
+    serverLogger.error(
+      { correlationId, url: request.url, method: request.method, code: error.code, error: error.message, stack: error.stack },
+      "Unhandled error while serving request"
+    );
+    return reply.status(500).send({
+      error: "Internal Server Error",
+      message: "The request could not be completed",
+      correlationId,
+    });
+  }
+
+  // 4xx are caller errors: the message is safe and useful to return.
+  serverLogger.warn({ correlationId, url: request.url, statusCode, error: error.message }, "Request rejected");
+  return reply.status(statusCode).send({
+    error: error.name || "Bad Request",
+    message: error.message,
+    correlationId,
+  });
 });
 
 fastify.addHook("onRequest", rateLimitHook);
 fastify.addHook("onRequest", authHook);
+// Service-only gate for /api/v1/internal/*. Runs after authHook so the
+// principal is known; a human session must not confer machine access.
+fastify.addHook("onRequest", internalApiGuard);
+// preHandler, not onRequest: it must observe request.principal (authHook) and
+// the base tenantContext (tenantPlugin, registered as a plugin and therefore
+// hooked during boot rather than here).
+fastify.addHook("preHandler", tenantScopeHook);
 fastify.addHook("preValidation", webhookSignatureHook);
 fastify.addHook("onRequest", async (request) => {
   if (request.url === "/webhook/message" && request.method === "POST") {
@@ -405,7 +512,7 @@ async function bootstrap() {
 
         if (!suppressReply) {
           const sessionContext = await memoryService.loadSessionContext(job.data.senderId, "WebChat");
-          await redisPub.publish(
+          await publishOutbound(
             "webchat:outbound",
             JSON.stringify({
               conversationId: convId || sessionContext.conversationId,
@@ -754,24 +861,65 @@ fastify.post("/api/v1/internal/tickets", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
 
-  let conversationId = payload.conversationId;
+  // A ticket must be attached to an explicitly identified conversation.
+  //
+  // This used to fall back to `SELECT id FROM conversations WHERE
+  // status = 'open' ORDER BY created_at DESC LIMIT 1` — unscoped by
+  // organization or project — so a request with a missing or malformed
+  // conversationId silently attached the ticket to whichever conversation
+  // was most recently opened anywhere on the platform, potentially another
+  // customer in another organization.
+  const conversationId = payload.conversationId;
   const parsedConvId = parseInt(String(conversationId), 10);
   if (!conversationId || isNaN(parsedConvId) || parsedConvId <= 0) {
-    const convRes = await pool.query(
-      `SELECT id FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+    serverLogger.warn(
+      { conversationId, projectId: payload.projectId },
+      "Rejected internal ticket creation without a valid conversationId"
     );
-    if (convRes.rows.length > 0) {
-      conversationId = convRes.rows[0].id.toString();
-    }
+    return reply.code(400).send({
+      error: "Bad Request",
+      code: "CONVERSATION_ID_REQUIRED",
+      message: "A valid conversationId is required to create a ticket",
+    });
+  }
+
+  // The conversation must exist, and the ticket must be filed against that
+  // conversation's own project rather than a caller-supplied one.
+  const convRes = await pool.query(
+    `SELECT id, project_id, org_id FROM conversations
+      WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+    [parsedConvId]
+  );
+  if (convRes.rows.length === 0) {
+    return reply.code(404).send({
+      error: "Not Found",
+      code: "CONVERSATION_NOT_FOUND",
+      message: `Conversation ${parsedConvId} does not exist`,
+    });
+  }
+
+  const conversation = convRes.rows[0];
+  const requestedProjectId = payload.projectId ? String(payload.projectId) : null;
+  if (requestedProjectId && String(conversation.project_id) !== requestedProjectId) {
+    serverLogger.warn(
+      { conversationId: parsedConvId, requestedProjectId, actualProjectId: conversation.project_id },
+      "Rejected internal ticket creation with mismatched project"
+    );
+    return reply.code(409).send({
+      error: "Conflict",
+      code: "PROJECT_MISMATCH",
+      message: `Conversation ${parsedConvId} belongs to project ${conversation.project_id}`,
+    });
   }
 
   const result = await ticketService.createTicket({
-    conversationId,
+    conversationId: String(conversation.id),
     subject: payload.subject || "No Subject Provided",
     summary: payload.summary || "No Summary Provided",
     severity: payload.severity || "Medium",
     priority: payload.priority || "P3",
-    projectId: payload.projectId || "1",
+    // Derived from the conversation, never defaulted to "1".
+    projectId: String(conversation.project_id),
   });
   if (!result.success || !result.data) {
     return reply.code(200).send(result);
@@ -868,9 +1016,6 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
     status: state.status,
     suppress_reply: true,
     expires_at: state.leaseExpiresAt,
-    admin_phone_number: (state as any).smsTargetPhone,
-    sms_provider_url: (state as any).smsProviderUrl,
-    sms_provider_token: (state as any).smsProviderToken
   });
 });
 
@@ -893,17 +1038,107 @@ fastify.post("/api/v1/internal/notifications/sms", async (request, reply) => {
   return reply.code(200).send({ success: true, sent: result });
 });
 
-fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
-  const socket = (connection as any).socket;
-  const projectId = String((req.query as any)?.projectId || req.headers["x-project-id"] || "1");
-  serverLogger.info({ projectId }, "Admin WebSocket connection established");
-  adminConnections.set(socket, projectId);
+/**
+ * Admin realtime socket.
+ *
+ * Registered through fastify.register() rather than declared inline: routes
+ * added at module scope are processed before @fastify/websocket installs its
+ * onRoute hook, so `{ websocket: true }` was silently ignored and the route
+ * answered the upgrade with a plain HTTP 200. It never upgraded at all.
+ */
+export async function registerAdminSocketRoute(fastify: FastifyInstance): Promise<void> {
+  fastify.get("/api/admin/socket", { websocket: true }, async (connection: any, req: any) => {
+  // @fastify/websocket v11 passes the WebSocket directly; older versions
+  // wrapped it in { socket }. Support both so the guard cannot be skipped by
+  // an undefined reference.
+  const socket = (connection as any).socket || (connection as any);
+
+  const closeWith = (code: number, reason: string) => {
+    try {
+      socket.close(code, reason);
+    } catch {
+      /* socket already gone */
+    }
+  };
+
+  // authHook already authenticated the upgrade request, but @fastify/websocket
+  // does not carry request decorations through to this handler, so the
+  // credential is re-verified here via the same shared helper. Browsers cannot
+  // set headers on a handshake, hence the ?token= parameter.
+  //
+  // The previous guard read `if (config.API_KEY && token !== API_KEY)`, which
+  // short-circuited to "accept" whenever API_KEY was unset — which it was.
+  // @fastify/websocket does not populate req.query for upgrade requests, so
+  // the parameters are read from the raw URL.
+  const wsParams = new URL(req.url || "", "http://localhost").searchParams;
+
+  const rawToken = String(
+    wsParams.get("token") || (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "")
+  ).trim();
+
+  const principal: AuthPrincipal | null = authenticateToken(rawToken);
+  if (!principal) {
+    serverLogger.warn({ ip: req.ip }, "Rejected WebSocket connection with invalid credential");
+    closeWith(4001, "Unauthorized");
+    return;
+  }
+
+  let scope;
+  try {
+    scope = await resolveTenantScope(principal);
+  } catch (err: any) {
+    serverLogger.error({ error: err.message }, "Failed to resolve tenant scope for WebSocket");
+    closeWith(4011, "Scope unavailable");
+    return;
+  }
+
+  // A socket may narrow itself to one project, but never widen beyond its
+  // principal's scope. The requested project used to be trusted verbatim.
+  const requestedProjectId = String(wsParams.get("projectId") || "").trim();
+  let projectIds: number[] | null = scope.unrestricted ? null : scope.projectIds;
+
+  if (requestedProjectId && requestedProjectId.toLowerCase() !== "all") {
+    if (!/^[0-9]+$/.test(requestedProjectId)) {
+      closeWith(4003, "Invalid projectId");
+      return;
+    }
+    const requested = parseInt(requestedProjectId, 10);
+    if (!scope.unrestricted && !scope.projectIds.includes(requested)) {
+      serverLogger.warn(
+        { ip: req.ip, principal: principal.subject, requested, allowed: scope.projectIds },
+        "Rejected WebSocket subscription to an out-of-scope project"
+      );
+      closeWith(4003, "Forbidden");
+      return;
+    }
+    projectIds = [requested];
+  }
+
+  if (projectIds !== null && projectIds.length === 0) {
+    serverLogger.warn({ principal: principal.subject }, "Rejected WebSocket for account with no project access");
+    closeWith(4003, "Forbidden");
+    return;
+  }
+
+  serverLogger.info(
+    { principal: principal.subject, role: principal.role, projectIds: projectIds ?? "all" },
+    "Admin WebSocket connection established"
+  );
+  adminSocketRegistry.add(socket, { principal, projectIds });
 
   socket.on("close", () => {
-    adminConnections.delete(socket);
-    serverLogger.info("Admin WebSocket connection closed");
+    adminSocketRegistry.remove(socket);
+    serverLogger.info({ principal: principal.subject }, "Admin WebSocket connection closed");
+  });
+
+  socket.on("error", (err: any) => {
+    // Without this listener a socket-level error becomes an unhandled 'error'
+    // event, which terminates the process (see RUN-02).
+    serverLogger.warn({ error: err?.message }, "Admin WebSocket error");
+    adminSocketRegistry.remove(socket);
   });
 });
+}
 
 fastify.post("/api/v1/webhooks/human_notify", async (request, reply) => {
   const body = request.body as any;
@@ -959,7 +1194,6 @@ fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
       statusCode: 500,
       error: "Internal Server Error",
       message: err.message || String(err),
-      stack: err.stack,
     });
   }
 });
@@ -1141,9 +1375,12 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   try {
     await client.query("BEGIN");
 
+    // Restoring a cancelled ticket is a REOPENED transition. This wrote the
+    // literal 'open' before, which is in neither vocabulary and now violates
+    // the tickets_status_lifecycle_check constraint added in migration 040.
     const query = isNumeric
-      ? `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE id = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`
-      : `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE ticket_number = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`;
+      ? `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE id = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`
+      : `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE ticket_number = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`;
     
     const queryArgs = orgId
       ? [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr, String(orgId)]
@@ -1422,47 +1659,73 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   const status = query.status || "open";
   const projectId = query.projectId || request.headers["x-project-id"];
 
+  // Every branch below resolves to exactly one conversation by an identifier
+  // the caller supplied. None of them falls back to "the most recent open
+  // conversation" — that fallback previously attached callers to unrelated
+  // customers, and in the PromptX branch it also rewrote the other
+  // conversation's promptx_conversation_id, permanently hijacking the thread.
   let res;
   const parsedConversationId = parseInt(String(conversationId), 10);
+  const parsedProjectId = projectId ? parseInt(String(projectId), 10) : NaN;
+  const hasProjectScope = Number.isInteger(parsedProjectId) && parsedProjectId > 0;
+
   if (conversationId && Number.isInteger(parsedConversationId) && parsedConversationId > 0) {
-    res = await pool.query(
-      `SELECT * FROM conversations WHERE id = $1 AND status = $2 LIMIT 1`,
-      [parsedConversationId, status]
-    );
+    // Direct lookup by id, constrained to the caller's project when one is
+    // supplied so an id from another project cannot be probed.
+    res = hasProjectScope
+      ? await pool.query(
+          `SELECT * FROM conversations WHERE id = $1 AND status = $2 AND project_id = $3 AND deleted_at IS NULL LIMIT 1`,
+          [parsedConversationId, status, parsedProjectId]
+        )
+      : await pool.query(
+          `SELECT * FROM conversations WHERE id = $1 AND status = $2 AND deleted_at IS NULL LIMIT 1`,
+          [parsedConversationId, status]
+        );
   } else {
     const isPromptXId = String(identityId).startsWith("convo_") ||
       /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(identityId));
 
     if (isPromptXId) {
-    res = await pool.query(
-      `SELECT * FROM conversations WHERE promptx_conversation_id = $1 LIMIT 1`,
-      [identityId]
-    );
-    if (res.rows.length === 0) {
-      const fallbackRes = await pool.query(
-        `SELECT * FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+      // Exact match only. An unknown PromptX conversation id resolves to
+      // nothing, which the caller sees as an empty result.
+      res = await pool.query(
+        `SELECT * FROM conversations WHERE promptx_conversation_id = $1 AND deleted_at IS NULL LIMIT 1`,
+        [identityId]
       );
-      if (fallbackRes.rows.length > 0) {
-        const convId = fallbackRes.rows[0].id;
-        await pool.query(
-          `UPDATE conversations SET promptx_conversation_id = $1 WHERE id = $2`,
-          [identityId, convId]
-        );
-        res = fallbackRes;
-      }
-    }
+    } else if (hasProjectScope) {
+      // identityId may be an internal numeric identity id or a channel
+      // reference (a LINE user id). conversations.identity_id is numeric, so
+      // passing a channel reference straight into the comparison produced a
+      // Postgres 22P02 and a 500.
+      const numericIdentityId = /^[0-9]+$/.test(String(identityId)) ? String(identityId) : null;
+
+      res = numericIdentityId
+        ? await pool.query(
+            `SELECT * FROM conversations
+              WHERE identity_id = $1 AND status = $2 AND project_id = $3 AND deleted_at IS NULL
+              ORDER BY created_at DESC LIMIT 1`,
+            [numericIdentityId, status, parsedProjectId]
+          )
+        : await pool.query(
+            `SELECT c.* FROM conversations c
+               JOIN identities i ON c.identity_id = i.id
+              WHERE i.channel_ref = $1 AND c.status = $2 AND c.project_id = $3 AND c.deleted_at IS NULL
+              ORDER BY c.created_at DESC LIMIT 1`,
+            [String(identityId), status, parsedProjectId]
+          );
     } else {
-      if (projectId) {
-        res = await pool.query(
-          `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
-          [identityId, status, parseInt(String(projectId), 10) || null]
-        );
-      } else {
-        res = await pool.query(
-          `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
-          [identityId, status]
-        );
-      }
+      // An identity can be enrolled in several projects, so resolving by
+      // identity alone can return a conversation from a project the caller
+      // did not mean. Require the project to be named.
+      serverLogger.warn(
+        { identityId },
+        "Rejected conversation search by identity without a project scope"
+      );
+      return reply.code(400).send({
+        error: "Bad Request",
+        code: "PROJECT_SCOPE_REQUIRED",
+        message: "projectId is required when searching by identityId",
+      });
     }
   }
 
@@ -1477,7 +1740,9 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
       `SELECT id, ticket_number, ticket_id, status, due_date
        FROM tickets
        WHERE conversation_id = $1
-         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'merged', 'cancelled', 'canceled')
+         -- Terminal lifecycle states. RESOLVED is deliberately NOT here: a
+         -- resolved ticket is still open business until the customer confirms.
+         AND status NOT IN ('CLOSED', 'CANCELLED', 'CUSTOMER_CONFIRMED')
          AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
              = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
        ORDER BY created_at DESC
@@ -1902,11 +2167,7 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
         messageType
       }
     });
-    for (const [adminSocket] of adminConnections) {
-      if (adminSocket.readyState === 1) {
-        adminSocket.send(notifyPayload);
-      }
-    }
+    adminSocketRegistry.broadcastToProject(conversationProjectId, notifyPayload);
 
     return reply.code(200).send({
       identity,
@@ -1944,6 +2205,7 @@ registerAdminRoutes(fastify, {
 fastify.register(WebChatGateway);
 
 // Register Auth, Master Data, & Customer Portal Routes
+fastify.register(registerAdminSocketRoute);
 fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
 fastify.register(registerAdminPlaneIntegrationRoutes);

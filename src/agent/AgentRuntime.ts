@@ -116,16 +116,18 @@ export class AgentRuntime implements IAgentSession {
     let activeTicket = await this.ticketResolver.resolveActiveTicket(conversationId);
 
     // Dynamic JIT escalation check:
-    // If no active ticket exists AND the user indicates a service request / issue, create a JIT ticket
+    // Only escalate if clear system failure / error patterns are matched, avoiding false triggers on general words like 'help'
+    const lowerInput = sanitizedInput.toLowerCase();
     const needsTicketEscalation = !activeTicket && (
-      sanitizedInput.toLowerCase().includes("พัง") ||
-      sanitizedInput.toLowerCase().includes("ล่ม") ||
-      sanitizedInput.toLowerCase().includes("error") ||
-      sanitizedInput.toLowerCase().includes("broken") ||
-      sanitizedInput.toLowerCase().includes("fail") ||
-      sanitizedInput.toLowerCase().includes("issue") ||
-      sanitizedInput.toLowerCase().includes("ticket") ||
-      sanitizedInput.toLowerCase().includes("help")
+      lowerInput.includes("พัง") ||
+      lowerInput.includes("ล่ม") ||
+      lowerInput.includes("เข้าใช้งานไม่ได้") ||
+      lowerInput.includes("ระบบมีปัญหา") ||
+      lowerInput.includes("error 5") ||
+      lowerInput.includes("error 4") ||
+      lowerInput.includes("bug") ||
+      lowerInput.includes("crash") ||
+      lowerInput.includes("fatal")
     );
 
     if (needsTicketEscalation) {

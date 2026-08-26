@@ -7,6 +7,8 @@ const logger = createLogger("PlaneReverseSyncPoller");
 export class PlaneReverseSyncPoller {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  /** Epoch ms before which no further polling is attempted. */
+  private cooldownUntil = 0;
 
   constructor(private readonly planeWebhookService: PlaneWebhookService) {}
 
@@ -32,10 +34,33 @@ export class PlaneReverseSyncPoller {
 
   async runOnce(): Promise<void> {
     if (this.running) return;
+
+    // Respect a cooldown imposed by Plane rate limiting. Polling straight
+    // through a 429 is what turned a healthy cycle into one where most items
+    // failed: the poller re-fetched all 19 linked work items every 30
+    // seconds and Plane progressively throttled it.
+    if (Date.now() < this.cooldownUntil) {
+      logger.debug(
+        { resumesInMs: this.cooldownUntil - Date.now() },
+        "Plane reverse sync is in rate-limit cooldown; skipping this cycle"
+      );
+      return;
+    }
+
     this.running = true;
     try {
       const summary = await this.planeWebhookService.syncLinkedTicketsFromPlane();
-      logger.info(summary, "Plane reverse sync polling completed");
+
+      if (summary.rateLimited) {
+        this.cooldownUntil = Date.now() + (summary.retryAfterMs || 60_000);
+        logger.warn(
+          { ...summary, cooldownMs: summary.retryAfterMs },
+          "Plane reverse sync paused after rate limiting"
+        );
+      } else {
+        this.cooldownUntil = 0;
+        logger.info(summary, "Plane reverse sync polling completed");
+      }
     } catch (error: any) {
       logger.error({ error: error.message }, "Plane reverse sync polling failed");
     } finally {

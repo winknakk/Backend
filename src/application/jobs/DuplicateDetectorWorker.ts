@@ -9,6 +9,7 @@ import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicket
 import { PostgresTicketEventRepository } from "../../infrastructure/db/PostgresTicketEventRepository";
 import { BullMQEventPublisher } from "../../infrastructure/queue/BullMQEventPublisher";
 import { SubjectMatchingDuplicateStrategy } from "../../domain/strategies/DuplicateDetectionStrategy";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("DuplicateDetectorWorker");
 
@@ -17,7 +18,7 @@ export class DuplicateDetectorWorker {
   private redisConnection: Redis;
 
   constructor() {
-    this.redisConnection = new Redis(config.REDIS_URL, {
+    this.redisConnection = createRedisClient("duplicate-detector-worker", {
       maxRetriesPerRequest: null,
       enableOfflineQueue: true,
     });

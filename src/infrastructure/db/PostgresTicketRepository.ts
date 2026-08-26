@@ -45,7 +45,7 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
        FROM tickets
        WHERE conversation_id = $1
          AND deleted_at IS NULL
-         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'merged', 'cancelled', 'canceled')
+         AND status NOT IN ('CLOSED', 'CANCELLED', 'CUSTOMER_CONFIRMED')
          AND (
            LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
              = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
@@ -72,7 +72,7 @@ export class PostgresTicketRepository extends BaseRepository<Ticket, number> {
        WHERE project_id = $1 
          AND conversation_id IS NOT NULL
          AND deleted_at IS NULL
-         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'cancelled', 'canceled', 'merged')`,
+         AND status NOT IN ('CLOSED', 'CANCELLED', 'CUSTOMER_CONFIRMED')`,
       [projectId]
     );
     return rows.map((r: any) => TicketMapper.toDomain(r));

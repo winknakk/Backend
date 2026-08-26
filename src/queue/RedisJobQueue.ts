@@ -4,6 +4,7 @@ import { IJobQueue, JobPayload } from "./types";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { runWithContext } from "../observability/tracer";
+import { createRedisClient } from "../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("RedisJobQueue");
 
@@ -15,7 +16,7 @@ export class RedisJobQueue implements IJobQueue {
 
   constructor() {
     logger.info(`Connecting to Redis for Job Queue at: ${config.REDIS_URL}`);
-    this.redisClient = new Redis(config.REDIS_URL, {
+    this.redisClient = createRedisClient("redis-job-queue", {
       maxRetriesPerRequest: 3,
       enableOfflineQueue: false,
     });

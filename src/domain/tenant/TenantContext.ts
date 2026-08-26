@@ -9,6 +9,16 @@ export interface TenantContext {
   readonly permissions: readonly string[];
   readonly correlationId: string;
   readonly timestamp: number;
+  /**
+   * Projects this request may read or write. `null` means unrestricted
+   * (service callers and super_admin only).
+   *
+   * This is a hard boundary applied by the data layer in addition to whatever
+   * the caller asked for. Filtering on a caller-supplied projectId alone is
+   * not authorization: it lets any caller pick another tenant's data by
+   * changing a number.
+   */
+  readonly allowedProjectIds: readonly number[] | null;
 }
 
 export const DEFAULT_TENANT_CONTEXT: TenantContext = Object.freeze({
@@ -20,6 +30,7 @@ export const DEFAULT_TENANT_CONTEXT: TenantContext = Object.freeze({
   permissions: ['*'],
   correlationId: 'fallback_init',
   timestamp: 0,
+  allowedProjectIds: [],
 });
 
 export function createTenantContext(partial: Partial<TenantContext>): TenantContext {
@@ -32,5 +43,11 @@ export function createTenantContext(partial: Partial<TenantContext>): TenantCont
     permissions: partial.permissions ? Object.freeze([...partial.permissions]) : DEFAULT_TENANT_CONTEXT.permissions,
     correlationId: partial.correlationId || `corr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     timestamp: partial.timestamp || Date.now(),
+    allowedProjectIds:
+      partial.allowedProjectIds === null
+        ? null
+        : partial.allowedProjectIds
+          ? Object.freeze([...partial.allowedProjectIds])
+          : DEFAULT_TENANT_CONTEXT.allowedProjectIds,
   });
 }

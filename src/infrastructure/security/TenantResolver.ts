@@ -28,6 +28,15 @@ export class TenantResolver {
       `corr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const timestamp = Date.now();
 
+    // Step 0: Authenticated principal (authoritative).
+    // authHook sets this from a verified session token or the service key. It
+    // is the only tenant signal that cannot be chosen by the caller, so it
+    // takes precedence over every heuristic below.
+    const principalContext = this.resolveFromPrincipal(req, correlationId, timestamp);
+    if (principalContext) {
+      return principalContext;
+    }
+
     // Step 1: JWT Bearer Token Validation (Claims)
     const jwtContext = this.resolveFromJWT(req, correlationId, timestamp);
     if (jwtContext) {
@@ -66,31 +75,60 @@ export class TenantResolver {
       logger.warn({ correlationId, rawHeader: req.headers["x-org-id"] }, "[TenantResolver] Unauthenticated X-Org-Id header ignored");
     }
 
-    // Step 5: Project ID Inference
-    const rawProjectId = (req.headers["x-project-id"] as string) || (req.query as any)?.projectId;
-    if (rawProjectId && rawProjectId !== "all") {
-      return createTenantContext({
-        orgId: "org_default",
-        projectId: String(rawProjectId),
-        source: "fallback",
-        isFallback: true,
-        roles: ["operator"],
-        permissions: ["read"],
-        correlationId,
-        timestamp,
-      });
-    }
-
-    // Step 6: Legacy Fallback Default
+    // Step 5: Unauthenticated fallback.
+    //
+    // There used to be a project-inference step here that read
+    // x-project-id / ?projectId straight off the request and built a context
+    // around it, plus a default that granted roles ['admin'] and
+    // permissions ['*']. Between them, an unauthenticated caller chose their
+    // own tenant and got full privileges inside it.
+    //
+    // Unauthenticated requests now get an explicitly powerless context. Only
+    // routes that do their own verification (signed webhooks, the login
+    // surface, signed media URLs) reach this point at all.
     return createTenantContext({
       orgId: DEFAULT_TENANT_CONTEXT.orgId,
       projectId: DEFAULT_TENANT_CONTEXT.projectId,
       source: "fallback",
       isFallback: true,
-      roles: DEFAULT_TENANT_CONTEXT.roles,
-      permissions: DEFAULT_TENANT_CONTEXT.permissions,
+      roles: [],
+      permissions: [],
       correlationId,
       timestamp,
+    });
+  }
+
+  /**
+   * Builds the tenant context from the verified principal set by authHook.
+   *
+   * projectId is informational only — authorization uses the project list in
+   * request.tenantScope, which is derived from the same principal.
+   */
+  private resolveFromPrincipal(req: FastifyRequest, correlationId: string, timestamp: number): TenantContext | null {
+    const principal = (req as any).principal;
+    if (!principal) return null;
+
+    const isUnrestricted = principal.orgId === null;
+    return createTenantContext({
+      // "org_all" is the sentinel the data layer already understands as "do
+      // not filter by organization". Falling back to org_default here would
+      // silently confine a super_admin (and every service caller) to one
+      // organization's rows.
+      orgId: principal.orgId || "org_all",
+      projectId: Array.isArray(principal.projectIds) && principal.projectIds.length > 0
+        ? String(principal.projectIds[0])
+        : DEFAULT_TENANT_CONTEXT.projectId,
+      source: principal.kind === "service" ? "api_key" : "jwt",
+      isFallback: false,
+      roles: [principal.role],
+      permissions: isUnrestricted ? ["*"] : ["read", "write"],
+      correlationId,
+      timestamp,
+      // Placeholder. tenantScopeHook replaces this with the resolved list once
+      // org-wide scope has been looked up (which needs a query, and resolve()
+      // is synchronous). Defaulting to "no projects" means a missing hook
+      // fails closed rather than open.
+      allowedProjectIds: isUnrestricted ? null : [],
     });
   }
 

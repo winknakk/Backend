@@ -9,6 +9,13 @@ import {
   TicketClosedEvent,
   TicketStatusChangedEvent,
 } from "./TicketEvents";
+import {
+  TERMINAL_STATUSES,
+  TicketLifecycleStatus,
+  TransitionActor,
+  canTransition,
+  isLifecycleStatus,
+} from "../ticket/TicketLifecycle";
 
 export const EnrichmentStates = ["PENDING", "RUNNING", "PARTIAL", "COMPLETED", "FAILED"] as const;
 export type EnrichmentState = (typeof EnrichmentStates)[number];
@@ -101,7 +108,7 @@ export class Ticket extends BaseAggregate<number> {
     this._projectId = props.projectId;
     this._subject = props.subject;
     this._summary = props.summary;
-    this._status = props.status || "open";
+    this._status = props.status || "NEW";
     this._priority = props.priority;
     this._severity = props.severity;
     this._assignedPm = props.assignedPm;
@@ -177,7 +184,9 @@ export class Ticket extends BaseAggregate<number> {
   // Domain Actions
 
   private isTerminalStatus(): boolean {
-    return ["closed", "done", "cancelled", "canceled"].includes(this._status.toLowerCase());
+    // Lifecycle terminal states. RESOLVED is deliberately absent: a resolved
+    // ticket is still open business until the customer confirms it.
+    return TERMINAL_STATUSES.includes(this._status as TicketLifecycleStatus);
   }
 
   private normalizeEnrichmentState(state?: string): EnrichmentState {
@@ -260,7 +269,11 @@ export class Ticket extends BaseAggregate<number> {
     this._duplicateOfTicketId = duplicateOfTicketId;
     this._duplicateScore = score;
     this._duplicateReason = reason;
-    this._status = "merged"; // Transition status to merged automatically
+    // "merged" is not part of the approved lifecycle vocabulary and would
+    // violate tickets_status_lifecycle_check. A merged ticket is a duplicate
+    // folded into another; duplicate_of_ticket_id already records the link,
+    // so CANCELLED expresses it without inventing a twelfth status.
+    this._status = "CANCELLED";
     this._aiConfidenceMetrics = {
       ...this._aiConfidenceMetrics,
       duplicate: score,
@@ -284,15 +297,15 @@ export class Ticket extends BaseAggregate<number> {
     if (!reason || reason.trim().length < 10) {
       throw new Error("A valid cancellation reason of at least 10 characters is required.");
     }
-    this._status = "cancelled";
+    this._status = "CANCELLED";
     this._cancellationReason = reason.trim();
-    this.addDomainEvent(new TicketStatusChangedEvent(this.id!, this.ticketId, "cancelled"));
+    this.addDomainEvent(new TicketStatusChangedEvent(this.id!, this.ticketId, "CANCELLED"));
   }
 
   public restore(): void {
-    this._status = "open";
+    this._status = "REOPENED";
     this._cancellationReason = undefined;
-    this.addDomainEvent(new TicketStatusChangedEvent(this.id!, this.ticketId, "open"));
+    this.addDomainEvent(new TicketStatusChangedEvent(this.id!, this.ticketId, "REOPENED"));
   }
 
   public merge(primaryTicketId: number): void {
@@ -315,48 +328,45 @@ export class Ticket extends BaseAggregate<number> {
     this.addDomainEvent(new TicketAssignedEvent(this.id, agentId));
   }
 
+  /**
+   * Marks engineering work complete. This produces RESOLVED, not CLOSED:
+   * closing requires the customer to confirm, which only
+   * TicketStateMachine can record.
+   */
   public close(): void {
     if (this.isTerminalStatus()) {
       throw new Error("Ticket is already closed");
     }
-    this._status = "Done";
+    this._status = "RESOLVED";
     this.addDomainEvent(new TicketClosedEvent(this.id));
   }
 
   public reopen(): void {
-    if (!["closed", "done", "resolved", "cancelled", "canceled"].includes(this._status.toLowerCase())) {
+    if (!["RESOLVED", "CUSTOMER_CONFIRMED", "CLOSED", "CANCELLED"].includes(this._status)) {
       return;
     }
     const oldStatus = this._status;
-    this._status = "Backlog";
-    this.addDomainEvent(new TicketStatusChangedEvent(this.id, oldStatus, "Backlog"));
+    this._status = "REOPENED";
+    this.addDomainEvent(new TicketStatusChangedEvent(this.id, oldStatus, "REOPENED"));
   }
 
-  public changeStatus(newStatus: string): void {
-    const current = this._status.toLowerCase();
-    const target = newStatus.toLowerCase();
-
-    if (this.isTerminalStatus()) {
-      throw new Error("Closed tickets cannot transition status");
+  /**
+   * Delegates to the shared lifecycle rules rather than keeping a second,
+   * divergent transition table. The old table used Plane's lowercase
+   * vocabulary ("backlog", "in progress", "merged"), which no longer matches
+   * what this column stores.
+   */
+  public changeStatus(newStatus: string, actor: TransitionActor = "operator"): void {
+    if (!isLifecycleStatus(newStatus)) {
+      throw new Error(`Invalid status '${newStatus}'`);
+    }
+    if (!isLifecycleStatus(this._status)) {
+      throw new Error(`Ticket holds a non-lifecycle status '${this._status}'`);
     }
 
-    // Validate state transitions
-    const allowedTransitions: Record<string, string[]> = {
-      new: ["backlog", "done", "cancelled"],
-      backlog: ["todo", "in progress", "done", "cancelled", "merged"],
-      todo: ["backlog", "in progress", "done", "cancelled"],
-      "in progress": ["backlog", "todo", "done", "cancelled"],
-      open: ["backlog", "todo", "in progress", "done", "cancelled", "merged"],
-      in_progress: ["backlog", "todo", "in progress", "done", "cancelled"],
-      waiting_customer: ["backlog", "todo", "in progress", "done", "cancelled"],
-      waiting_agent: ["backlog", "todo", "in progress", "done", "cancelled"],
-      resolved: ["backlog", "done"],
-      merged: ["backlog", "done"],
-    };
-
-    const allowed = allowedTransitions[current] || [];
-    if (!allowed.includes(target)) {
-      throw new Error(`Invalid status transition from ${this._status} to ${newStatus}`);
+    const check = canTransition(this._status as TicketLifecycleStatus, newStatus, actor);
+    if (!check.allowed) {
+      throw new Error(check.reason || `Invalid status transition from ${this._status} to ${newStatus}`);
     }
 
     const oldStatus = this._status;

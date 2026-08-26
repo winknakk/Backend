@@ -5,6 +5,7 @@ import { createLogger } from "../../observability/logger";
 import { runWithContext } from "../../kernel/context/RequestContextHolder";
 import { PlaneService } from "../../services/planeService";
 import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("PlaneSyncWorker");
 
@@ -17,7 +18,7 @@ export class PlaneSyncWorker {
   private planeService: PlaneService;
 
   constructor() {
-    this.redisConnection = new Redis(config.REDIS_URL, {
+    this.redisConnection = createRedisClient("plane-sync-worker", {
       maxRetriesPerRequest: null,
       enableOfflineQueue: true,
     });

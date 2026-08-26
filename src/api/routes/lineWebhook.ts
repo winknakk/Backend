@@ -273,19 +273,40 @@ export function registerLineWebhookRoutes(
               const imageId = String(event.message.id);
               let convId = decision.conversationId;
               if (!convId && event?.source?.userId) {
-                try {
-                  const convRes = await pool.query(
-                    `SELECT c.id FROM conversations c
-                     JOIN identities i ON c.identity_id = i.id::varchar
-                     WHERE i.channel_ref = $1 AND c.status = 'open' AND c.deleted_at IS NULL
-                     ORDER BY c.id DESC LIMIT 1`,
-                    [event.source.userId]
+                // The onboarding decision did not name a conversation, so it
+                // is resolved from the LINE identity. This must be scoped to
+                // the project the decision resolved: a LINE user enrolled in
+                // more than one project would otherwise have their image
+                // attached to whichever conversation happened to be newest,
+                // which can be a different project's thread.
+                if (!decision.projectId) {
+                  logger.warn(
+                    { userId: event.source.userId, imageId },
+                    "Skipping image ingest: no project scope resolved for this event"
                   );
-                  if (convRes.rows.length > 0) {
-                    convId = convRes.rows[0].id;
+                } else {
+                  try {
+                    const convRes = await pool.query(
+                      `SELECT c.id FROM conversations c
+                       JOIN identities i ON c.identity_id = i.id
+                       WHERE i.channel_ref = $1
+                         AND c.project_id = $2
+                         AND c.status = 'open'
+                         AND c.deleted_at IS NULL
+                       ORDER BY c.id DESC LIMIT 1`,
+                      [event.source.userId, decision.projectId]
+                    );
+                    if (convRes.rows.length > 0) {
+                      convId = convRes.rows[0].id;
+                    } else {
+                      logger.warn(
+                        { userId: event.source.userId, projectId: decision.projectId },
+                        "No open conversation in the resolved project for this LINE identity"
+                      );
+                    }
+                  } catch (convErr: any) {
+                    logger.warn({ error: convErr.message }, "Failed to resolve conversation for image");
                   }
-                } catch (convErr: any) {
-                  logger.warn({ error: convErr.message }, "Failed to resolve conversation for image");
                 }
               }
 
