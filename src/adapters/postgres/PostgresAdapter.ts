@@ -909,7 +909,7 @@ export class PostgresAdapter implements DatabaseAdapter {
       const parsed = parseInt(identityId, 10);
       if (isNaN(parsed)) return [];
       queryParams.push(parsed);
-      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length}::varchar)`);
+      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length})`);
     }
     if (profileId) {
       const parsed = parseInt(profileId, 10);

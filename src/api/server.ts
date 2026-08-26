@@ -216,7 +216,7 @@ async function requestHumanTakeover(input: {
   try {
     const result = await pool.query(
       `SELECT p.name, c.project_id FROM conversations c
-       JOIN identities i ON c.identity_id = i.id::varchar
+       JOIN identities i ON c.identity_id = i.id
        JOIN profiles p ON i.profile_id = p.id
        WHERE c.id = $1::integer`,
       [conversationId]
@@ -395,6 +395,39 @@ fastify.addHook("onRequest", async (request, reply) => {
     // blocks the real request regardless of the status code returned here.
     return reply.code(origin && allowedOrigins.has(origin) ? 204 : 403).send();
   }
+});
+
+/**
+ * Global error handler.
+ *
+ * Without one, Fastify serialises the thrown error straight to the client —
+ * a database failure surfaced as {"statusCode":500,"code":"22P02",...},
+ * disclosing the driver, the error taxonomy and sometimes the query. Clients
+ * now get a correlation id they can quote; the detail stays in the log.
+ */
+fastify.setErrorHandler((error: any, request, reply) => {
+  const statusCode = error.statusCode && error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 500;
+  const correlationId = (reply.getHeader("x-correlation-id") as string) || request.id;
+
+  if (statusCode >= 500) {
+    serverLogger.error(
+      { correlationId, url: request.url, method: request.method, code: error.code, error: error.message, stack: error.stack },
+      "Unhandled error while serving request"
+    );
+    return reply.status(500).send({
+      error: "Internal Server Error",
+      message: "The request could not be completed",
+      correlationId,
+    });
+  }
+
+  // 4xx are caller errors: the message is safe and useful to return.
+  serverLogger.warn({ correlationId, url: request.url, statusCode, error: error.message }, "Request rejected");
+  return reply.status(statusCode).send({
+    error: error.name || "Bad Request",
+    message: error.message,
+    correlationId,
+  });
 });
 
 fastify.addHook("onRequest", rateLimitHook);
@@ -825,24 +858,65 @@ fastify.post("/api/v1/internal/tickets", async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
 
-  let conversationId = payload.conversationId;
+  // A ticket must be attached to an explicitly identified conversation.
+  //
+  // This used to fall back to `SELECT id FROM conversations WHERE
+  // status = 'open' ORDER BY created_at DESC LIMIT 1` — unscoped by
+  // organization or project — so a request with a missing or malformed
+  // conversationId silently attached the ticket to whichever conversation
+  // was most recently opened anywhere on the platform, potentially another
+  // customer in another organization.
+  const conversationId = payload.conversationId;
   const parsedConvId = parseInt(String(conversationId), 10);
   if (!conversationId || isNaN(parsedConvId) || parsedConvId <= 0) {
-    const convRes = await pool.query(
-      `SELECT id FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
+    serverLogger.warn(
+      { conversationId, projectId: payload.projectId },
+      "Rejected internal ticket creation without a valid conversationId"
     );
-    if (convRes.rows.length > 0) {
-      conversationId = convRes.rows[0].id.toString();
-    }
+    return reply.code(400).send({
+      error: "Bad Request",
+      code: "CONVERSATION_ID_REQUIRED",
+      message: "A valid conversationId is required to create a ticket",
+    });
+  }
+
+  // The conversation must exist, and the ticket must be filed against that
+  // conversation's own project rather than a caller-supplied one.
+  const convRes = await pool.query(
+    `SELECT id, project_id, org_id FROM conversations
+      WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+    [parsedConvId]
+  );
+  if (convRes.rows.length === 0) {
+    return reply.code(404).send({
+      error: "Not Found",
+      code: "CONVERSATION_NOT_FOUND",
+      message: `Conversation ${parsedConvId} does not exist`,
+    });
+  }
+
+  const conversation = convRes.rows[0];
+  const requestedProjectId = payload.projectId ? String(payload.projectId) : null;
+  if (requestedProjectId && String(conversation.project_id) !== requestedProjectId) {
+    serverLogger.warn(
+      { conversationId: parsedConvId, requestedProjectId, actualProjectId: conversation.project_id },
+      "Rejected internal ticket creation with mismatched project"
+    );
+    return reply.code(409).send({
+      error: "Conflict",
+      code: "PROJECT_MISMATCH",
+      message: `Conversation ${parsedConvId} belongs to project ${conversation.project_id}`,
+    });
   }
 
   const result = await ticketService.createTicket({
-    conversationId,
+    conversationId: String(conversation.id),
     subject: payload.subject || "No Subject Provided",
     summary: payload.summary || "No Summary Provided",
     severity: payload.severity || "Medium",
     priority: payload.priority || "P3",
-    projectId: payload.projectId || "1",
+    // Derived from the conversation, never defaulted to "1".
+    projectId: String(conversation.project_id),
   });
   if (!result.success || !result.data) {
     return reply.code(200).send(result);
@@ -1579,38 +1653,73 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
   const status = query.status || "open";
   const projectId = query.projectId || request.headers["x-project-id"];
 
+  // Every branch below resolves to exactly one conversation by an identifier
+  // the caller supplied. None of them falls back to "the most recent open
+  // conversation" — that fallback previously attached callers to unrelated
+  // customers, and in the PromptX branch it also rewrote the other
+  // conversation's promptx_conversation_id, permanently hijacking the thread.
   let res;
   const parsedConversationId = parseInt(String(conversationId), 10);
+  const parsedProjectId = projectId ? parseInt(String(projectId), 10) : NaN;
+  const hasProjectScope = Number.isInteger(parsedProjectId) && parsedProjectId > 0;
+
   if (conversationId && Number.isInteger(parsedConversationId) && parsedConversationId > 0) {
-    res = await pool.query(
-      `SELECT * FROM conversations WHERE id = $1 AND status = $2 LIMIT 1`,
-      [parsedConversationId, status]
-    );
+    // Direct lookup by id, constrained to the caller's project when one is
+    // supplied so an id from another project cannot be probed.
+    res = hasProjectScope
+      ? await pool.query(
+          `SELECT * FROM conversations WHERE id = $1 AND status = $2 AND project_id = $3 AND deleted_at IS NULL LIMIT 1`,
+          [parsedConversationId, status, parsedProjectId]
+        )
+      : await pool.query(
+          `SELECT * FROM conversations WHERE id = $1 AND status = $2 AND deleted_at IS NULL LIMIT 1`,
+          [parsedConversationId, status]
+        );
   } else {
     const isPromptXId = String(identityId).startsWith("convo_") ||
       /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(identityId));
 
     if (isPromptXId) {
-    res = await pool.query(
-      `SELECT * FROM conversations WHERE promptx_conversation_id = $1 LIMIT 1`,
-      [identityId]
-    );
-    // SEC-INFO-01 FIX: Do NOT fall back to latest open conversation.
-    // If the PromptX conversation ID is not found, return empty results.
-    // The previous fallback logic grabbed an unrelated conversation and
-    // reassigned its PromptX ID, causing cross-customer data leakage.
+      // Exact match only. An unknown PromptX conversation id resolves to
+      // nothing, which the caller sees as an empty result.
+      res = await pool.query(
+        `SELECT * FROM conversations WHERE promptx_conversation_id = $1 AND deleted_at IS NULL LIMIT 1`,
+        [identityId]
+      );
+    } else if (hasProjectScope) {
+      // identityId may be an internal numeric identity id or a channel
+      // reference (a LINE user id). conversations.identity_id is numeric, so
+      // passing a channel reference straight into the comparison produced a
+      // Postgres 22P02 and a 500.
+      const numericIdentityId = /^[0-9]+$/.test(String(identityId)) ? String(identityId) : null;
+
+      res = numericIdentityId
+        ? await pool.query(
+            `SELECT * FROM conversations
+              WHERE identity_id = $1 AND status = $2 AND project_id = $3 AND deleted_at IS NULL
+              ORDER BY created_at DESC LIMIT 1`,
+            [numericIdentityId, status, parsedProjectId]
+          )
+        : await pool.query(
+            `SELECT c.* FROM conversations c
+               JOIN identities i ON c.identity_id = i.id
+              WHERE i.channel_ref = $1 AND c.status = $2 AND c.project_id = $3 AND c.deleted_at IS NULL
+              ORDER BY c.created_at DESC LIMIT 1`,
+            [String(identityId), status, parsedProjectId]
+          );
     } else {
-      if (projectId) {
-        res = await pool.query(
-          `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 AND project_id = $3 ORDER BY created_at DESC LIMIT 1`,
-          [identityId, status, parseInt(String(projectId), 10) || null]
-        );
-      } else {
-        res = await pool.query(
-          `SELECT * FROM conversations WHERE identity_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 1`,
-          [identityId, status]
-        );
-      }
+      // An identity can be enrolled in several projects, so resolving by
+      // identity alone can return a conversation from a project the caller
+      // did not mean. Require the project to be named.
+      serverLogger.warn(
+        { identityId },
+        "Rejected conversation search by identity without a project scope"
+      );
+      return reply.code(400).send({
+        error: "Bad Request",
+        code: "PROJECT_SCOPE_REQUIRED",
+        message: "projectId is required when searching by identityId",
+      });
     }
   }
 
