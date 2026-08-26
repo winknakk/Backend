@@ -42,6 +42,12 @@ export interface PlaneMappingContext {
 
 export interface PlaneReverseSyncSummary {
   checked: number;
+  /** Work items whose Plane-side version was unchanged since the last poll. */
+  skipped: number;
+  /** Set when Plane rate-limited us and the cycle stopped early. */
+  rateLimited?: boolean;
+  /** Milliseconds to wait before polling again, when rate limited. */
+  retryAfterMs?: number;
   updated: number;
   deleted: number;
   unlinked: number;
@@ -279,7 +285,7 @@ export class PlaneWebhookService {
   }
 
   async syncLinkedTicketsFromPlane(batchSize = config.PLANE_REVERSE_SYNC_BATCH_SIZE): Promise<PlaneReverseSyncSummary> {
-    const summary: PlaneReverseSyncSummary = { checked: 0, updated: 0, deleted: 0, unlinked: 0, failed: 0 };
+    const summary: PlaneReverseSyncSummary = { checked: 0, skipped: 0, updated: 0, deleted: 0, unlinked: 0, failed: 0 };
 
     try {
       const mappingsRes = await pool.query(
@@ -297,10 +303,21 @@ export class PlaneWebhookService {
         const { project_id, org_id, workspace_slug, plane_project_id, plane_api_base_url, credential_ref } = mapping;
 
         // Query tickets matching 3-key scope (workspace_slug, plane_project_id, plane_issue_id)
+        // Tickets explicitly linked to this Plane project, plus legacy
+        // tickets that carry no Plane linkage yet and belong to this
+        // project. The previous `OR project_id = $3` had no such guard, so a
+        // ticket linked to one Plane project was also polled under every
+        // other mapping for the same TicketX project - querying Plane for an
+        // issue id that does not exist there, which is a large part of the
+        // observed failure count.
         const ticketsRes = await pool.query(
-          `SELECT id, plane_issue_id, plane_workspace_slug, plane_project_id, project_id, org_id, ticket_number
+          `SELECT id, plane_issue_id, plane_workspace_slug, plane_project_id, project_id, org_id,
+                  ticket_number, plane_last_seen_updated_at
            FROM tickets
-           WHERE ((plane_workspace_slug = $1 AND plane_project_id = $2) OR project_id = $3)
+           WHERE (
+                   (plane_workspace_slug = $1 AND plane_project_id = $2)
+                   OR (project_id = $3 AND plane_project_id IS NULL)
+                 )
              AND plane_issue_id IS NOT NULL AND plane_issue_id != ''
            LIMIT $4`,
           [workspace_slug, plane_project_id, project_id, batchSize]
@@ -321,6 +338,26 @@ export class PlaneWebhookService {
               timeout: 5000,
             });
 
+            // Skip work items Plane has not touched since we last applied
+            // them. Without this the poller rewrote every linked ticket on
+            // every cycle, producing spurious writes and provoking Plane
+            // into throttling the client.
+            const remoteUpdatedAtRaw = (response.data as any)?.updated_at;
+            const remoteUpdatedAt = remoteUpdatedAtRaw ? new Date(remoteUpdatedAtRaw) : null;
+            const lastSeen = ticket.plane_last_seen_updated_at
+              ? new Date(ticket.plane_last_seen_updated_at)
+              : null;
+
+            if (
+              remoteUpdatedAt &&
+              !Number.isNaN(remoteUpdatedAt.getTime()) &&
+              lastSeen &&
+              remoteUpdatedAt.getTime() <= lastSeen.getTime()
+            ) {
+              summary.skipped += 1;
+              continue;
+            }
+
             const syncRes = await this.sync(
               {
                 event: "work_item.updated",
@@ -339,6 +376,17 @@ export class PlaneWebhookService {
             );
 
             if (syncRes.matched) summary.updated += 1;
+
+            // Record the version we just applied, so the next cycle can skip
+            // this item. Written even when nothing matched: the remote
+            // version has still been observed, and re-fetching it changes
+            // nothing.
+            if (remoteUpdatedAt && !Number.isNaN(remoteUpdatedAt.getTime())) {
+              await pool.query(
+                `UPDATE tickets SET plane_last_seen_updated_at = $1 WHERE id = $2`,
+                [remoteUpdatedAt.toISOString(), ticket.id]
+              );
+            }
           } catch (err: any) {
             const isAbsentOrDeleted =
               err.response?.status === 404 ||
@@ -363,8 +411,37 @@ export class PlaneWebhookService {
                 logger.error({ error: delErr.message, issueId }, "Failed to delete ticket from DB on Plane 404/403 absent");
                 summary.failed += 1;
               }
+            } else if (err.response?.status === 429) {
+              // Plane is throttling us. Continuing through the remaining
+              // items guarantees more 429s and deepens the throttle, so the
+              // cycle stops here and the poller waits before trying again.
+              const retryAfter = Number(err.response?.headers?.["retry-after"]);
+              summary.rateLimited = true;
+              summary.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0
+                ? Math.min(retryAfter * 1000, 300_000)
+                : 60_000;
+              logger.warn(
+                { issueId, retryAfterMs: summary.retryAfterMs },
+                "Plane rate-limited reverse sync; stopping this cycle early"
+              );
+              return summary;
             } else {
               summary.failed += 1;
+              // The failure count used to be reported with no indication of
+              // why, so a poller degrading under rate limiting looked
+              // identical to one hitting bad credentials.
+              logger.warn(
+                {
+                  issueId,
+                  ticketId: ticket.id,
+                  ticketNumber: ticket.ticket_number,
+                  workspaceSlug: workspace_slug,
+                  planeProjectId: plane_project_id,
+                  status: err.response?.status,
+                  error: err.message,
+                },
+                "Plane reverse sync failed for work item"
+              );
             }
           }
         }
