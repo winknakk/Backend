@@ -7,6 +7,7 @@ import { EvalTestRunner } from "../../aiops/llmops/EvalTestRunner";
 import { TrafficSplitter } from "../../aiops/prompt-control/TrafficSplitter";
 import { authHook } from "../../middleware/auth";
 import { resolveProjectFilter, canAccessProject } from "../../middleware/tenantScope";
+import { PostgresOutboxRepository } from "../../infrastructure/db/PostgresOutboxRepository";
 import { DocumentIngestionPayloadSchema, AbTestWeightSchema, EvalTestCaseSchema } from "../../schemas/aiops";
 import { DatabaseAdapter } from "../../adapters/types";
 import { HumanReplyService } from "../../services/humanReplyService";
@@ -74,6 +75,8 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     }
     return hydrated;
   }));
+
+  const outboxRepo = new PostgresOutboxRepository();
 
   // Add authentication hook for all admin endpoints
   fastify.addHook("onRequest", authHook);
@@ -978,6 +981,68 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
       const projectId = query?.projectId ? String(query.projectId) : undefined;
       const tickets = await deps.dbAdapter.listAllTickets(params.id, projectId, undefined, undefined, request.tenantContext);
       return reply.code(200).send(tickets);
+    });
+
+    // Outbox dead letters.
+    //
+    // Eleven abandoned events sat unnoticed for 19 days because nothing
+    // surfaced them. These endpoints make the queue's failures visible and
+    // give an operator an explicit way to requeue one after fixing the cause.
+    fastify.get("/api/admin/outbox/dead-letters", async (request, reply) => {
+      const query = request.query as any;
+      const limit = Math.min(parseInt(String(query?.limit ?? "50"), 10) || 50, 200);
+      const offset = Math.max(parseInt(String(query?.offset ?? "0"), 10) || 0, 0);
+
+      const [items, byKind] = await Promise.all([
+        outboxRepo.listDeadLetters(limit, offset),
+        outboxRepo.countDeadLettersByKind(),
+      ]);
+
+      const summary = byKind.reduce(
+        (acc: Record<string, number>, row) => {
+          acc[row.failure_kind || "unclassified"] = row.count;
+          return acc;
+        },
+        {} as Record<string, number>
+      );
+
+      return reply.code(200).send({
+        summary,
+        total: byKind.reduce((n, row) => n + row.count, 0),
+        items: items.map((row: any) => ({
+          id: row.id,
+          eventType: row.event_type,
+          aggregateType: row.aggregate_type,
+          aggregateId: row.aggregate_id,
+          attempts: row.attempts,
+          // transient  - the retry budget ran out; the cause may have cleared
+          // permanent  - the payload will never be accepted; requeueing is futile
+          // blocked    - credentials or permissions; fix configuration first
+          failureKind: row.failure_kind || "unclassified",
+          error: row.error_message,
+          createdAt: row.created_at,
+          deadLetteredAt: row.dead_lettered_at,
+          retryable: row.failure_kind !== "permanent",
+        })),
+      });
+    });
+
+    fastify.post("/api/admin/outbox/dead-letters/:id/requeue", async (request, reply) => {
+      const params = request.params as any;
+      const id = parseInt(String(params.id), 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ error: "Bad Request", message: "Invalid outbox event id" });
+      }
+
+      const requeued = await outboxRepo.requeueDeadLetter(id);
+      if (!requeued) {
+        return reply.code(404).send({
+          error: "Not Found",
+          message: `No dead-lettered outbox event with id ${id}`,
+        });
+      }
+
+      return reply.code(200).send({ success: true, id, status: "pending" });
     });
 
     // 11.5. GET /api/admin/tickets

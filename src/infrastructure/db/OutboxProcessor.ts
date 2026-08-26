@@ -4,8 +4,12 @@ import { createLogger } from "../../observability/logger";
 import { deletePlaneWorkItem } from "../../services/planeDeletionService";
 import { PlaneService } from "../../services/planeService";
 import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
+import { classifyOutboxFailure, backoffMs, logClassification } from "./OutboxFailureClassifier";
 
 const logger = createLogger("OutboxProcessor");
+
+/** Retry budget for failures that could plausibly succeed later. */
+const MAX_TRANSIENT_ATTEMPTS = 5;
 
 /**
  * OutboxProcessor runs a background polling loop to process transactional
@@ -118,14 +122,26 @@ export class OutboxProcessor {
           await this.outboxRepo.markProcessed(id);
         } catch (err: any) {
           const nextAttempts = attempts + 1;
-          const status = nextAttempts >= 5 ? "failed" : "pending";
+          const kind = classifyOutboxFailure(err);
+          logClassification(id, event_type, kind, err);
 
-          logger.error(
-            { id, event_type, attempts: nextAttempts, error: err.message, status },
-            "Failed to process outbox event"
-          );
-
-          await this.outboxRepo.updateAttempts(id, nextAttempts, err.message, status);
+          if (kind !== "transient") {
+            // The payload is unacceptable, or the caller is not permitted.
+            // Retrying cannot change either, and burning five attempts on it
+            // only delays the events queued behind it. This is what left nine
+            // "Custom Id cannot be integers" events cycling for 19 days.
+            await this.outboxRepo.deadLetter(id, nextAttempts, err.message, kind);
+          } else if (nextAttempts >= MAX_TRANSIENT_ATTEMPTS) {
+            await this.outboxRepo.deadLetter(id, nextAttempts, err.message, "transient");
+            logger.error(
+              { id, event_type, attempts: nextAttempts },
+              "Outbox event exhausted its retry budget and was dead-lettered"
+            );
+          } else {
+            const delay = backoffMs(nextAttempts);
+            await this.outboxRepo.scheduleRetry(id, nextAttempts, err.message, delay);
+            logger.info({ id, event_type, attempts: nextAttempts, retryInMs: delay }, "Outbox retry scheduled");
+          }
         }
       }
     } catch (err: any) {
