@@ -1375,9 +1375,12 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   try {
     await client.query("BEGIN");
 
+    // Restoring a cancelled ticket is a REOPENED transition. This wrote the
+    // literal 'open' before, which is in neither vocabulary and now violates
+    // the tickets_status_lifecycle_check constraint added in migration 040.
     const query = isNumeric
-      ? `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE id = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`
-      : `UPDATE tickets SET status = 'open', cancellation_reason = NULL, updated_at = NOW() WHERE ticket_number = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`;
+      ? `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE id = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`
+      : `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE ticket_number = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`;
     
     const queryArgs = orgId
       ? [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr, String(orgId)]
@@ -1737,7 +1740,9 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
       `SELECT id, ticket_number, ticket_id, status, due_date
        FROM tickets
        WHERE conversation_id = $1
-         AND LOWER(status) NOT IN ('closed', 'done', 'resolved', 'merged', 'cancelled', 'canceled')
+         -- Terminal lifecycle states. RESOLVED is deliberately NOT here: a
+         -- resolved ticket is still open business until the customer confirms.
+         AND status NOT IN ('CLOSED', 'CANCELLED', 'CUSTOMER_CONFIRMED')
          AND LOWER(REGEXP_REPLACE(TRIM(COALESCE(subject, '')), '\\s+', ' ', 'g'))
              = LOWER(REGEXP_REPLACE(TRIM($2::text), '\\s+', ' ', 'g'))
        ORDER BY created_at DESC

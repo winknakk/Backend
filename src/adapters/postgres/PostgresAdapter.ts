@@ -116,15 +116,17 @@ export class PostgresAdapter implements DatabaseAdapter {
       }
 
       const { rows } = await pool.query(
-        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, priority, created_via, project_id, severity, due_date, org_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ai', $7, $8, $9, $10)
+        `INSERT INTO tickets (ticket_id, conversation_id, subject, summary, status, plane_status, priority, created_via, project_id, severity, due_date, org_id, lifecycle_changed_at)
+         VALUES ($1, $2, $3, $4, $5, 'Backlog', $6, 'ai', $7, $8, $9, $10, NOW())
          RETURNING *`,
         [
           ticketNumber,
           parsedConvId,
           input.subject,
           input.summary,
-          "Backlog",
+          // Lifecycle NEW. Plane's own state (Backlog) is set separately in
+          // plane_status; tickets.status is the customer lifecycle now.
+          "NEW",
           mapPlanePriorityToTicketPriority(input.priority) || input.priority,
           parsedProjectId,
           input.severity,

@@ -60,7 +60,22 @@ export type TicketInput = z.infer<typeof TicketInputSchema>;
 
 export const TicketSchema = TicketInputSchema.extend({
   ticketId: z.string(), // e.g. TCK-2026-0001
-  status: z.enum(["Backlog", "Todo", "In Progress", "Done", "Cancelled"]),
+  // TicketX customer lifecycle. Plane's engineering vocabulary lives in
+  // plane_status; see src/domain/ticket/TicketLifecycle.ts.
+  status: z.enum([
+    "NEW",
+    "TRIAGED",
+    "OPEN",
+    "IN_PROGRESS",
+    "WAITING_CUSTOMER",
+    "WAITING_INTERNAL",
+    "RESOLVED",
+    "CUSTOMER_CONFIRMED",
+    "CLOSED",
+    "REOPENED",
+    "CANCELLED",
+  ]),
+  planeStatus: z.enum(["Backlog", "Open", "Done", "Cancelled"]).optional(),
   startDate: z.string().datetime(),
   dueDate: z.string().datetime(),
   createdBy: z.string(),

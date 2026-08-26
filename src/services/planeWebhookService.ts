@@ -3,6 +3,7 @@ import axios from "axios";
 import { DatabaseAdapter } from "../adapters/types";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
+import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import { createLogger } from "../observability/logger";
 
 const logger = createLogger("planeWebhookService");
@@ -207,7 +208,38 @@ export class PlaneWebhookService {
       return { processed: false, matched: false, reason: "no_supported_changes", planeIssueId };
     }
 
-    const syncResult = await this.dbAdapter.syncTicketFromPlane(planeIssueId, { status, priority });
+    // Status now goes through the ticket state machine, which owns the
+    // asymmetric reverse mapping: Plane "Done" produces TicketX RESOLVED, not
+    // CLOSED, and only the customer moves it further. Writing Plane's
+    // vocabulary straight into tickets.status - as this did before migration
+    // 040 - is what made the customer half of the journey unrepresentable.
+    //
+    // Priority is unaffected by the two-layer split and still syncs directly.
+    let syncResult: { matched: boolean; statusChanged: boolean; previousStatus?: string } = {
+      matched: false,
+      statusChanged: false,
+    };
+
+    let lifecycleResult: Awaited<ReturnType<typeof ticketStateMachine.applyPlaneStatus>> | null = null;
+
+    if (priority) {
+      syncResult = await this.dbAdapter.syncTicketFromPlane(planeIssueId, { priority });
+    }
+
+    if (status) {
+      const ticketRow = await pool
+        .query(`SELECT id FROM tickets WHERE plane_issue_id = $1 LIMIT 1`, [planeIssueId])
+        .catch(() => null);
+      const ticketId = ticketRow?.rows?.[0]?.id;
+
+      if (ticketId) {
+        lifecycleResult = await ticketStateMachine.applyPlaneStatus(ticketId, status, {
+          source: "plane_webhook",
+        });
+        syncResult.matched = true;
+        syncResult.statusChanged = Boolean(lifecycleResult.applied);
+      }
+    }
 
     // Update Plane creator attribution if present
     const creatorName = (data as any)?.created_by_detail?.display_name ||
@@ -227,9 +259,12 @@ export class PlaneWebhookService {
       logger.warn({ error: dbErr.message, planeIssueId }, "Could not update plane creator attribution");
     }
 
-    if (syncResult.matched && syncResult.statusChanged && status === "Done") {
+    // The notification is driven by the lifecycle transition, not by Plane's
+    // raw state. Only reaching RESOLVED asks the customer to confirm, so a
+    // repeated "Done" on an already-resolved ticket notifies nobody.
+    if (lifecycleResult?.applied && lifecycleResult.notify === "resolution_confirmation_request") {
       this.doneNotificationDispatcher(planeIssueId).catch((err) => {
-        logger.error({ error: err.message, planeIssueId }, "Failed to dispatch customer Done notification");
+        logger.error({ error: err.message, planeIssueId }, "Failed to dispatch customer resolution notification");
       });
     }
 
