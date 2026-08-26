@@ -5,6 +5,8 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config/env";
 import { customerNotificationService } from "../../services/CustomerNotificationService";
 import { customerConfirmationHandler } from "../../services/CustomerConfirmationHandler";
+import { executionContextService } from "../../domain/execution/ExecutionContextService";
+import { traceRecorder } from "../../observability/TraceRecorder";
 import {
   LineOnboardingDecision,
   LineProjectOnboardingService,
@@ -432,6 +434,56 @@ export function registerLineWebhookRoutes(
               }
             }
 
+            // --- B-0: mint the server-owned execution context ---
+            //
+            // Created here, after signature verification and identity /
+            // project / conversation resolution, so the tenant facts are
+            // established by trusted code before AgentX ever runs.
+            //
+            // The token travels OUT OF BAND in payload.ticketx, never inside
+            // the message text. A customer who types something that looks
+            // like a context marker is typing plain text: it is not read from
+            // there, and it is not forgeable in any case.
+            let executionToken: string | undefined;
+            if (decision.conversationId && decision.projectId) {
+              try {
+                const convTenant = await pool.query(
+                  `SELECT org_id, identity_id FROM conversations WHERE id = $1 LIMIT 1`,
+                  [decision.conversationId]
+                );
+                const orgId = convTenant.rows[0]?.org_id;
+                if (orgId) {
+                  const created = await executionContextService.create({
+                    channel: "line",
+                    lineEventId: webhookEventId,
+                    identityId: convTenant.rows[0]?.identity_id ?? null,
+                    conversationId: Number(decision.conversationId),
+                    projectId: Number(decision.projectId),
+                    orgId: String(orgId),
+                    correlationId: webhookEventId || undefined,
+                  });
+                  executionToken = created.token;
+
+                  await traceRecorder.record({
+                    correlationId: created.context.correlationId,
+                    component: "line_webhook",
+                    eventType: "message_received",
+                    lineEventId: webhookEventId,
+                    conversationId: created.context.conversationId,
+                    identityId: created.context.identityId,
+                    projectId: created.context.projectId,
+                    orgId: created.context.orgId,
+                    detail: { messageType: event?.message?.type || event?.type },
+                  });
+                }
+              } catch (ctxErr: any) {
+                logger.error(
+                  { error: ctxErr.message, webhookEventId },
+                  "Could not create execution context; downstream tool calls will fail closed"
+                );
+              }
+            }
+
             // Acknowledge before any AI work begins. This is the Fast Path
             // requirement: the customer hears back immediately, and never
             // waits on the batch window, PromptX, RAG or Plane.
@@ -477,6 +529,9 @@ export function registerLineWebhookRoutes(
                   projectName: decision.projectName,
                   conversationId: decision.conversationId,
                   pushOnboardingCarousel: decision.pushOnboardingCarousel,
+                  // Out-of-band capability token. Never placed in the message.
+                  executionToken,
+                  correlationId: webhookEventId,
                 }
               );
               // The 24-hour carousel recall push is sent immediately (not batched) —

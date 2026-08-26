@@ -13,7 +13,22 @@ import { detectConfirmationIntent } from "../../src/domain/ticket/CustomerConfir
 import { projectResolver } from "../../src/domain/project/ProjectResolver";
 
 /**
- * Golden Flow against the live database, on the dedicated staging project.
+ * NOT A GOLDEN E2E TEST.
+ *
+ * This is an INTEGRATION test of the TicketX lifecycle. It inserts rows
+ * directly into PostgreSQL and calls TicketStateMachine, which means it
+ * bypasses the real customer path entirely:
+ *
+ *   LINE -> LINE webhook -> PromptX/Activepieces -> Main AI Core Flow
+ *        -> AgentX -> MCP create_ticket -> TicketX -> Plane
+ *
+ * It proves the lifecycle, the notification ledger and the confirmation
+ * handler in isolation. It proves NOTHING about PromptX, AgentX, session
+ * resolution, the intent decision as the flow actually makes it, or the MCP
+ * tool boundary. Do not cite it as Golden Flow evidence — see
+ * docs/REAL_AGENTX_GOLDEN_E2E_REPORT.md.
+ *
+ * Integration coverage against the live database, on the staging project.
  *
  * Covers everything from conversation to CLOSED. The two legs that cannot run
  * here are stated as such rather than simulated:
@@ -52,7 +67,7 @@ async function notificationCount(type: string, convId: number): Promise<number> 
   return rows[0].c;
 }
 
-describe("GOLDEN FLOW (live database, staging project 301)", () => {
+describe("TicketX lifecycle integration (live database, staging project 301)", () => {
   before(async () => {
     try {
       await pool.query("SELECT 1");
@@ -281,7 +296,7 @@ describe("GOLDEN FLOW (live database, staging project 301)", () => {
 // NEGATIVE CASES
 // =========================================================================
 
-describe("GOLDEN FLOW — negative cases", () => {
+describe("TicketX lifecycle integration — negative cases", () => {
   let convId: number | null = null;
   let identId: number | null = null;
   let profId: string | null = null;

@@ -14,6 +14,9 @@ type BatchEntry = {
       projectName?: string;
       conversationId?: number;
       pushOnboardingCarousel?: boolean;
+      /** Server-owned execution context token. Out-of-band only. */
+      executionToken?: string;
+      correlationId?: string;
     };
   }>;
   destination: string;
@@ -127,6 +130,10 @@ export class LineMessageBatchingService {
         projectName: lastDecision.projectName,
         conversationId: lastDecision.conversationId,
         batchSize: allLineEvents.length,
+        // B-0: the automation layer must present this on every tool call.
+        // It sits here, beside the events, and never inside message text.
+        executionToken: lastDecision.executionToken,
+        correlationId: lastDecision.correlationId,
       },
     };
 

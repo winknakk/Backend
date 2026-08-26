@@ -65,6 +65,8 @@ import { startTimer } from "../observability/timing";
 import { authHook, authenticateToken, internalApiGuard } from "../middleware/auth";
 import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
 import { tenantScopeHook, resolveProjectFilter, resolveTenantScope } from "../middleware/tenantScope";
+import { requireExecutionContext } from "../middleware/executionContext";
+import { traceRecorder } from "../observability/TraceRecorder";
 import { adminSocketRegistry } from "./AdminSocketRegistry";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
@@ -857,7 +859,7 @@ fastify.get("/agents", async (request, reply) => {
   return reply.code(200).send(agents);
 });
 
-fastify.post("/api/v1/internal/tickets", async (request, reply) => {
+fastify.post("/api/v1/internal/tickets", { preHandler: requireExecutionContext }, async (request, reply) => {
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
 
@@ -1181,10 +1183,35 @@ fastify.post("/api/v1/internal/conversations/reply", async (request, reply) => {
   return reply.code(200).send(result);
 });
 
-fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
+// B-0: the tenant comes from the server-owned execution context, never from
+// the caller. requireExecutionContext resolves it, discards any
+// tenant-determining field the agent supplied, and fails closed when no valid
+// context is presented.
+fastify.post("/api/v1/internal/tickets/promote", { preHandler: requireExecutionContext }, async (request, reply) => {
   try {
     const body = (request.body || {}) as any;
-    console.log("[Server] Received /api/v1/internal/tickets/promote payload:", JSON.stringify(body));
+    const ctx = request.trustedContext!;
+    const payload = body.data && typeof body.data === "object" ? body.data : body;
+
+    // Authoritative values, overwriting whatever arrived on the wire.
+    payload.conversationId = ctx.conversationId;
+    payload.conversation_id = ctx.conversationId;
+    payload.projectId = ctx.projectId;
+    payload.project_id = ctx.projectId;
+    payload.orgId = ctx.orgId;
+    payload.org_id = ctx.orgId;
+
+    await traceRecorder.record({
+      correlationId: ctx.correlationId,
+      component: "ticketx",
+      eventType: "promote_received",
+      conversationId: ctx.conversationId,
+      projectId: ctx.projectId,
+      orgId: ctx.orgId,
+      lineEventId: ctx.lineEventId,
+      detail: { subject: String(payload.subject || "").slice(0, 120) },
+    });
+
     const result = await planeService.promoteTicketToPlane(body);
     console.log("[Server] Promotion result:", JSON.stringify(result));
     return reply.code(200).send(result);
