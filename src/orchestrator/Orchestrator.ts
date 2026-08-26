@@ -11,6 +11,7 @@ import { IssueSessionResolver } from "../runtime/IssueSessionResolver";
 import { LifecycleState } from "../runtime/IssueSession";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { pool } from "../adapters/postgres/PostgresAdapter";
+import { projectResolver } from "../domain/project/ProjectResolver";
 
 const logger = createLogger("Orchestrator");
 
@@ -74,14 +75,25 @@ export class Orchestrator {
               ).trim();
               const candidateCode = metaProjectCode || inputText;
 
-              // Check if input or channel metadata matches a project code or project name (SECURITY: DO NOT match raw integer ID)
-              const projRes = await pool.query(
-                `SELECT id, name FROM projects WHERE (LOWER(name) = LOWER($1) OR LOWER(slug) = LOWER($1) OR LOWER(code) = LOWER($1)) AND is_active = TRUE LIMIT 1`,
-                [candidateCode]
-              );
+              // Delegates to the single project-resolution authority.
+              //
+              // This used to run its own query matching the raw input against
+              // projects.name / projects.slug / projects.code with no
+              // organization filter. It referenced `code` and `is_active`,
+              // neither of which exists in the schema, so it threw on every
+              // call — and had it worked it would have let a customer join
+              // another tenant's project by typing its name.
+              //
+              // Join codes are salted digests in project_join_codes with
+              // expiry, revocation and a per-channel enablement check. The
+              // resolver fails closed: no match means no project, never a
+              // default.
+              const resolution = await projectResolver.resolveByJoinCode(candidateCode, {
+                channel: String(message.channel || "line").toLowerCase(),
+              });
 
-              if (projRes.rows.length > 0) {
-                const matchedProject = projRes.rows[0];
+              if (resolution.ok && resolution.project) {
+                const matchedProject = { id: resolution.project.projectId, name: resolution.project.projectName };
                 await pool.query(
                   `UPDATE identities SET verification_status = 'VERIFIED_CUSTOMER', is_verified = TRUE WHERE id = $1`,
                   [ident.id]
