@@ -3,6 +3,7 @@ import { config } from "../../config/env";
 import { getProjectId } from "../../kernel/context/RequestContextHolder";
 import { createLogger } from "../../observability/logger";
 import { RoomStatus } from "../../schemas/aiops";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("RedisTakeoverManager");
 
@@ -10,7 +11,7 @@ export class RedisTakeoverManager {
   private redis: Redis;
 
   constructor() {
-    this.redis = new Redis(config.REDIS_URL, {
+    this.redis = createRedisClient("redis-takeover-manager", {
       maxRetriesPerRequest: 3,
       enableOfflineQueue: false,
     });

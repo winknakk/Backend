@@ -9,6 +9,7 @@ import { PostgresTicketRepository } from "../../infrastructure/db/PostgresTicket
 import { PostgresTicketEventRepository } from "../../infrastructure/db/PostgresTicketEventRepository";
 import { BullMQEventPublisher } from "../../infrastructure/queue/BullMQEventPublisher";
 import { AiService } from "../../services/aiService";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("TicketTitleGeneratorWorker");
 
@@ -17,7 +18,7 @@ export class TicketTitleGeneratorWorker {
   private redisConnection: Redis;
 
   constructor() {
-    this.redisConnection = new Redis(config.REDIS_URL, {
+    this.redisConnection = createRedisClient("ticket-title-generator-worker", {
       maxRetriesPerRequest: null,
       enableOfflineQueue: true,
     });

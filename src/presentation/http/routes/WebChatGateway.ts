@@ -17,6 +17,7 @@ import { QueueFactory } from "../../../queue/QueueFactory";
 import { config } from "../../../config/env";
 import { createLogger } from "../../../observability/logger";
 import Redis from "ioredis";
+import { createRedisClient } from "../../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("WebChatGateway");
 
@@ -44,7 +45,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
   // Setup Redis Subscriber once
   if (!redisSub) {
-    redisSub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
+    redisSub = createRedisClient("webchat-gateway-sub", { maxRetriesPerRequest: null });
     redisSub.subscribe("webchat:outbound").catch(err => {
       logger.error({ error: err.message }, "Failed to subscribe to Redis outbound channel");
     });

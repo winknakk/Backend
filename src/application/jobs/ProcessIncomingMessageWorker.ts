@@ -4,6 +4,7 @@ import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
 import { runWithContext } from "../../kernel/context/RequestContextHolder";
 import { JobPayload } from "../../queue/types";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("ProcessIncomingMessageWorker");
 
@@ -12,7 +13,7 @@ export class ProcessIncomingMessageWorker {
   private redisConnection: Redis;
 
   constructor(handler: (job: JobPayload) => Promise<any>) {
-    this.redisConnection = new Redis(config.REDIS_URL, {
+    this.redisConnection = createRedisClient("process-incoming-message-worker", {
       maxRetriesPerRequest: null, // Required by BullMQ
       enableOfflineQueue: true,
     });

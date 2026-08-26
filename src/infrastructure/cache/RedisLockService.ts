@@ -2,6 +2,7 @@ import Redis from "ioredis";
 import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
 import { randomUUID } from "crypto";
+import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
 
 const logger = createLogger("RedisLockService");
 
@@ -13,7 +14,7 @@ export class RedisLockService {
   private redis: Redis;
 
   constructor() {
-    this.redis = new Redis(config.REDIS_URL, {
+    this.redis = createRedisClient("redis-lock-service", {
       maxRetriesPerRequest: 3,
       enableOfflineQueue: false,
     });

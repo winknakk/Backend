@@ -5,6 +5,7 @@ import Redis from "ioredis";
 import { DatabaseAdapter } from "../adapters/types";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
+import { createRedisClient } from "../infrastructure/cache/createRedisClient";
 
 type DeliveryMethod = "line_push" | "webchat_publish" | "workflow_webhook";
 
@@ -201,7 +202,7 @@ export class HumanReplyService {
         throw deliveryError;
       }
     } else if (channel === "webchat") {
-      const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
+      const redisPub = createRedisClient("human-reply-pub", { maxRetriesPerRequest: null });
       try {
         await redisPub.publish(
           "webchat:outbound",

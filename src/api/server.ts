@@ -101,7 +101,43 @@ fastify.addContentTypeParser("application/json", { parseAs: "buffer" }, (request
 });
 fastify.register(websocketPlugin);
 fastify.register(tenantPlugin);
-const redisPub = new Redis(config.REDIS_URL, { maxRetriesPerRequest: null });
+/**
+ * Publisher for outbound WebChat delivery.
+ *
+ * Only constructed when Redis is actually the configured provider. It used to
+ * be created unconditionally, so with the default in-memory providers the
+ * process emitted a continuous stream of
+ * "[ioredis] Unhandled error event: connect ECONNREFUSED 127.0.0.1:6379".
+ * That noise is what buried the fatal error behind RUN-02.
+ */
+const redisEnabled = config.QUEUE_PROVIDER === "redis" || config.CACHE_PROVIDER === "redis";
+const redisPub: Redis | null = redisEnabled
+  ? new Redis(config.REDIS_URL, { maxRetriesPerRequest: null })
+  : null;
+
+if (redisPub) {
+  // Without a listener, ioredis emits an unhandled 'error' event.
+  redisPub.on("error", (err: any) => {
+    serverLogger.warn({ error: err?.message }, "Redis publisher error");
+  });
+} else {
+  serverLogger.info(
+    { queueProvider: config.QUEUE_PROVIDER, cacheProvider: config.CACHE_PROVIDER },
+    "Redis publisher disabled; WebChat outbound events will not be published"
+  );
+}
+
+/** Publishes only when Redis is configured; a no-op otherwise. */
+async function publishOutbound(channel: string, payload: string): Promise<void> {
+  if (!redisPub) return;
+  try {
+    await redisPub.publish(channel, payload);
+  } catch (err: any) {
+    // Delivery over Redis is best-effort: the message is already persisted,
+    // and failing here must not abort the caller's request.
+    serverLogger.warn({ error: err.message, channel }, "Failed to publish outbound event");
+  }
+}
 
 
 // 1. Initialize Core Services (Adapter & Service Layers)
@@ -208,7 +244,7 @@ async function requestHumanTakeover(input: {
   // delivered to operators of every other project.
   adminSocketRegistry.broadcastToProject(conversationProjectId, notification);
 
-  await redisPub.publish(
+  await publishOutbound(
     "webchat:outbound",
     JSON.stringify({
       conversationId,
@@ -440,7 +476,7 @@ async function bootstrap() {
 
         if (!suppressReply) {
           const sessionContext = await memoryService.loadSessionContext(job.data.senderId, "WebChat");
-          await redisPub.publish(
+          await publishOutbound(
             "webchat:outbound",
             JSON.stringify({
               conversationId: convId || sessionContext.conversationId,
