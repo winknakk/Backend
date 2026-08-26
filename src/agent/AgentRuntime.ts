@@ -15,6 +15,7 @@ import { ConversationMemoryService } from "../memory/ConversationMemoryService";
 
 import { IExecutionTraceService } from "../execution/types";
 import { TicketResolver } from "../services/TicketResolver";
+import { classifyMessage } from "../domain/intent/IntentClassifier";
 
 const logger = createLogger("AgentRuntime");
 
@@ -115,23 +116,42 @@ export class AgentRuntime implements IAgentSession {
     // Resolve active ticket or JIT-escalate if the context demands
     let activeTicket = await this.ticketResolver.resolveActiveTicket(conversationId);
 
-    // Dynamic JIT escalation check:
-    // Only escalate if clear system failure / error patterns are matched, avoiding false triggers on general words like 'help'
-    const lowerInput = sanitizedInput.toLowerCase();
-    const needsTicketEscalation = !activeTicket && (
-      lowerInput.includes("พัง") ||
-      lowerInput.includes("ล่ม") ||
-      lowerInput.includes("เข้าใช้งานไม่ได้") ||
-      lowerInput.includes("ระบบมีปัญหา") ||
-      lowerInput.includes("error 5") ||
-      lowerInput.includes("error 4") ||
-      lowerInput.includes("bug") ||
-      lowerInput.includes("crash") ||
-      lowerInput.includes("fatal")
+    // Ticket creation is decided by structured intent classification.
+    //
+    // This was substring matching, which opened a ticket for any message
+    // containing "bug", "crash" or "error 5". Measured false-positive rate on
+    // a probe set of non-incidents: 9 of 9 — including "Can you send the
+    // Bugatti invoice?" and "ไม่มีอะไรพังแล้ว ใช้งานได้ปกติ", a customer
+    // saying nothing is broken.
+    //
+    // The classifier weighs what the message asserts: whether it answers a
+    // question we asked, whether it says the problem is gone, whether it asks
+    // rather than reports, and only then whether it describes a present
+    // technical symptom.
+    const awaitingConfirmation = Boolean(
+      activeTicket && String((activeTicket as any).status || "").toUpperCase() === "RESOLVED"
+    );
+    const classification = classifyMessage(sanitizedInput, {
+      hasTicketAwaitingConfirmation: awaitingConfirmation,
+      hasOpenTicket: Boolean(activeTicket),
+    });
+    const needsTicketEscalation = !activeTicket && classification.shouldCreateTicket;
+
+    logger.debug(
+      {
+        conversationId,
+        intent: classification.intent,
+        rule: classification.rule,
+        willCreateTicket: needsTicketEscalation,
+      },
+      "Intent classified"
     );
 
     if (needsTicketEscalation) {
-      logger.info({ conversationId, text: sanitizedInput }, "Heuristic triggered JIT Ticket creation");
+      logger.info(
+        { conversationId, intent: classification.intent, rule: classification.rule },
+        "Intent classification triggered JIT ticket creation"
+      );
       activeTicket = await this.ticketResolver.createJitTicket(
         conversationId,
         this.companyId,

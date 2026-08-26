@@ -2,31 +2,19 @@ import assert from "assert";
 import { describe, it } from "node:test";
 
 /**
- * PHASE 8 — AI-01, tested rather than asserted.
+ * PHASE 8 — AI-01, measured rather than described.
  *
- * AgentRuntime decides whether to open a ticket by substring matching. This
- * file reproduces that predicate exactly and probes it, so the limitation is
- * measured instead of described. It is expected to FAIL on false positives —
- * that failure is the finding, and it must not be hidden.
- *
- * Kept in sync with src/agent/AgentRuntime.ts:121. If that changes, this
- * should be replaced by tests of the real classifier.
+ * This originally reproduced AgentRuntime's substring predicate and recorded
+ * a 9-of-9 false-positive rate. AgentRuntime now delegates to the structured
+ * classifier, so this calls the SAME function the production path calls
+ * rather than a copy — a copy would let the two drift and quietly stop
+ * measuring anything.
  */
+import { shouldCreateTicket } from "../../src/domain/intent/IntentClassifier";
 
-/** Verbatim copy of the production predicate. */
+/** The production decision, called directly. */
 function needsTicketEscalation(input: string): boolean {
-  const lowerInput = String(input || "").toLowerCase();
-  return (
-    lowerInput.includes("พัง") ||
-    lowerInput.includes("ล่ม") ||
-    lowerInput.includes("เข้าใช้งานไม่ได้") ||
-    lowerInput.includes("ระบบมีปัญหา") ||
-    lowerInput.includes("error 5") ||
-    lowerInput.includes("error 4") ||
-    lowerInput.includes("bug") ||
-    lowerInput.includes("crash") ||
-    lowerInput.includes("fatal")
-  );
+  return shouldCreateTicket(input);
 }
 
 interface Probe {
@@ -62,7 +50,7 @@ const PROBES: Probe[] = [
   { text: "ขอบคุณครับ ไม่มีอะไรพังแล้ว ใช้งานได้ปกติ", shouldTicket: false, why: "6. says nothing is broken any more" },
 ];
 
-describe("PHASE 8 — AI-01 keyword classification (KNOWN LIMITATION)", () => {
+describe("PHASE 8 — AI-01 intent classification", () => {
   it("opens a ticket for genuine technical incidents", () => {
     const missed = PROBES.filter((p) => p.shouldTicket && !needsTicketEscalation(p.text));
     assert.deepStrictEqual(
@@ -84,7 +72,7 @@ describe("PHASE 8 — AI-01 keyword classification (KNOWN LIMITATION)", () => {
     assert.deepStrictEqual(
       falsePositives.map((p) => p.text),
       [],
-      `AI-01 = FAIL / KNOWN LIMITATION — ${falsePositives.length} non-incident(s) would create a ticket`
+      `AI-01 REGRESSION — ${falsePositives.length} non-incident(s) would create a ticket`
     );
   });
 
@@ -92,8 +80,7 @@ describe("PHASE 8 — AI-01 keyword classification (KNOWN LIMITATION)", () => {
     const negatives = PROBES.filter((p) => !p.shouldTicket);
     const wrong = negatives.filter((p) => needsTicketEscalation(p.text));
     const rate = ((wrong.length / negatives.length) * 100).toFixed(0);
-    console.log(`  AI-01 measured false-positive rate: ${wrong.length}/${negatives.length} (${rate}%)`);
-    // Informational: this test documents the number, it does not gate on it.
-    assert.ok(negatives.length > 0);
+    console.log(`  AI-01 measured false-positive rate: ${wrong.length}/${negatives.length} (${rate}%) — was 9/9 (100%)`);
+    assert.strictEqual(wrong.length, 0, "the false-positive rate must stay at zero");
   });
 });
