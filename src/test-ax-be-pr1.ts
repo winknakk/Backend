@@ -36,10 +36,13 @@ async function runTests() {
   assert(columns.length === 4, "Missing newly migrated columns on tickets table");
 
   // Verify ticket_events table
+  // The deployed schema is cs_tickets, not public — this hardcoded 'public'
+  // made the assertion fail regardless of whether the table existed. Resolve
+  // against the connection's actual search_path instead.
   const { rows: eventTable } = await pool.query(`
     SELECT EXISTS (
-      SELECT FROM information_schema.tables 
-      WHERE table_schema = 'public' AND table_name = 'ticket_events'
+      SELECT FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'ticket_events'
     );
   `);
   assert(eventTable[0].exists === true, "ticket_events table does not exist");
