@@ -62,7 +62,7 @@ import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
 import rootLogger, { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
-import { authHook, authenticateToken } from "../middleware/auth";
+import { authHook, authenticateToken, internalApiGuard } from "../middleware/auth";
 import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
 import { tenantScopeHook, resolveProjectFilter, resolveTenantScope } from "../middleware/tenantScope";
 import { adminSocketRegistry } from "./AdminSocketRegistry";
@@ -432,6 +432,9 @@ fastify.setErrorHandler((error: any, request, reply) => {
 
 fastify.addHook("onRequest", rateLimitHook);
 fastify.addHook("onRequest", authHook);
+// Service-only gate for /api/v1/internal/*. Runs after authHook so the
+// principal is known; a human session must not confer machine access.
+fastify.addHook("onRequest", internalApiGuard);
 // preHandler, not onRequest: it must observe request.principal (authHook) and
 // the base tenantContext (tenantPlugin, registered as a plugin and therefore
 // hooked during boot rather than here).

@@ -107,6 +107,67 @@ export function isAuthConfigured(): boolean {
   return Boolean(config.API_KEY || sessionTokenService);
 }
 
+
+/**
+ * Internal endpoints the admin console legitimately calls with an operator
+ * session. Everything else under /api/v1/internal/* is service-only.
+ *
+ * These are an acknowledged exception, not a design: they are operator
+ * actions that happen to live under the internal prefix. The proper fix is to
+ * move them to /api/admin/*, which is a frontend change tracked for Phase 12.
+ * Until then they accept an operator principal AND remain subject to the
+ * tenant scope enforced by tenantScopeHook, so a human credential still
+ * cannot reach another tenant's data through them.
+ */
+const OPERATOR_PERMITTED_INTERNAL_ROUTES: RegExp[] = [
+  /^\/api\/v1\/internal\/projects\/[^/]+\/git-repositories(\/[^/]+)?$/,
+  /^\/api\/v1\/internal\/projects\/[^/]+\/git-sync-logs$/,
+  /^\/api\/v1\/internal\/tickets\/close$/,
+  /^\/api\/v1\/internal\/tickets\/[^/]+\/restore$/,
+];
+
+function isInternalRoute(url: string): boolean {
+  return url.split("?")[0].startsWith("/api/v1/internal/");
+}
+
+function isOperatorPermittedInternalRoute(url: string): boolean {
+  const path = url.split("?")[0];
+  return OPERATOR_PERMITTED_INTERNAL_ROUTES.some((re) => re.test(path));
+}
+
+/**
+ * Fastify onRequest hook restricting /api/v1/internal/* to service callers.
+ *
+ * Authenticating as a human operator - even a super_admin - does not confer
+ * machine-to-machine access. A separate service identity is required, so a
+ * stolen or misused console session cannot drive the automation surface.
+ *
+ * Must run after authHook.
+ */
+export async function internalApiGuard(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (!isInternalRoute(request.url)) return;
+
+  const principal = request.principal;
+  if (!principal) {
+    // authHook already refuses these; this is defence in depth.
+    reply.status(401).send({ error: "Unauthorized", message: "Authentication required" });
+    return;
+  }
+
+  if (principal.kind === "service") return;
+  if (isOperatorPermittedInternalRoute(request.url)) return;
+
+  logger.warn(
+    { url: request.url, principal: principal.subject, role: principal.role },
+    "Operator credential refused on a service-only internal endpoint"
+  );
+  reply.status(403).send({
+    error: "Forbidden",
+    code: "SERVICE_CREDENTIAL_REQUIRED",
+    message: "This endpoint requires a service credential",
+  });
+}
+
 /**
  * Fastify onRequest hook enforcing authentication.
  *

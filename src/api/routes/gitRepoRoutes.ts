@@ -11,18 +11,31 @@ const gitRepoDb = new PostgresGitRepository();
 const gitSyncService = new GitSyncService(gitRepoDb);
 
 /**
- * Helper to resolve authenticated tenant context and enforce fail closed rule.
- * Rejects missing or unauthenticated tenant context with HTTP 401/403.
- * Permits org_default ONLY if explicitly supplied via authenticated context/headers.
+ * Resolves the organization for this request from the authenticated principal.
+ *
+ * The x-org-id / x-company-id headers previously took precedence over the
+ * authenticated context, so any caller could select another tenant simply by
+ * setting a header. They are now only honoured for principals that are
+ * genuinely unrestricted (super_admin, service), where choosing an
+ * organization to act on is the legitimate use; for everyone else the header
+ * is ignored and the principal's own organization is used.
+ *
+ * Returns null after sending a 401/403 when no organization can be resolved.
  */
 function resolveTenantOrFailClosed(request: FastifyRequest, reply: FastifyReply): string | null {
-  const headerOrgId = (request.headers["x-org-id"] || request.headers["x-company-id"]) as string | undefined;
-  const ctxOrgId = request.tenantContext?.orgId;
+  const ctxOrgId = (request.tenantContext?.orgId || "").trim();
+  const isUnrestricted = request.tenantScope?.unrestricted === true || ctxOrgId === "org_all";
 
-  const resolvedOrgId = (headerOrgId || ctxOrgId || "").trim();
+  if (isUnrestricted) {
+    const headerOrgId = String(
+      request.headers["x-org-id"] || request.headers["x-company-id"] || ""
+    ).trim();
+    if (headerOrgId) return headerOrgId;
+    // No organization named: fall through to the project's own owner.
+    return "org_all";
+  }
 
-  // Fail closed if tenant context is missing or empty
-  if (!resolvedOrgId) {
+  if (!ctxOrgId) {
     reply.status(401).send({
       error: "Unauthorized: Tenant context (orgId) is mandatory for Git repository management.",
       code: "TENANT_CONTEXT_MISSING",
@@ -30,7 +43,7 @@ function resolveTenantOrFailClosed(request: FastifyRequest, reply: FastifyReply)
     return null;
   }
 
-  return resolvedOrgId;
+  return ctxOrgId;
 }
 
 /**
@@ -38,10 +51,15 @@ function resolveTenantOrFailClosed(request: FastifyRequest, reply: FastifyReply)
  */
 async function assertProjectOwnership(projectId: number, orgId: string, reply: FastifyReply): Promise<boolean> {
   try {
-    const { rows } = await pool.query(
-      `SELECT id FROM projects WHERE id = $1 AND org_id = $2 LIMIT 1`,
-      [projectId, orgId]
-    );
+    // "org_all" is the unrestricted sentinel: the caller may act on any
+    // organization, so ownership is satisfied by the project existing.
+    const { rows } =
+      orgId === "org_all"
+        ? await pool.query(`SELECT id FROM projects WHERE id = $1 LIMIT 1`, [projectId])
+        : await pool.query(
+            `SELECT id FROM projects WHERE id = $1 AND org_id = $2 LIMIT 1`,
+            [projectId, orgId]
+          );
 
     if (rows.length === 0) {
       reply.status(403).send({
