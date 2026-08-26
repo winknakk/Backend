@@ -37,6 +37,11 @@ export const EnvSchema = z.object({
   CORS_ALLOWED_ORIGINS: z
     .string()
     .default("http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"),
+  // Secret used to sign admin session tokens. Required (together with or
+  // instead of API_KEY) for the API to serve authenticated requests at all —
+  // see authHook, which fails closed when neither is configured.
+  SESSION_SECRET: z.string().min(32).optional(),
+  SESSION_TTL_HOURS: z.coerce.number().min(1).max(168).default(12),
   WEBHOOK_SECRET: z.string().optional(),
   RATE_LIMIT_MAX: z.coerce.number().default(60),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),

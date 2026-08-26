@@ -2,6 +2,13 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { CentralAuthService } from "../../services/CentralAuthService";
+import { getSessionTokenService } from "../../middleware/auth";
+import { OperatorPrincipalResolver } from "../../infrastructure/security/OperatorPrincipalResolver";
+import { verifyPassword } from "../../infrastructure/security/PasswordHasher";
+import { pool } from "../../adapters/postgres/PostgresAdapter";
+import { createLogger } from "../../observability/logger";
+
+const logger = createLogger("auth-routes");
 
 const LoginSchema = z.object({
   username: z.string(),
@@ -52,6 +59,8 @@ const CreateCenterOrgSchema = z.object({
 
 export async function registerAuthRoutes(fastify: FastifyInstance) {
   const centralAuthService = new CentralAuthService();
+  const principalResolver = new OperatorPrincipalResolver();
+  const sessionTokens = getSessionTokenService();
 
   // 1. Center Login Proxy
   fastify.post("/api/v1/auth/center-login", async (request, reply) => {
@@ -221,9 +230,39 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
 
       profile.orgId = effectiveOrgId;
 
+      // Exchange the verified Center identity for a TicketX session token.
+      // Center proves who the user is; TicketX still decides what they may
+      // see, so scope comes from the local operator record, never from the
+      // Center payload.
+      let sessionToken: string | undefined;
+      let sessionExpiresAt: string | undefined;
+      if (sessionTokens && profile.email) {
+        const operator = await principalResolver.findOperatorByEmail(profile.email);
+        if (operator) {
+          try {
+            const principal = await principalResolver.buildPrincipal(operator);
+            const issued = sessionTokens.issue(principal);
+            sessionToken = issued.token;
+            sessionExpiresAt = issued.expiresAt;
+          } catch (err: any) {
+            logger.warn(
+              { email: profile.email, code: err.code },
+              "Center login succeeded but the operator may not hold a session"
+            );
+          }
+        } else {
+          logger.warn(
+            { email: profile.email },
+            "Center login succeeded but no matching operator record exists"
+          );
+        }
+      }
+
       return reply.send({
         success: true,
         token,
+        sessionToken,
+        expiresAt: sessionExpiresAt,
         profile,
         orgs: userOrgs,
         myRole,
@@ -239,78 +278,79 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
     if (!parseResult.success) {
       return reply.status(400).send({ error: "Invalid login payload" });
     }
+    if (!sessionTokens) {
+      return reply.status(503).send({
+        error: "Service Unavailable",
+        message: "Session authentication is not configured (SESSION_SECRET missing)",
+      });
+    }
 
     const { username, password } = parseResult.data;
 
-    // Direct Center Auth check if email is provided
-    if (username.includes("@")) {
-      try {
-        const centerRes = await centralAuthService.loginToCenter(username, password);
-        const token = centerRes.token || centerRes.access_token || "";
-        const profile = centralAuthService.parseCenterJwt(token);
-        return reply.send({
-          success: true,
-          token,
-          user: profile,
-        });
-      } catch (e) {
-        // Fallback to local accounts
-      }
+    const operator = await principalResolver.findOperatorByEmail(username);
+    if (!operator) {
+      // Same response as a wrong password: do not disclose which accounts exist.
+      return reply.status(401).send({ error: "Invalid username or password" });
     }
 
-    // Quick Mock Demo Accounts
-    const mockAccounts: Record<string, { name: string; role: "super_admin" | "admin" | "employee" | "customer"; orgId: string }> = {
-      "superadmin@ticketx.io": { name: "Super Admin Overseer", role: "super_admin", orgId: "org_default" },
-      "admin@avalant.co.th": { name: "Avalant Org Admin", role: "admin", orgId: "org_avalant" },
-      "agent@avalant.co.th": { name: "Avalant Support Agent", role: "employee", orgId: "org_avalant" },
-      "customer@avalant.co.th": { name: "Avalant Client User", role: "customer", orgId: "org_avalant" },
-    };
-
-    if (mockAccounts[username]) {
-      const mock = mockAccounts[username];
-      return reply.send({
-        success: true,
-        token: `ticketx_mock_${mock.role}_token_${Date.now()}`,
-        user: {
-          username,
-          name: mock.name,
-          role: mock.role,
-          email: username,
-          orgId: mock.orgId,
-        },
-      });
+    const passwordOk = await verifyPassword(password, operator.passwordHash);
+    if (!passwordOk) {
+      logger.warn({ email: username, ip: request.ip }, "Failed operator login");
+      return reply.status(401).send({ error: "Invalid username or password" });
     }
 
-    const validUsername = process.env.ADMIN_USERNAME || "admin";
-    const validPassword = process.env.ADMIN_PASSWORD || "admin123";
-
-    if (username === validUsername && password === validPassword) {
-      const token = `ticketx_admin_token_${Date.now()}`;
-      return reply.send({
-        success: true,
-        token,
-        user: {
-          username,
-          name: "Admin Operator",
-          role: "super_admin",
-          email: "admin@ticketx.ai",
-          orgId: "org_default",
-        },
-      });
+    let principal;
+    try {
+      principal = await principalResolver.buildPrincipal(operator);
+    } catch (err: any) {
+      logger.warn({ email: username, code: err.code }, "Operator authenticated but refused a session");
+      return reply.status(403).send({ error: "Forbidden", message: err.message, code: err.code });
     }
 
-    return reply.status(401).send({ error: "Invalid username or password" });
+    const { token, expiresAt } = sessionTokens.issue(principal);
+    await pool
+      .query(`UPDATE operators SET last_login_at = NOW() WHERE id = $1`, [operator.id])
+      .catch((err: any) => logger.warn({ error: err.message }, "Could not record last_login_at"));
+
+    logger.info({ operatorId: principal.subject, role: principal.role, orgId: principal.orgId }, "Operator signed in");
+
+    return reply.send({
+      success: true,
+      token,
+      expiresAt,
+      user: {
+        username: operator.email,
+        email: operator.email,
+        name: operator.email.split("@")[0],
+        role: principal.role,
+        orgId: principal.orgId,
+        projectIds: principal.projectIds,
+      },
+    });
   });
 
+  /**
+   * Returns the caller's own session. Unlike the previous implementation this
+   * verifies the presented token instead of unconditionally reporting an
+   * authenticated super_admin.
+   */
   fastify.get("/api/v1/auth/me", async (request, reply) => {
+    const header = request.headers.authorization;
+    const token = header && header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    const principal = sessionTokens && token ? sessionTokens.verify(token) : null;
+
+    if (!principal) {
+      return reply.status(401).send({ authenticated: false });
+    }
+
     return reply.send({
       authenticated: true,
       user: {
-        username: "admin",
-        name: "Admin Operator",
-        role: "super_admin",
-        email: "admin@ticketx.ai",
-        orgId: "org_default",
+        username: principal.email,
+        email: principal.email,
+        role: principal.role,
+        orgId: principal.orgId,
+        projectIds: principal.projectIds,
       },
     });
   });
