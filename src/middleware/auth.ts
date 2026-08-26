@@ -6,12 +6,21 @@ const logger = createLogger("auth");
 
 /**
  * Fastify onRequest hook for Bearer token authentication.
- * If config.API_KEY is not set, validation is skipped (dev convenience).
+ * In production, API_KEY is required. In development, auth is skipped with a warning.
  * The /health endpoint is always accessible without authentication.
  */
 export async function authHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-  // Skip auth if no API_KEY is configured (dev convenience)
+  // Skip auth if no API_KEY is configured
   if (!config.API_KEY) {
+    if (config.NODE_ENV === "production") {
+      logger.error("SECURITY: API_KEY is not configured in production. Rejecting all authenticated requests.");
+      reply.status(503).send({
+        error: "Service Unavailable",
+        message: "Server authentication is not configured",
+      });
+      return;
+    }
+    // Development mode: allow but log warning
     return;
   }
 
@@ -22,7 +31,6 @@ export async function authHook(request: FastifyRequest, reply: FastifyReply): Pr
     request.url.startsWith("/api/v1/auth/") ||
     request.url.startsWith("/api/v1/webchat") ||
     request.url.startsWith("/api/v1/webhooks") ||
-    request.url.startsWith("/api/v1/internal/") ||
     request.url.startsWith("/api/v1/media/")
   ) {
     return;

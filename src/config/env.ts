@@ -30,6 +30,13 @@ export const EnvSchema = z.object({
   PROMPTX_DIAGNOSTIC_TIMEOUT_MS: z.coerce.number().int().min(500).max(10000).default(3000),
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   API_KEY: z.string().optional(),
+  // Comma-separated list of browser origins allowed to call the API with
+  // credentials. An arbitrary reflected origin combined with
+  // Access-Control-Allow-Credentials defeats the same-origin policy, so the
+  // origin must be matched against this allowlist before it is echoed back.
+  CORS_ALLOWED_ORIGINS: z
+    .string()
+    .default("http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"),
   WEBHOOK_SECRET: z.string().optional(),
   RATE_LIMIT_MAX: z.coerce.number().default(60),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
@@ -49,7 +56,7 @@ export const EnvSchema = z.object({
   LINE_GROUP_GATEWAY_WEBHOOK_URL: z.string().url().default("https://wf.promptxai.com/api/v1/webhooks/dRV0RN5vXQLDZ67t9VROo"),
   LINE_ONBOARDING_MODE: z.enum(["code_required", "smart"]).default("code_required"),
   LINE_BATCH_ENABLED: z.coerce.boolean().default(true),
-  LINE_BATCH_WINDOW_MS: z.coerce.number().int().min(1000).default(15000),
+  LINE_BATCH_WINDOW_MS: z.coerce.number().int().min(500).default(2000),
   PROJECT_JOIN_CODE_PEPPER: z.string().min(16).optional(),
   PLANE_API_URL: z.string().url().default("https://api.plane.so"),
   PLANE_API_KEY: z.string().default("plane_mock_key"),
@@ -89,3 +96,4 @@ export const validateEnv = (): Env => {
   return (result.data || {}) as Env;
 };
 export const config = validateEnv();
+

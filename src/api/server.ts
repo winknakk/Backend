@@ -231,7 +231,7 @@ async function requestHumanTakeover(input: {
     });
   }
 
-  let smsTargetPhone = "0633628242";
+  let smsTargetPhone = "";
   try {
     const projAdminResult = await pool.query(
       `SELECT phone_number FROM operators o
@@ -321,12 +321,40 @@ fastify.addHook("onRequest", (request, reply, done) => {
   });
 });
 
+// Origins permitted to make credentialed browser requests. Reflecting an
+// arbitrary Origin alongside Access-Control-Allow-Credentials would let any
+// site issue authenticated cross-origin calls, so the header is only echoed
+// back for origins on this list.
+const allowedOrigins = new Set(
+  config.CORS_ALLOWED_ORIGINS.split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0)
+);
+
 fastify.addHook("onRequest", async (request, reply) => {
-  reply.header("Access-Control-Allow-Origin", "*");
-  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
-  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Org-Id, x-org-id, X-Identity-Id, x-identity-id, X-Project-Id, x-project-id, x-correlation-id, *");
+  const origin = request.headers.origin;
+
+  // Vary is required whenever the response depends on Origin, otherwise a
+  // shared cache can serve one origin's CORS headers to another.
+  reply.header("Vary", "Origin");
+
+  if (origin && allowedOrigins.has(origin)) {
+    reply.header("Access-Control-Allow-Origin", origin);
+    reply.header("Access-Control-Allow-Credentials", "true");
+    reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+    reply.header(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, X-Org-Id, x-org-id, X-Identity-Id, x-identity-id, X-Project-Id, x-project-id, x-correlation-id, x-request-id, x-trace-id"
+    );
+    reply.header("Access-Control-Max-Age", "600");
+  } else if (origin) {
+    serverLogger.warn({ origin, url: request.url }, "Rejected cross-origin request from unlisted origin");
+  }
+
   if (request.method === "OPTIONS") {
-    return reply.code(200).send();
+    // A preflight from an unlisted origin gets no CORS headers, so the browser
+    // blocks the real request regardless of the status code returned here.
+    return reply.code(origin && allowedOrigins.has(origin) ? 204 : 403).send();
   }
 });
 
@@ -868,9 +896,6 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
     status: state.status,
     suppress_reply: true,
     expires_at: state.leaseExpiresAt,
-    admin_phone_number: (state as any).smsTargetPhone,
-    sms_provider_url: (state as any).smsProviderUrl,
-    sms_provider_token: (state as any).smsProviderToken
   });
 });
 
@@ -894,6 +919,15 @@ fastify.post("/api/v1/internal/notifications/sms", async (request, reply) => {
 });
 
 fastify.get("/api/admin/socket", { websocket: true }, (connection, req) => {
+  // Verify authentication on WebSocket connection
+  const wsToken = (req.query as any)?.token || req.headers["authorization"]?.replace("Bearer ", "");
+  if (config.API_KEY && wsToken !== config.API_KEY) {
+    const socket = (connection as any).socket;
+    serverLogger.warn({ ip: req.ip }, "Unauthorized WebSocket connection attempt rejected");
+    socket.close(4001, "Unauthorized");
+    return;
+  }
+
   const socket = (connection as any).socket;
   const projectId = String((req.query as any)?.projectId || req.headers["x-project-id"] || "1");
   serverLogger.info({ projectId }, "Admin WebSocket connection established");
@@ -959,7 +993,6 @@ fastify.post("/api/v1/internal/tickets/promote", async (request, reply) => {
       statusCode: 500,
       error: "Internal Server Error",
       message: err.message || String(err),
-      stack: err.stack,
     });
   }
 });
@@ -1438,19 +1471,10 @@ fastify.get("/api/v1/internal/conversations/search", async (request, reply) => {
       `SELECT * FROM conversations WHERE promptx_conversation_id = $1 LIMIT 1`,
       [identityId]
     );
-    if (res.rows.length === 0) {
-      const fallbackRes = await pool.query(
-        `SELECT * FROM conversations WHERE status = 'open' ORDER BY created_at DESC LIMIT 1`
-      );
-      if (fallbackRes.rows.length > 0) {
-        const convId = fallbackRes.rows[0].id;
-        await pool.query(
-          `UPDATE conversations SET promptx_conversation_id = $1 WHERE id = $2`,
-          [identityId, convId]
-        );
-        res = fallbackRes;
-      }
-    }
+    // SEC-INFO-01 FIX: Do NOT fall back to latest open conversation.
+    // If the PromptX conversation ID is not found, return empty results.
+    // The previous fallback logic grabbed an unrelated conversation and
+    // reassigned its PromptX ID, causing cross-customer data leakage.
     } else {
       if (projectId) {
         res = await pool.query(

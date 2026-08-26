@@ -72,6 +72,133 @@ export class PlaneApiClient {
   }
 
   /**
+   * Classifies a failed Plane call as retryable or permanent.
+   *
+   * Retryable: network-level failures (no HTTP status), timeouts, 5xx, and 429.
+   * Permanent: every other 4xx — 400/401/403/404/409 will not succeed on a
+   * retry, and burning attempts on them only delays the outbox.
+   */
+  private isRetryable(err: any): boolean {
+    const status = err?.response?.status;
+    if (status === 429) return true;
+    if (status === undefined || status === null) {
+      // No response at all: DNS failure, connection reset, or client timeout.
+      return true;
+    }
+    return status >= 500;
+  }
+
+  /**
+   * Honours Plane's Retry-After header when present, otherwise falls back to
+   * exponential backoff. Retry-After may be given in seconds or as an HTTP date.
+   */
+  private retryDelayMs(err: any, attempt: number, baseDelayMs: number): number {
+    const backoff = baseDelayMs * Math.pow(2, attempt);
+    const header = err?.response?.headers?.["retry-after"];
+    if (header === undefined || header === null) return backoff;
+
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      // Cap so a hostile or misconfigured header cannot stall the worker.
+      return Math.min(seconds * 1000, 30000);
+    }
+
+    const retryAt = Date.parse(String(header));
+    if (!Number.isNaN(retryAt)) {
+      return Math.min(Math.max(retryAt - Date.now(), 0), 30000);
+    }
+    return backoff;
+  }
+
+  /**
+   * Executes a Plane HTTP call, retrying transient failures with backoff.
+   *
+   * `onBeforeRetry` lets a non-idempotent caller (work item creation) check
+   * whether the previous attempt actually succeeded before it is repeated. If
+   * it returns a value, that value is used and no further request is made.
+   */
+  private async executeWithRetry<T>(
+    fn: () => Promise<T>,
+    options: {
+      maxRetries?: number;
+      delayMs?: number;
+      operation?: string;
+      onBeforeRetry?: () => Promise<T | null>;
+    } = {}
+  ): Promise<T> {
+    const { maxRetries = 2, delayMs = 1000, operation = "plane_request", onBeforeRetry } = options;
+    let lastError: any;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        lastError = err;
+        if (attempt >= maxRetries || !this.isRetryable(err)) {
+          throw err;
+        }
+
+        const waitTime = this.retryDelayMs(err, attempt, delayMs);
+        logger.warn(
+          {
+            operation,
+            attempt: attempt + 1,
+            maxRetries,
+            waitTime,
+            status: err.response?.status,
+            error: err.message,
+          },
+          "Transient Plane API error, retrying"
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+        if (onBeforeRetry) {
+          // The failed attempt may still have been applied by Plane (classic
+          // timeout-after-write). Reconcile before issuing a duplicate write.
+          const reconciled = await onBeforeRetry().catch((reconcileErr: any) => {
+            logger.warn({ operation, error: reconcileErr.message }, "Retry reconciliation check failed");
+            return null;
+          });
+          if (reconciled !== null && reconciled !== undefined) {
+            logger.info({ operation }, "Previous attempt had already succeeded in Plane; skipping retry");
+            return reconciled;
+          }
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * Looks up a work item Plane already holds for a TicketX external id.
+   * Returns null when Plane has no such item.
+   */
+  async findWorkItemByExternalId(
+    projectConfig: PlaneProjectConfig,
+    externalId: string
+  ): Promise<{ id: string } | null> {
+    const url = `${this.getProjectBaseUrl(projectConfig)}/issues/`;
+    try {
+      const res = await this.httpClient.get(url, {
+        headers: this.getHeaders(projectConfig),
+        params: { external_id: externalId, external_source: "TicketX" },
+        timeout: 10000,
+      });
+
+      const rows = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.results)
+          ? res.data.results
+          : [];
+      const match = rows.find((r: any) => String(r?.external_id) === String(externalId)) || rows[0];
+      return match?.id ? { id: String(match.id) } : null;
+    } catch (err: any) {
+      if (err.response?.status === 404) return null;
+      throw err;
+    }
+  }
+
+  /**
    * Creates a Work Item in the target Plane Project.
    */
   async createWorkItem(projectConfig: PlaneProjectConfig, payload: PlaneWorkItemPayload): Promise<{ id: string }> {
@@ -79,20 +206,41 @@ export class PlaneApiClient {
     logger.info({ url, planeProjectId: projectConfig.planeProjectId }, "Creating work item in Plane project");
 
     try {
-      const res = await this.httpClient.post(url, payload, {
-        headers: this.getHeaders(projectConfig),
-        timeout: 20000,
-      });
+      return await this.executeWithRetry(
+        async () => {
+          const res = await this.httpClient.post(url, payload, {
+            headers: this.getHeaders(projectConfig),
+            timeout: 10000,
+          });
 
-      if (!res.data || !res.data.id) {
-        throw new Error("Plane API creation failed: No ID returned in response payload");
-      }
+          if (!res.data || !res.data.id) {
+            throw new Error("Plane API creation failed: No ID returned in response payload");
+          }
 
-      return { id: String(res.data.id) };
+          return { id: String(res.data.id) };
+        },
+        {
+          operation: "createWorkItem",
+          // POST is not idempotent: a client timeout does not mean Plane failed
+          // to create the issue. Check before retrying so a slow response can
+          // never produce a duplicate work item.
+          onBeforeRetry: () => this.findWorkItemByExternalId(projectConfig, payload.external_id),
+        }
+      );
     } catch (err: any) {
       if (err.response?.status === 409) {
+        // Plane already holds an item for this external_id. Resolve its real
+        // Plane UUID — returning payload.external_id here would store a
+        // TicketX identifier in tickets.plane_issue_id and silently break
+        // every later patch, status sync and reverse sync for this ticket.
         logger.info({ external_id: payload.external_id }, "Plane returned 409 Conflict: issue already created");
-        return { id: String(payload.external_id) };
+        const existing = await this.findWorkItemByExternalId(projectConfig, payload.external_id);
+        if (existing) {
+          return existing;
+        }
+        throw new Error(
+          `PLANE_CONFLICT_UNRESOLVED: Plane reported a duplicate for external_id ${payload.external_id} but no matching work item could be retrieved`
+        );
       }
       throw err;
     }
@@ -105,10 +253,16 @@ export class PlaneApiClient {
     const url = `${this.getProjectBaseUrl(projectConfig)}/issues/${encodeURIComponent(planeIssueId)}/`;
     logger.info({ url, planeIssueId }, "Patching work item in Plane project");
 
-    await this.httpClient.patch(url, payload, {
-      headers: this.getHeaders(projectConfig),
-      timeout: 20000,
-    });
+    // PATCH is idempotent, so it is safe to repeat without reconciliation.
+    await this.executeWithRetry(
+      async () => {
+        await this.httpClient.patch(url, payload, {
+          headers: this.getHeaders(projectConfig),
+          timeout: 10000,
+        });
+      },
+      { operation: "patchWorkItem" }
+    );
   }
 
   /**
