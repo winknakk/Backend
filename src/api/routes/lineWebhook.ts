@@ -83,7 +83,10 @@ async function sendLineReply(replyToken: string, decision: LineOnboardingDecisio
         data: err.response?.data,
         message: err.message,
         replyToken,
-        tokenPrefix: config.LINE_CHANNEL_ACCESS_TOKEN?.slice(0, 15),
+        // Whether a token is configured is the diagnostically useful part.
+        // The previous line logged its first 15 characters on every LINE
+        // reply failure, which put credential material into the server log.
+        tokenConfigured: Boolean(config.LINE_CHANNEL_ACCESS_TOKEN),
       },
       "LINE reply API call failed"
     );

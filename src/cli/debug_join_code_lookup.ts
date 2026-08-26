@@ -1,6 +1,7 @@
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import crypto from "crypto";
+import { createHash } from "crypto";
 
 function normalizeCode(value: string): string {
   return String(value || "")
@@ -26,8 +27,14 @@ async function debugLookup(): Promise<void> {
   const pepper2 = config.LINE_CHANNEL_ACCESS_TOKEN;
   const pepper3 = "automationx_default_pepper_key_2026";
 
-  console.log("Pepper 1 (config.PROJECT_JOIN_CODE_PEPPER):", pepper1 ? `${pepper1.slice(0, 10)}...` : "(none)");
-  console.log("Pepper 2 (config.LINE_CHANNEL_ACCESS_TOKEN):", pepper2 ? `${pepper2.slice(0, 10)}...` : "(none)");
+  // Print only whether a value is configured and a non-reversible
+  // fingerprint. Printing a prefix of a credential is still printing
+  // credential material, and this output ends up in terminals and tickets.
+  const fingerprint = (v?: string) =>
+    v ? `set (len=${v.length}, sha256=${createHash("sha256").update(v).digest("hex").slice(0, 8)})` : "(none)";
+
+  console.log("Pepper 1 (config.PROJECT_JOIN_CODE_PEPPER):", fingerprint(pepper1));
+  console.log("Pepper 2 (config.LINE_CHANNEL_ACCESS_TOKEN):", fingerprint(pepper2));
 
   const digest1 = pepper1 ? digestCode(normalized, pepper1) : null;
   const digest2 = pepper2 ? digestCode(normalized, pepper2) : null;
