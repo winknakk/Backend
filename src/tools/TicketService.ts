@@ -10,6 +10,7 @@ import { TicketInput, ExecutionResult } from "../schemas/validation";
 import { DatabaseAdapter } from "../adapters/types";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { mapPlanePriorityToTicketPriority } from "../services/planeWebhookService";
+import { customerNotificationService } from "../services/CustomerNotificationService";
 
 export class TicketService {
   private dbAdapter: DatabaseAdapter;
@@ -160,6 +161,25 @@ export class TicketService {
 
       // Write to local encrypted backup
       await BackupManager.saveToBackup("tickets", resultData, "id");
+
+      // Tell the customer their case now has a number.
+      //
+      // This is the second half of the Fast Path acknowledgement: the first
+      // message is sent at ingestion and deliberately promises nothing but a
+      // look, because at that point no ticket exists to name. Keyed on the
+      // ticket id, so a retried creation cannot produce a second message.
+      void customerNotificationService
+        .send({
+          conversationId: ticket.conversationId,
+          notificationType: "ticket_created",
+          idempotencyKey: `ticket:${ticket.id}`,
+          ticketId: ticket.id,
+          ticketNumber,
+          projectId: parseInt(String(input.projectId), 10) || null,
+        })
+        .catch((err: any) =>
+          console.error("Failed to send ticket_created notification:", err.message)
+        );
 
       return {
         success: true,

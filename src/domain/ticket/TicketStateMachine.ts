@@ -37,6 +37,12 @@ export interface TransitionResult {
   planeStatus?: string;
   /** Customer-facing notification this transition warrants, if any. */
   notify?: ReturnType<typeof customerNotificationFor>;
+  /**
+   * ticket_events row id for this transition. Notifications key their
+   * idempotency on it, so a re-resolution after REOPENED notifies again while
+   * a repeated Done on an already-resolved ticket cannot.
+   */
+  eventId?: number | null;
   code?: string;
   reason?: string;
 }
@@ -117,9 +123,10 @@ export class TicketStateMachine {
       };
     }
 
-    await this.recordEvent(ticket.id, from, req.to, req);
+    const eventId = await this.recordEvent(ticket.id, from, req.to, req);
 
     const result: TransitionResult = {
+      eventId,
       applied: true,
       ticketId: ticket.id,
       from,
@@ -247,11 +254,12 @@ export class TicketStateMachine {
     from: TicketLifecycleStatus,
     to: TicketLifecycleStatus,
     req: TransitionRequest
-  ): Promise<void> {
+  ): Promise<number | null> {
     try {
-      await pool.query(
+      const { rows } = await pool.query(
         `INSERT INTO ticket_events (ticket_id, event_type, actor, payload, correlation_id, source, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         RETURNING id`,
         [
           ticketId,
           "STATUS_TRANSITION",
@@ -268,8 +276,10 @@ export class TicketStateMachine {
           req.source || req.actor,
         ]
       );
+      return rows.length > 0 ? Number(rows[0].id) : null;
     } catch (err: any) {
       logger.error({ error: err.message, ticketId, from, to }, "Failed to record ticket_events row");
+      return null;
     }
   }
 }

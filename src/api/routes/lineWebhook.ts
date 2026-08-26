@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config/env";
+import { customerNotificationService } from "../../services/CustomerNotificationService";
+import { customerConfirmationHandler } from "../../services/CustomerConfirmationHandler";
 import {
   LineOnboardingDecision,
   LineProjectOnboardingService,
@@ -359,6 +361,106 @@ export function registerLineWebhookRoutes(
 
             // Image pre-ingestion (S3 upload) is done immediately above —
             // LINE image URLs expire quickly and must be fetched before batching.
+
+            // --- Fast Path: persist the inbound text, then acknowledge ---
+            //
+            // The customer's message used to exist only inside the batch
+            // payload forwarded to PromptX. Persisting it here means the
+            // report survives even if every downstream dependency is down,
+            // and gives the acknowledgement something true to acknowledge.
+            //
+            // Idempotent on (conversation_id, external_id): a LINE retry
+            // updates the same row rather than inserting a second copy.
+            if (decision.conversationId && event?.type === "message" && event?.message?.type === "text") {
+              try {
+                await pool.query(
+                  `INSERT INTO messages (conversation_id, role, content, message_type, external_id, quote_token, created_at)
+                   VALUES ($1, 'customer', $2, 'text', $3, $4, NOW())
+                   ON CONFLICT (conversation_id, external_id) DO UPDATE
+                     SET content = EXCLUDED.content`,
+                  [
+                    decision.conversationId,
+                    String(event.message.text || ""),
+                    String(event.message.id || ""),
+                    event.message.quoteToken || null,
+                  ]
+                );
+              } catch (persistErr: any) {
+                logger.error(
+                  { error: persistErr.message, webhookEventId, conversationId: decision.conversationId },
+                  "Failed to persist inbound LINE text message"
+                );
+              }
+            }
+
+            // If this conversation has a ticket waiting on the customer, the
+            // reply may be the answer to that question. Handled deterministically
+            // and before the AI: closing a ticket is a state transition, and
+            // customer text must not reach an LLM that can perform one.
+            //
+            // Returns handled=false for anything that is not an answer, which
+            // is the common case, and processing continues normally.
+            let confirmationHandled = false;
+            if (decision.conversationId && event?.type === "message" && event?.message?.type === "text") {
+              try {
+                const outcome = await customerConfirmationHandler.handle({
+                  conversationId: Number(decision.conversationId),
+                  text: String(event.message.text || ""),
+                  correlationId: webhookEventId,
+                });
+                confirmationHandled = outcome.handled;
+                if (outcome.handled) {
+                  logger.info(
+                    {
+                      webhookEventId,
+                      conversationId: decision.conversationId,
+                      ticketId: outcome.ticketId,
+                      from: outcome.from,
+                      to: outcome.to,
+                    },
+                    "Customer reply resolved a pending ticket confirmation"
+                  );
+                }
+              } catch (confirmErr: any) {
+                logger.error(
+                  { error: confirmErr.message, webhookEventId },
+                  "Customer confirmation handling failed"
+                );
+              }
+            }
+
+            // Acknowledge before any AI work begins. This is the Fast Path
+            // requirement: the customer hears back immediately, and never
+            // waits on the batch window, PromptX, RAG or Plane.
+            //
+            // Idempotency is keyed on webhookEventId, so a LINE retry cannot
+            // produce a second acknowledgement. (processEvent already drops
+            // duplicate webhookEventIds before this point; the ledger is the
+            // second, database-enforced guarantee.)
+            if (decision.conversationId && webhookEventId && event?.type === "message" && !confirmationHandled) {
+              void customerNotificationService
+                .send({
+                  conversationId: Number(decision.conversationId),
+                  notificationType: "acknowledgement",
+                  idempotencyKey: webhookEventId,
+                  projectId: decision.projectId ?? null,
+                  correlationId: webhookEventId,
+                })
+                .catch((ackErr: any) =>
+                  logger.error(
+                    { error: ackErr.message, webhookEventId },
+                    "Failed to send customer acknowledgement"
+                  )
+                );
+            }
+
+            if (confirmationHandled) {
+              // The turn is complete: the ticket transitioned and the customer
+              // was told. Forwarding it to the AI as well would produce a
+              // second, contradictory reply.
+              processed += 1;
+              continue;
+            }
 
             if (config.LINE_BATCH_ENABLED && event?.source?.userId) {
               // Enqueue for debounced batch forwarding.

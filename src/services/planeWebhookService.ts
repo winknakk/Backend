@@ -4,6 +4,7 @@ import { DatabaseAdapter } from "../adapters/types";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
+import { customerNotificationService } from "./CustomerNotificationService";
 import { createLogger } from "../observability/logger";
 
 const logger = createLogger("planeWebhookService");
@@ -263,7 +264,14 @@ export class PlaneWebhookService {
     // raw state. Only reaching RESOLVED asks the customer to confirm, so a
     // repeated "Done" on an already-resolved ticket notifies nobody.
     if (lifecycleResult?.applied && lifecycleResult.notify === "resolution_confirmation_request") {
-      this.doneNotificationDispatcher(planeIssueId).catch((err) => {
+      // Keyed on the transition's ticket_events row, so a repeated "Done"
+      // cannot re-notify, while a genuine re-resolution after REOPENED
+      // produces a new event and therefore a new notification.
+      void this.dispatchResolutionNotification(
+        planeIssueId,
+        lifecycleResult.ticketId!,
+        lifecycleResult.eventId ?? null
+      ).catch((err) => {
         logger.error({ error: err.message, planeIssueId }, "Failed to dispatch customer resolution notification");
       });
     }
@@ -276,6 +284,39 @@ export class PlaneWebhookService {
       status,
       priority,
     };
+  }
+
+  /**
+   * Asks the customer to confirm the fix.
+   *
+   * Replaces a message that announced completion outright. Under the
+   * two-layer model Plane reaching Done means engineering finished, not that
+   * the customer agrees — so the message invites confirmation, and the ticket
+   * stays RESOLVED until the customer acts.
+   */
+  private async dispatchResolutionNotification(
+    planeIssueId: string,
+    ticketId: number,
+    eventId: number | null
+  ): Promise<void> {
+    const { rows } = await pool.query(
+      `SELECT t.id, t.ticket_number, t.conversation_id, t.project_id, t.org_id
+         FROM tickets t WHERE t.id = $1 LIMIT 1`,
+      [ticketId]
+    );
+    if (rows.length === 0 || !rows[0].conversation_id) return;
+    const ticket = rows[0];
+
+    await customerNotificationService.send({
+      conversationId: Number(ticket.conversation_id),
+      notificationType: "resolution_confirmation",
+      idempotencyKey: eventId ? `ticket_event:${eventId}` : `ticket:${ticketId}:resolved`,
+      ticketId: Number(ticket.id),
+      ticketNumber: ticket.ticket_number,
+      projectId: ticket.project_id ?? null,
+      orgId: ticket.org_id ?? null,
+      correlationId: planeIssueId,
+    });
   }
 
   private async dispatchCustomerDoneNotification(planeIssueId: string): Promise<void> {
