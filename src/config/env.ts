@@ -83,7 +83,12 @@ export const EnvSchema = z.object({
   PLANE_REVERSE_SYNC_INTERVAL_MS: z.coerce.number().int().min(10000).default(30000),
   PLANE_REVERSE_SYNC_BATCH_SIZE: z.coerce.number().int().min(1).max(25).default(25),
   DB_POOL_MAX: z.coerce.number().default(10),
-  DB_POOL_IDLE_TIMEOUT_MS: z.coerce.number().default(30000),
+  // PostgreSQL is remote (measured ~12 ms per round trip, ~85 ms to open a
+  // fresh connection). At 30 s any channel with a gap between messages paid
+  // that reconnect on almost every inbound event. Holding idle clients for
+  // 10 minutes keeps a warm connection across a normal conversation; the pool
+  // already sets TCP keepAlive and evicts clients that die in the meantime.
+  DB_POOL_IDLE_TIMEOUT_MS: z.coerce.number().default(600000),
   DB_POOL_CONNECTION_TIMEOUT_MS: z.coerce.number().default(20000),
   HUMAN_PENDING_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(60).default(5),
   HUMAN_ACTIVE_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(120).default(15),

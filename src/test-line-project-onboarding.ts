@@ -80,6 +80,13 @@ function testOnboardingVoice(): void {
     "utf8"
   );
   const routeSource = fs.readFileSync(path.resolve(__dirname, "api/routes/lineWebhook.ts"), "utf8");
+  // The Golden Flow acknowledgement lands in the same LINE thread as the
+  // onboarding replies, so it is held to the same female voice. It shipped
+  // in ครับ and was the one place still answering as a man.
+  const notificationSource = fs.readFileSync(
+    path.resolve(__dirname, "services/CustomerNotificationService.ts"),
+    "utf8"
+  );
   const greetingPolicy = fs.readFileSync(
     path.resolve(
       __dirname,
@@ -104,6 +111,8 @@ function testOnboardingVoice(): void {
   assert.match(routeSource, /notificationDisabled/);
   assert.doesNotMatch(serviceSource, /ครับ/);
   assert.doesNotMatch(routeSource, /ครับ/);
+  assert.doesNotMatch(notificationSource, /ครับ/);
+  assert.match(notificationSource, /รับเรื่องแล้วนะคะ/);
   assert.match(greetingPolicy, /ปิดข้อความทักทายเพื่อนใหม่/);
   for (const alias of ["เริ่มใช้งาน", "เมนู", "โปรเจกต์ของฉัน", "/menu", "/project"]) {
     assert.ok(PROJECT_RELINK_COMMAND_TEXTS.includes(alias as any), `missing menu alias: ${alias}`);

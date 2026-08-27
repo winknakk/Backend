@@ -47,7 +47,7 @@ export class HumanTakeoverService {
       aiSummary: {
         lastIntentDetected: "Payment Inquiry",
         whyEscalatedReason: "Operator Takeover Lease Requested",
-        suggestedReply: "ได้รับสลิปแล้วครับ ดำเนินการตรวจสอบให้เรียบร้อยแล้วครับ"
+        suggestedReply: "ได้รับสลิปแล้วนะคะ ดำเนินการตรวจสอบให้เรียบร้อยแล้วค่ะ"
       }
     };
   }

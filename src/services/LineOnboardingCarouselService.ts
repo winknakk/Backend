@@ -90,9 +90,24 @@ function normalizedPublicUrl(publicUrl: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
+/**
+ * Cache of card content hashes, keyed by file name.
+ *
+ * The carousel is rebuilt on every menu request and hashes five ~40 KB PNGs,
+ * each with a synchronous read that blocks the event loop. The cards are
+ * static assets shipped with the build, so the hash is computed once per file
+ * and reused. Editing a PNG on disk therefore needs a restart to change the
+ * `?v=` URL — which a deploy already requires.
+ */
+const cardVersionCache = new Map<string, string>();
+
 export function lineOnboardingCardVersion(fileName: string): string {
+  const cached = cardVersionCache.get(fileName);
+  if (cached) return cached;
   const image = fs.readFileSync(path.join(lineOnboardingCardDirectory(), fileName));
-  return crypto.createHash("sha256").update(image).digest("hex").slice(0, 12);
+  const version = crypto.createHash("sha256").update(image).digest("hex").slice(0, 12);
+  cardVersionCache.set(fileName, version);
+  return version;
 }
 
 function postbackAction(label: string, data: string, showSelection = false): Record<string, unknown> {
@@ -388,6 +403,7 @@ function navigationBubble(page: number, totalPages: number): Record<string, unkn
         label: "หน้าก่อนหน้า",
         data: `ticketx:onboarding:projects_page:${page - 1}`,
         tone: "outline",
+        showSelection: true,
       })
     );
   }
@@ -396,6 +412,7 @@ function navigationBubble(page: number, totalPages: number): Record<string, unkn
       actionPill({
         label: "หน้าถัดไป",
         data: `ticketx:onboarding:projects_page:${page + 1}`,
+        showSelection: true,
       })
     );
   }
@@ -491,6 +508,7 @@ export function buildLineProjectLinkConfirmation(
                 ...actionPill({
                   label: "เปลี่ยนไปโปรเจกต์ใหม่",
                   data: `ticketx:onboarding:switch_project:${confirmation.linkedProjectId}`,
+                  showSelection: true,
                 }),
                 margin: "lg",
               },
@@ -499,6 +517,7 @@ export function buildLineProjectLinkConfirmation(
                   label: "ใช้โปรเจกต์เดิม",
                   data: `ticketx:onboarding:switch_project:${confirmation.currentProjectId}`,
                   tone: "outline",
+                  showSelection: true,
                 }),
                 margin: "sm",
               },

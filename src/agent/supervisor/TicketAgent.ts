@@ -252,14 +252,14 @@ export class TicketAgent implements IAgent {
 
     if (!ticketResult.success) {
       return {
-        text: `ขออภัยค่ะ/ครับ ไม่สามารถสร้างตั๋วใบงานได้ในขณะนี้: ${ticketResult.error}`,
+        text: `ขออภัยค่ะ ไม่สามารถสร้างตั๋วใบงานได้ในขณะนี้: ${ticketResult.error}`,
       };
     }
 
     const ticket = this.normalizeTicket(ticketResult.data);
     this.rememberCreatedTicket(ticket);
     return {
-      text: `สร้างตั๋วใบงานเรียบร้อยแล้วค่ะ/ครับ หมายเลขตั๋ว: ${ticket.ticketId} ทีมซัพพอร์ตจะติดต่อกลับโดยเร็วที่สุดค่ะ/ครับ`,
+      text: `สร้างตั๋วใบงานเรียบร้อยแล้วค่ะ หมายเลขตั๋ว: ${ticket.ticketId} ทีมซัพพอร์ตจะติดต่อกลับโดยเร็วที่สุดค่ะ`,
     };
   }
 
@@ -270,17 +270,17 @@ export class TicketAgent implements IAgent {
   ): Promise<AgentResult> {
     const resolution = await this.resolveTicket(message.text, sessionContext, projectId);
     if (resolution.kind === "none") {
-      return { text: "ยังไม่พบตั๋วที่อ้างถึงค่ะ/ครับ" };
+      return { text: "ยังไม่พบตั๋วที่อ้างถึงค่ะ" };
     }
     if (resolution.kind === "ambiguous") {
-      return this.askWhichTicket(resolution.tickets, "ต้องการดูสถานะตั๋วใบไหนคะ/ครับ");
+      return this.askWhichTicket(resolution.tickets, "ต้องการดูสถานะตั๋วใบไหนคะ");
     }
 
     const ticketId = resolution.ticket.ticketId;
     const result = await this.mcpToolRouter.callTool("get_ticket_status", { ticketId }, sessionContext);
 
     if (!result.success) {
-      return { text: `ขออภัยค่ะ/ครับ ไม่พบข้อมูลตั๋วหมายเลข ${ticketId}` };
+      return { text: `ขออภัยค่ะ ไม่พบข้อมูลตั๋วหมายเลข ${ticketId}` };
     }
 
     const t = this.normalizeTicket({ ...resolution.ticket, ...result.data });
@@ -297,7 +297,7 @@ export class TicketAgent implements IAgent {
   ): Promise<AgentResult> {
     const tickets = await this.findActiveTickets(sessionContext, projectId);
     if (tickets.length === 0) {
-      return { text: "ไม่พบตั๋วใบงานที่เปิดอยู่ในระบบค่ะ/ครับ" };
+      return { text: "ไม่พบตั๋วใบงานที่เปิดอยู่ในระบบค่ะ" };
     }
 
     if (tickets.length === 1 || this.isLowSignalReference(message.text)) {
@@ -316,7 +316,7 @@ export class TicketAgent implements IAgent {
       };
     }
 
-    return this.askWhichTicket(tickets, "พบตั๋วที่เกี่ยวข้องหลายใบค่ะ/ครับ กรุณาระบุว่าเป็นใบไหน");
+    return this.askWhichTicket(tickets, "พบตั๋วที่เกี่ยวข้องหลายใบค่ะ กรุณาระบุว่าเป็นใบไหน");
   }
 
   private async handleCloseTicket(
@@ -326,20 +326,20 @@ export class TicketAgent implements IAgent {
   ): Promise<AgentResult> {
     const resolution = await this.resolveTicket(message.text, sessionContext, projectId);
     if (resolution.kind === "none") {
-      return { text: "ยังไม่พบตั๋วที่ต้องการปิดค่ะ/ครับ" };
+      return { text: "ยังไม่พบตั๋วที่ต้องการปิดค่ะ" };
     }
     if (resolution.kind === "ambiguous") {
-      return this.askWhichTicket(resolution.tickets, "ต้องการปิดตั๋วใบไหนคะ/ครับ");
+      return this.askWhichTicket(resolution.tickets, "ต้องการปิดตั๋วใบไหนคะ");
     }
 
     const ticketId = resolution.ticket.ticketId;
     const result = await this.mcpToolRouter.callTool("close_ticket", { ticketId }, sessionContext);
     if (!result.success) {
-      return { text: `ขออภัยค่ะ/ครับ ไม่สามารถปิดตั๋ว ${ticketId} ได้: ${result.error}` };
+      return { text: `ขออภัยค่ะ ไม่สามารถปิดตั๋ว ${ticketId} ได้: ${result.error}` };
     }
 
     this.rememberReferencedTicket({ ...resolution.ticket, status: "Done" });
-    return { text: `ปิดตั๋ว ${ticketId} เรียบร้อยแล้วค่ะ/ครับ` };
+    return { text: `ปิดตั๋ว ${ticketId} เรียบร้อยแล้วค่ะ` };
   }
 
   private async handleMergeTicket(
@@ -364,7 +364,7 @@ export class TicketAgent implements IAgent {
 
     if (!primaryTicketId || !ticketId) {
       const tickets = await this.findActiveTickets(sessionContext, projectId);
-      return this.askWhichTicket(tickets, "ต้องการรวมตั๋วสองใบไหนคะ/ครับ");
+      return this.askWhichTicket(tickets, "ต้องการรวมตั๋วสองใบไหนคะ");
     }
 
     const result = await this.mcpToolRouter.callTool(
@@ -374,11 +374,11 @@ export class TicketAgent implements IAgent {
     );
 
     if (!result.success) {
-      return { text: `ขออภัยค่ะ/ครับ ไม่สามารถรวมตั๋วได้: ${result.error}` };
+      return { text: `ขออภัยค่ะ ไม่สามารถรวมตั๋วได้: ${result.error}` };
     }
 
     this.rememberReferencedTicket({ ticketId: primaryTicketId });
-    return { text: `รวมตั๋ว ${ticketId} เข้ากับตั๋วหลัก ${primaryTicketId} เรียบร้อยแล้วค่ะ/ครับ` };
+    return { text: `รวมตั๋ว ${ticketId} เข้ากับตั๋วหลัก ${primaryTicketId} เรียบร้อยแล้วค่ะ` };
   }
 
   private async handleAssignTicket(
@@ -388,10 +388,10 @@ export class TicketAgent implements IAgent {
   ): Promise<AgentResult> {
     const resolution = await this.resolveTicket(message.text, sessionContext, projectId);
     if (resolution.kind === "none") {
-      return { text: "ยังไม่พบตั๋วที่ต้องการมอบหมายค่ะ/ครับ" };
+      return { text: "ยังไม่พบตั๋วที่ต้องการมอบหมายค่ะ" };
     }
     if (resolution.kind === "ambiguous") {
-      return this.askWhichTicket(resolution.tickets, "ต้องการมอบหมายตั๋วใบไหนคะ/ครับ");
+      return this.askWhichTicket(resolution.tickets, "ต้องการมอบหมายตั๋วใบไหนคะ");
     }
 
     const assigneeMatch = message.text.match(/(?:ให้|to)\s+([^\s,]+)/i);
@@ -400,11 +400,11 @@ export class TicketAgent implements IAgent {
 
     const result = await this.mcpToolRouter.callTool("assign_ticket", { ticketId, agentId }, sessionContext);
     if (!result.success) {
-      return { text: `ขออภัยค่ะ/ครับ ไม่สามารถมอบหมายตั๋ว ${ticketId} ได้: ${result.error}` };
+      return { text: `ขออภัยค่ะ ไม่สามารถมอบหมายตั๋ว ${ticketId} ได้: ${result.error}` };
     }
 
     this.rememberReferencedTicket(resolution.ticket);
-    return { text: `มอบหมายตั๋ว ${ticketId} ให้ ${agentId} เรียบร้อยแล้วค่ะ/ครับ` };
+    return { text: `มอบหมายตั๋ว ${ticketId} ให้ ${agentId} เรียบร้อยแล้วค่ะ` };
   }
 
   private async handleUpdateSummary(
@@ -414,10 +414,10 @@ export class TicketAgent implements IAgent {
   ): Promise<AgentResult> {
     const resolution = await this.resolveTicket(message.text, sessionContext, projectId);
     if (resolution.kind === "none") {
-      return { text: "ยังไม่พบตั๋วที่ต้องการอัปเดตค่ะ/ครับ" };
+      return { text: "ยังไม่พบตั๋วที่ต้องการอัปเดตค่ะ" };
     }
     if (resolution.kind === "ambiguous") {
-      return this.askWhichTicket(resolution.tickets, "ต้องการอัปเดตตั๋วใบไหนคะ/ครับ");
+      return this.askWhichTicket(resolution.tickets, "ต้องการอัปเดตตั๋วใบไหนคะ");
     }
 
     const ticketId = resolution.ticket.ticketId;
@@ -429,11 +429,11 @@ export class TicketAgent implements IAgent {
     );
 
     if (!result.success) {
-      return { text: `ขออภัยค่ะ/ครับ ไม่สามารถอัปเดตสรุปตั๋ว ${ticketId} ได้: ${result.error}` };
+      return { text: `ขออภัยค่ะ ไม่สามารถอัปเดตสรุปตั๋ว ${ticketId} ได้: ${result.error}` };
     }
 
     this.rememberReferencedTicket({ ...resolution.ticket, runningSummary });
-    return { text: `อัปเดตตั๋ว ${ticketId} เรียบร้อยแล้วค่ะ/ครับ` };
+    return { text: `อัปเดตตั๋ว ${ticketId} เรียบร้อยแล้วค่ะ` };
   }
 
   private async resolveTicket(text: string, sessionContext: any, projectId: string): Promise<TicketResolution> {
@@ -578,7 +578,7 @@ export class TicketAgent implements IAgent {
 
   private askWhichTicket(tickets: RememberedTicket[], prefix: string): AgentResult {
     if (tickets.length === 0) {
-      return { text: "ยังไม่พบตั๋วที่เกี่ยวข้องค่ะ/ครับ" };
+      return { text: "ยังไม่พบตั๋วที่เกี่ยวข้องค่ะ" };
     }
 
     const ticketList = tickets
