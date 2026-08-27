@@ -47,29 +47,36 @@ export interface SendResult {
  * 2. Never overstate. An acknowledgement says the report was received and is
  *    being looked at. It does not say an engineer has fixed anything, and it
  *    does not invent a case number that does not exist yet.
+ *
+ * 3. One voice. The assistant is female throughout the product, so every
+ *    string here ends in ค่ะ / นะคะ and never in the male particle. The LINE
+ *    onboarding path already enforces this by test; these messages share the
+ *    same chat thread and were the last place still answering as a man.
+ *    test-line-project-onboarding.ts greps this file, so keep the male
+ *    particle out of the comments here too.
  */
 export class CustomerNotificationService {
   /** Wording is deliberately conservative — see rule 2 above. */
   private body(type: CustomerNotificationType, ticketNumber?: string | null): string {
     switch (type) {
       case "acknowledgement":
-        return "รับเรื่องแล้วครับ กำลังตรวจสอบปัญหาให้ครับ";
+        return "รับเรื่องแล้วนะคะ กำลังตรวจสอบปัญหาให้อยู่ค่ะ";
       case "ticket_created":
         return ticketNumber
-          ? `สร้างเคส #${ticketNumber} แล้วครับ ทีมงานกำลังตรวจสอบให้ครับ`
-          : "สร้างเคสให้แล้วครับ ทีมงานกำลังตรวจสอบให้ครับ";
+          ? `สร้างเคส #${ticketNumber} ให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ`
+          : "สร้างเคสให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ";
       case "resolution_confirmation":
         return ticketNumber
-          ? `เคส #${ticketNumber} ตรวจสอบและแก้ไขปัญหาเรียบร้อยแล้วครับ รบกวนลองใช้งานอีกครั้ง หากใช้งานได้แล้วสามารถแจ้งยืนยันเพื่อปิดเคสได้ครับ`
-          : "ตรวจสอบและแก้ไขปัญหาเรียบร้อยแล้วครับ รบกวนลองใช้งานอีกครั้ง หากใช้งานได้แล้วสามารถแจ้งยืนยันเพื่อปิดเคสได้ครับ";
+          ? `เคส #${ticketNumber} ตรวจสอบและแก้ไขปัญหาเรียบร้อยแล้วค่ะ รบกวนลองใช้งานอีกครั้งนะคะ หากใช้งานได้แล้วแจ้งยืนยันเพื่อปิดเคสได้เลยค่ะ`
+          : "ตรวจสอบและแก้ไขปัญหาเรียบร้อยแล้วค่ะ รบกวนลองใช้งานอีกครั้งนะคะ หากใช้งานได้แล้วแจ้งยืนยันเพื่อปิดเคสได้เลยค่ะ";
       case "closed":
         return ticketNumber
-          ? `ปิดเคส #${ticketNumber} เรียบร้อยแล้วครับ ขอบคุณที่แจ้งเข้ามาครับ`
-          : "ปิดเคสเรียบร้อยแล้วครับ ขอบคุณที่แจ้งเข้ามาครับ";
+          ? `ปิดเคส #${ticketNumber} เรียบร้อยแล้วนะคะ ขอบคุณที่แจ้งเข้ามาค่ะ`
+          : "ปิดเคสเรียบร้อยแล้วนะคะ ขอบคุณที่แจ้งเข้ามาค่ะ";
       case "reopened":
         return ticketNumber
-          ? `เปิดเคส #${ticketNumber} ขึ้นมาตรวจสอบอีกครั้งแล้วครับ ทีมงานกำลังดูให้ครับ`
-          : "เปิดเคสขึ้นมาตรวจสอบอีกครั้งแล้วครับ ทีมงานกำลังดูให้ครับ";
+          ? `เปิดเคส #${ticketNumber} ขึ้นมาตรวจสอบอีกครั้งแล้วนะคะ ทีมงานกำลังดูให้อยู่ค่ะ`
+          : "เปิดเคสขึ้นมาตรวจสอบอีกครั้งแล้วนะคะ ทีมงานกำลังดูให้อยู่ค่ะ";
     }
   }
 

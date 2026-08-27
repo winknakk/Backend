@@ -1,5 +1,6 @@
 import axios from "axios";
 import fs from "node:fs";
+import https from "node:https";
 import path from "node:path";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config/env";
@@ -27,6 +28,27 @@ import { AgentSessionQueueService } from "../../services/AgentSessionQueueServic
 import { AgentSessionQueueWorker } from "../../services/AgentSessionQueueWorker";
 
 const logger = createLogger("line-webhook");
+
+/**
+ * Shared keep-alive agent for outbound LINE / PromptX calls.
+ *
+ * Every reply, push and loading-indicator request used to open its own TCP +
+ * TLS connection: measured against api.line.me that is ~155 ms of handshake
+ * (connect 78 ms, TLS 137 ms, first byte 275 ms) paid again on every single
+ * call, and one webhook event can make three of them. Reusing sockets removes
+ * that handshake for everything after the first call.
+ */
+const lineHttpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 32,
+  maxFreeSockets: 8,
+});
+
+/** Milliseconds elapsed since `start`, rounded, for structured timing logs. */
+function elapsedMs(start: bigint): number {
+  return Math.round(Number(process.hrtime.bigint() - start) / 1e6);
+}
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -76,6 +98,7 @@ async function sendLineReply(replyToken: string, decision: LineOnboardingDecisio
           "Content-Type": "application/json",
         },
         timeout: 10000,
+        httpsAgent: lineHttpsAgent,
       }
     );
   } catch (err: any) {
@@ -114,26 +137,49 @@ async function sendLinePushMessages(
         "Content-Type": "application/json",
       },
       timeout: 10000,
+      httpsAgent: lineHttpsAgent,
     }
   );
 }
 
-async function showLineLoadingAnimation(userId: string, seconds = 3): Promise<void> {
+/**
+ * Shows LINE's typing indicator in a 1:1 chat while the event is processed.
+ *
+ * `loadingSeconds` must be a multiple of five between 5 and 60 — LINE rejects
+ * anything else with HTTP 400 ("must be a multiple of five"). This was
+ * previously called with 3, so every request failed and the indicator never
+ * appeared; the empty catch below kept that silent. The value is snapped to a
+ * legal multiple here so a future caller cannot reintroduce the same defect.
+ *
+ * Failure stays non-fatal — this is a UX affordance, not part of the reply —
+ * but it is now logged rather than swallowed.
+ */
+async function showLineLoadingAnimation(userId: string, seconds = 5): Promise<void> {
   if (!userId || !config.LINE_CHANNEL_ACCESS_TOKEN) return;
+  const loadingSeconds = Math.min(60, Math.max(5, Math.round(seconds / 5) * 5));
   try {
     await axios.post(
       "https://api.line.me/v2/bot/chat/loading/start",
-      { chatId: userId, loadingSeconds: seconds },
+      { chatId: userId, loadingSeconds },
       {
         headers: {
           Authorization: `Bearer ${config.LINE_CHANNEL_ACCESS_TOKEN}`,
           "Content-Type": "application/json",
         },
         timeout: 3000,
+        httpsAgent: lineHttpsAgent,
       }
     );
-  } catch {
-    // Non-blocking UX loading indicator
+  } catch (err: any) {
+    logger.warn(
+      {
+        status: err.response?.status,
+        data: err.response?.data,
+        message: err.message,
+        loadingSeconds,
+      },
+      "LINE loading animation rejected"
+    );
   }
 }
 
@@ -150,7 +196,11 @@ async function forwardPromptXWebhook(
       events: [event],
       ...(ticketx ? { ticketx } : {}),
     },
-    { headers: { "Content-Type": "application/json" }, timeout: 15000 }
+    {
+      headers: { "Content-Type": "application/json" },
+      timeout: 15000,
+      httpsAgent: lineHttpsAgent,
+    }
   );
 }
 
@@ -255,8 +305,12 @@ export function registerLineWebhookRoutes(
         }
 
         const webhookEventId = String(event?.webhookEventId || "").trim();
+        // Stage timings for this event. Without them the only way to tell
+        // where a slow reply was spent is to guess between the tunnel, the
+        // remote database and the LINE API.
+        const eventStartedAt = process.hrtime.bigint();
         if (event?.source?.userId) {
-          showLineLoadingAnimation(String(event.source.userId), 3).catch(() => {});
+          showLineLoadingAnimation(String(event.source.userId)).catch(() => {});
         }
         const decision = await onboardingService.processEvent({
           type: String(event?.type || "unknown"),
@@ -267,6 +321,7 @@ export function registerLineWebhookRoutes(
           postbackData: event?.postback?.data ? String(event.postback.data) : undefined,
           isUnblocked: event?.follow?.isUnblocked === true,
         });
+        const decisionMs = elapsedMs(eventStartedAt);
 
         if (decision.duplicate || decision.action === "IGNORE") {
           processed += 1;
@@ -274,7 +329,19 @@ export function registerLineWebhookRoutes(
         }
         try {
           if (decision.action === "REPLY") {
+            const replyStartedAt = process.hrtime.bigint();
             await sendLineReply(String(event.replyToken || ""), decision);
+            logger.info(
+              {
+                webhookEventId,
+                eventType: String(event?.type || "unknown"),
+                reason: decision.reason,
+                decisionMs,
+                replyMs: elapsedMs(replyStartedAt),
+                totalMs: elapsedMs(eventStartedAt),
+              },
+              "LINE event handled"
+            );
           } else if (decision.action === "PASS_TO_AI") {
             if (event?.type === "message" && event?.message?.type === "image" && event?.message?.id) {
               const imageId = String(event.message.id);
@@ -603,6 +670,20 @@ export function registerLineWebhookRoutes(
                 }
               }
             }
+
+            // The AI's own reply is sent later, by the flow — this measures
+            // only the backend's share of the turn, up to hand-off.
+            logger.info(
+              {
+                webhookEventId,
+                eventType: String(event?.type || "unknown"),
+                reason: decision.reason,
+                batched: Boolean(config.LINE_BATCH_ENABLED && event?.source?.userId),
+                decisionMs,
+                handoffMs: elapsedMs(eventStartedAt),
+              },
+              "LINE event handed to AI"
+            );
           }
         } catch (deliveryError) {
           await onboardingService.releaseWebhookEventForRetry(webhookEventId);
