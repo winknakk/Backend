@@ -99,6 +99,20 @@ function sign(contextId: string): string {
   return createHmac("sha256", signingKey()).update(`ctx:${contextId}`).digest("base64url");
 }
 
+/**
+ * Recreates the capability token for a context that already exists.
+ *
+ * The signature is a deterministic HMAC over the context id, so this returns
+ * exactly the token minted originally. That is what lets the queue persist
+ * only the context id and re-derive the capability at dispatch: storing the
+ * token itself would put a directly usable credential in a database row for
+ * no gain. It confers no new authority - the context row's own status and
+ * expiry are still checked on every resolve.
+ */
+export function tokenForContext(contextId: string): string {
+  return `${contextId}.${sign(contextId)}`;
+}
+
 export class ExecutionContextService {
   /**
    * Creates the context. Called only by trusted backend code, after the

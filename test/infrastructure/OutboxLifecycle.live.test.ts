@@ -7,6 +7,7 @@ dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 import { pool } from "../../src/adapters/postgres/PostgresAdapter";
 import { PostgresOutboxRepository } from "../../src/infrastructure/db/PostgresOutboxRepository";
+import { requiresIsolatedDatabase } from "../support/testDatabase";
 
 /**
  * Outbox states against the real table: pending -> due -> retry -> dead
@@ -19,6 +20,7 @@ import { PostgresOutboxRepository } from "../../src/infrastructure/db/PostgresOu
 const repo = new PostgresOutboxRepository();
 const AGG = `qa-outbox-${process.pid}`;
 let dbAvailable = false;
+let isolationSkip: string | undefined;
 const created: number[] = [];
 
 async function insertEvent(eventType: string, payload: any): Promise<number> {
@@ -41,6 +43,15 @@ async function statusOf(id: number) {
 
 describe("Outbox lifecycle (live database)", () => {
   before(async () => {
+    // These insert pending outbox rows. A deployed backend polling the same
+    // database picks them up within seconds - proven by probe, which is why
+    // this suite raced production and intermittently failed. Without an
+    // isolated database it refuses to run rather than writing there.
+    const decision = requiresIsolatedDatabase();
+    if (!decision.allowed) {
+      isolationSkip = decision.skipReason;
+      return;
+    }
     try {
       await pool.query("SELECT 1");
       dbAvailable = true;
@@ -57,6 +68,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-001: a pending event is due immediately", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaPending", { n: 1 });
     const due = await repo.fetchPending(500);
@@ -64,6 +76,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-002: a successful dispatch marks the event processed", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaSuccess", { n: 2 });
     await repo.markProcessed(id);
@@ -74,6 +87,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-003: a retryable failure stays pending but is not due until its backoff elapses", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaTransient", { n: 3 });
     await repo.scheduleRetry(id, 1, "503 Service Unavailable", 60_000);
@@ -92,6 +106,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-004: a retry becomes due once its backoff has passed", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaDue", { n: 4 });
     await repo.scheduleRetry(id, 1, "503", -1000); // already elapsed
@@ -100,6 +115,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-005: a permanent failure is dead-lettered and never re-fetched", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaPermanent", { n: 5 });
     await repo.deadLetter(id, 1, "Custom Id cannot be integers", "permanent");
@@ -115,6 +131,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-006: a blocked failure is dead-lettered separately from a permanent one", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaBlocked", { n: 6 });
     await repo.deadLetter(id, 1, "Request failed with status code 403", "blocked");
@@ -125,6 +142,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-007: replay returns a dead letter to the queue with a fresh budget", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaReplay", { n: 7 });
     await repo.deadLetter(id, 5, "503", "transient");
@@ -141,6 +159,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-008: replaying something that is not a dead letter is refused", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const id = await insertEvent("QaNotDead", { n: 8 });
     assert.strictEqual(await repo.requeueDeadLetter(id), false, "only dead letters may be requeued");
@@ -148,6 +167,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-009: duplicate events are independent rows and do not corrupt each other", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const a = await insertEvent("QaDuplicate", { ticketId: "TCK-DUP" });
     const b = await insertEvent("QaDuplicate", { ticketId: "TCK-DUP" });
@@ -161,6 +181,7 @@ describe("Outbox lifecycle (live database)", () => {
   });
 
   it("OUT-010: events are dispatched oldest-first regardless of insertion order of state changes", async (t) => {
+    if (isolationSkip) return t.skip(isolationSkip);
     if (!dbAvailable) return t.skip("database unavailable");
     const first = await insertEvent("QaOrderA", { seq: 1 });
     const second = await insertEvent("QaOrderB", { seq: 2 });
