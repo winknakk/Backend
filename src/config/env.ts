@@ -109,7 +109,28 @@ export const validateEnv = (): Env => {
       throw new Error("Strict environment validation failed in Production.");
     }
   }
-  return (result.data || {}) as Env;
+
+  const env = (result.data || {}) as Env;
+
+  // SESSION_SECRET is load-bearing, not optional-in-practice.
+  //
+  // It signs both operator sessions and AgentX execution-context tokens, so
+  // without it ExecutionContextService throws and every guarded route fails
+  // closed - meaning ticket creation stops. That used to surface only when a
+  // customer sent a message and a ticket failed to appear. Refusing to boot
+  // says it at deploy time instead, which is the cheapest moment to find out.
+  if (process.env.NODE_ENV === "production") {
+    const secret = env.SESSION_SECRET;
+    if (!secret || secret.length < 32) {
+      throw new Error(
+        "CONFIGURATION ERROR: SESSION_SECRET must be set to at least 32 characters in production. " +
+          "It signs operator sessions and AgentX execution-context tokens; without it, ticket " +
+          "creation fails closed at runtime."
+      );
+    }
+  }
+
+  return env;
 };
 export const config = validateEnv();
 

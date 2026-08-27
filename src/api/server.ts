@@ -66,6 +66,13 @@ import { authHook, authenticateToken, internalApiGuard } from "../middleware/aut
 import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
 import { tenantScopeHook, resolveProjectFilter, resolveTenantScope, canAccessProject } from "../middleware/tenantScope";
 import { requireExecutionContext } from "../middleware/executionContext";
+import {
+  authorizeTicket,
+  authorizationStatus,
+  findTicketByReference,
+  AuthorizedTicket,
+} from "../domain/execution/ResourceAuthorization";
+import { executionContextService } from "../domain/execution/ExecutionContextService";
 import { traceRecorder } from "../observability/TraceRecorder";
 import { adminSocketRegistry } from "./AdminSocketRegistry";
 import { webhookSignatureHook } from "../middleware/webhookSignature";
@@ -494,6 +501,30 @@ fastify.addHook("onRequest", async (request) => {
   }
 });
 
+/**
+ * Registers the local tool implementations.
+ *
+ * Lifted out of bootstrap() so tests can wire the real tools without also
+ * starting the BullMQ worker and config watcher, which need Redis. A test that
+ * hand-registers its own subset is testing its own wiring; this way it tests
+ * the wiring that ships.
+ */
+export function registerLocalTools(): void {
+  if (toolRegistry.getLocalTool("create_ticket")) return;
+  toolRegistry.registerTool(new CreateTicketTool(ticketService));
+  toolRegistry.registerTool(new SearchProjectDocsTool(knowledgeService));
+  toolRegistry.registerTool(new SearchCodebaseTool(knowledgeService));
+  toolRegistry.registerTool(new GetTicketTool());
+  toolRegistry.registerTool(new GetTicketStatusTool());
+  toolRegistry.registerTool(new UpdateSummaryTool(planeService));
+  toolRegistry.registerTool(new FindTicketTool());
+  toolRegistry.registerTool(new MergeTicketTool(planeService));
+  toolRegistry.registerTool(new ReopenTicketTool(planeService));
+  toolRegistry.registerTool(new CloseTicketTool(planeService));
+  toolRegistry.registerTool(new AssignTicketTool());
+  toolRegistry.registerTool(new EscalateToPmTool());
+}
+
 async function bootstrap() {
   initOpenTelemetry();
   serverLogger.info("Initializing AutomationX V2 API Server bootstrap...");
@@ -504,22 +535,7 @@ async function bootstrap() {
   // Start dynamic config watcher for hot reloading
   startConfigWatcher();
 
-  // Register local tools
-  const createTicketTool = new CreateTicketTool(ticketService);
-  const searchDocsTool = new SearchProjectDocsTool(knowledgeService);
-  const searchCodebaseTool = new SearchCodebaseTool(knowledgeService);
-  toolRegistry.registerTool(createTicketTool);
-  toolRegistry.registerTool(searchDocsTool);
-  toolRegistry.registerTool(searchCodebaseTool);
-  toolRegistry.registerTool(new GetTicketTool());
-  toolRegistry.registerTool(new GetTicketStatusTool());
-  toolRegistry.registerTool(new UpdateSummaryTool(planeService));
-  toolRegistry.registerTool(new FindTicketTool());
-  toolRegistry.registerTool(new MergeTicketTool(planeService));
-  toolRegistry.registerTool(new ReopenTicketTool(planeService));
-  toolRegistry.registerTool(new CloseTicketTool(planeService));
-  toolRegistry.registerTool(new AssignTicketTool());
-  toolRegistry.registerTool(new EscalateToPmTool());
+  registerLocalTools();
 
   // Register the job processor callback
   jobQueue.process(async (job) => {
@@ -1051,22 +1067,273 @@ fastify.post("/api/v1/tickets", async (request, reply) => {
   });
 });
 
-fastify.get("/api/v1/internal/tickets/status", async (request, reply) => {
-  const query = request.query as any;
-  let projectId = query.projectId;
+/**
+ * One authorization boundary, two kinds of principal.
+ *
+ * `/tickets/close` and `/tickets/:id/restore` are reachable both from the
+ * agent (through MCP) and from the console (an operator clicking a button).
+ * Requiring an execution context outright would lock operators out; accepting
+ * either without a check would be the hole this whole phase exists to close.
+ *
+ * So: an execution context is authoritative when present. An operator is
+ * authorized against their OWN principal scope. A caller that presents a bad
+ * context is refused outright rather than retried as an operator — falling
+ * back on a failed credential is how a boundary quietly becomes optional.
+ */
+async function authorizeTicketOperation(
+  request: any,
+  reply: any,
+  reference: unknown
+): Promise<{ ticket: AuthorizedTicket; orgId: string; viaContext: boolean } | null> {
+  const presentedToken =
+    (request.headers["x-execution-context"] as string) ||
+    ((request.body as any)?.executionContextToken as string) ||
+    ((request.body as any)?.data?.executionContextToken as string) ||
+    "";
 
-  if ((!projectId || projectId === "" || projectId === "null" || projectId === "undefined") && query.conversationId) {
-    const context = await runtimeContextResolver.resolveRuntimeContext(query.conversationId);
-    if (context && context.projectId) {
-      projectId = String(context.projectId);
+  if (presentedToken) {
+    const resolution = await executionContextService.resolve(presentedToken);
+    if (!resolution.ok || !resolution.context) {
+      reply.code(403).send({
+        error: "Forbidden",
+        code: "EXECUTION_CONTEXT_REQUIRED",
+        message: "The execution context presented is not valid",
+        failure: resolution.failure,
+      });
+      return null;
     }
+    const ctx = resolution.context;
+    request.trustedContext = ctx;
+    const authorization = await authorizeTicket(ctx, reference);
+    if (!authorization.ok || !authorization.resource) {
+      reply.code(authorizationStatus(authorization.failure)).send({
+        error: authorization.failure === "RESOURCE_REFERENCE_INVALID" ? "Bad Request" : "Not Found",
+        code: authorization.failure,
+        message: authorization.reason,
+      });
+      return null;
+    }
+    return { ticket: authorization.resource, orgId: ctx.orgId, viaContext: true };
   }
 
+  const principal = request.principal;
+  if (!principal) {
+    reply.code(401).send({ error: "Unauthorized", message: "Authentication required" });
+    return null;
+  }
+  if (principal.kind === "service") {
+    // A service credential alone says nothing about which tenant this call is
+    // acting for. Automation must present a context.
+    reply.code(403).send({
+      error: "Forbidden",
+      code: "EXECUTION_CONTEXT_REQUIRED",
+      message: "A server-issued execution context is required for automated callers",
+    });
+    return null;
+  }
+
+  const ticket = await findTicketByReference(reference);
+  if (!ticket) {
+    return (reply.code(404).send({
+      error: "Not Found",
+      code: "RESOURCE_NOT_FOUND",
+      message: "Ticket not found",
+    }), null);
+  }
+  if (!canAccessProject(request, ticket.projectId)) {
+    serverLogger.warn(
+      { ticketId: ticket.id, projectId: ticket.projectId, principal: principal.subject },
+      "Refused a ticket operation outside the operator's project scope"
+    );
+    // Same shape as not-found: confirming the ticket exists elsewhere leaks it.
+    return (reply.code(404).send({
+      error: "Not Found",
+      code: "RESOURCE_NOT_FOUND",
+      message: "Ticket not found",
+    }), null);
+  }
+  return { ticket, orgId: ticket.orgId, viaContext: false };
+}
+
+/**
+ * Knowledge-base search for the agent — B-0b.
+ *
+ * Replaces `MCP Tool - search_project_docs`, where conversation_id was an
+ * agent input that selected which project's documents were searched, via SQL
+ * issued straight from the flow.
+ *
+ * The agent supplies the query and paging. The project is taken from the
+ * execution context and nothing the caller sends can change it.
+ */
+fastify.post("/api/v1/internal/knowledge/search", { preHandler: requireExecutionContext }, async (request, reply) => {
+  const ctx = request.trustedContext!;
+  const body = (request.body || {}) as any;
+  const input = body.data ? { ...body.data } : { ...body };
+
+  const query = typeof input.query === "string" ? input.query.trim() : "";
+  if (!query) {
+    return reply.code(400).send({
+      error: "Bad Request",
+      code: "QUERY_REQUIRED",
+      message: "A search query is required",
+    });
+  }
+
+  const tool = toolRegistry.getLocalTool("search_project_docs");
+  if (!tool) return reply.code(500).send({ error: "Tool search_project_docs not found" });
+
+  // Recorded before the search runs, not after. The scoping decision is made
+  // here and is what this trace is evidence of; whether the search backend
+  // then succeeds is a separate question, and tying the two together would
+  // lose the security record whenever the backend was unavailable.
+  await traceRecorder.record({
+    correlationId: ctx.correlationId,
+    component: "mcp",
+    eventType: "knowledge_search_scoped",
+    conversationId: ctx.conversationId,
+    projectId: ctx.projectId,
+    orgId: ctx.orgId,
+    // No "claimed" fields here: requireExecutionContext strips and overwrites
+    // them before this handler runs, so anything read back would echo the
+    // context rather than the attempt. The genuine attempt is recorded by the
+    // middleware as forbidden_fields_ignored.
+    detail: { queryLength: query.length },
+  });
+
+  try {
+    const result = await tool.execute(
+      // projectId is overwritten, never merged: whatever the caller sent is
+      // discarded rather than used as a default.
+      { query, projectId: String(ctx.projectId), orgId: ctx.orgId },
+      { correlationId: ctx.correlationId, traceId: request.headers["x-trace-id"] }
+    );
+    return reply.code(200).send(result);
+  } catch (err: any) {
+    await traceRecorder.record({
+      correlationId: ctx.correlationId,
+      component: "mcp",
+      eventType: "knowledge_search_failed",
+      status: "failed",
+      conversationId: ctx.conversationId,
+      projectId: ctx.projectId,
+      orgId: ctx.orgId,
+      errorMessage: err.message,
+    });
+    return reply.code(500).send({ error: err.message });
+  }
+});
+
+/**
+ * Ticket search for the agent — B-0b.
+ *
+ * Replaces `MCP Tool - find_ticket`, which took projectId, conversation_id,
+ * profileId and identityId from the model and ran SQL straight against
+ * Postgres from the flow. No middleware could intervene there, so the model
+ * chose which tenant's tickets it read.
+ *
+ * Here the agent supplies only search criteria. Every scoping field is
+ * injected from the execution context and whatever the caller sent is
+ * discarded, so a request naming another project simply searches its own.
+ */
+fastify.post("/api/v1/internal/tickets/find", { preHandler: requireExecutionContext }, async (request, reply) => {
+  const ctx = request.trustedContext!;
+  const body = (request.body || {}) as any;
+  const criteria = body.data ? { ...body.data } : { ...body };
+
+  // A ticket reference, when given, must belong to this execution.
+  if (criteria.ticket_id || criteria.ticketId) {
+    const reference = criteria.ticket_id || criteria.ticketId;
+    const authorization = await authorizeTicket(ctx, reference);
+    if (!authorization.ok || !authorization.resource) {
+      return reply.code(authorizationStatus(authorization.failure)).send({
+        error: authorization.failure === "RESOURCE_REFERENCE_INVALID" ? "Bad Request" : "Not Found",
+        code: authorization.failure,
+        message: authorization.reason,
+        tickets: [],
+      });
+    }
+    const t = authorization.resource;
+    return reply.code(200).send({
+      tickets: [
+        {
+          id: String(t.id),
+          ticket_id: t.ticketNumber || t.ticketId,
+          conversation_id: t.conversationId === null ? null : String(t.conversationId),
+          project_id: String(t.projectId),
+          status: t.status,
+          plane_issue_id: t.planeIssueId,
+        },
+      ],
+    });
+  }
+
+  // Scope is server-owned. conversationId and projectId come from the context;
+  // profileId and identityId are not accepted at all, because they select a
+  // customer and the context already names the only one this turn may see.
   const tickets = await dbAdapter.listAllTickets(
-    query.conversationId,
+    String(ctx.conversationId),
+    String(ctx.projectId),
+    undefined,
+    undefined,
+    ctx.orgId
+  );
+
+  const wanted = typeof criteria.status === "string" ? criteria.status.trim().toUpperCase() : null;
+  const subject = typeof criteria.incident_subject === "string" ? criteria.incident_subject.trim().toLowerCase() : null;
+
+  // Normalised explicitly rather than passing the adapter's row through. The
+  // adapter's shape omits project_id, which left the agent - and any caller
+  // auditing this - unable to see which tenant a ticket belongs to. The scope
+  // is server-owned, so it is stated in the response rather than implied.
+  const filtered = (tickets || [])
+    .filter((t: any) => {
+      if (wanted && String(t.status || "").toUpperCase() !== wanted) return false;
+      if (subject && !String(t.subject || "").toLowerCase().includes(subject)) return false;
+      return true;
+    })
+    .map((t: any) => ({
+      id: String(t.id ?? ""),
+      ticket_id: t.ticket_id ?? t.ticketId ?? null,
+      conversation_id: String(t.conversation_id ?? t.conversationId ?? ctx.conversationId),
+      project_id: String(ctx.projectId),
+      org_id: ctx.orgId,
+      subject: t.subject ?? null,
+      summary: t.summary ?? null,
+      status: t.status ?? null,
+      priority: t.priority ?? null,
+      severity: t.severity ?? null,
+      plane_issue_id: t.plane_issue_id ?? t.planeIssueId ?? null,
+      due_date: t.due_date ?? t.dueDate ?? null,
+    }));
+
+  await traceRecorder.record({
+    correlationId: ctx.correlationId,
+    component: "mcp",
+    eventType: "find_ticket_scoped",
+    conversationId: ctx.conversationId,
+    projectId: ctx.projectId,
+    orgId: ctx.orgId,
+    // See the note on knowledge_search_scoped: the attempt itself is recorded
+    // by the middleware, which runs before anything here can observe it.
+    detail: { matched: filtered.length },
+  });
+
+  return reply.code(200).send({ tickets: filtered });
+});
+
+fastify.get("/api/v1/internal/tickets/status", { preHandler: requireExecutionContext }, async (request, reply) => {
+  // Scope is taken from the execution context, not the query string. The
+  // query used to supply projectId, conversationId, profileId and identityId
+  // directly, so the caller chose which tenant's tickets it saw.
+  const ctx = request.trustedContext!;
+  const projectId = String(ctx.projectId);
+
+  const tickets = await dbAdapter.listAllTickets(
+    String(ctx.conversationId),
     projectId,
-    query.profileId,
-    query.identityId
+    undefined,
+    undefined,
+    ctx.orgId
   );
   return reply.code(200).send(tickets);
 });
@@ -1446,19 +1713,24 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
   const rawReason = payload.cancellation_reason || payload.cancellationReason || payload.reason || payload.resolutionReason || payload.reasonDetail;
   const ticketId = payload.ticketId || payload.ticket_id || payload.id;
-  const orgId = request.headers["x-org-id"] || payload.org_id || payload.orgId;
+  // Tenant scope is derived, never supplied.
+  //
+  // This used to read org_id from a header or the body, so the agent named its
+  // own tenant - and because the filter was appended only when a value was
+  // present, OMITTING it matched the ticket number across every organization.
+  // The org is no longer an input from either kind of caller.
 
-  // Tenant scope is mandatory here. The org filter used to be appended only
-  // when an org was supplied, so a caller that simply OMITTED org_id matched
-  // the ticket number across every organization - closing another tenant's
-  // ticket by leaving a field out. Absent scope is refused, not widened.
-  if (!orgId || !String(orgId).trim()) {
-    return reply.code(400).send({
-      error: "Bad Request",
-      code: "ORG_SCOPE_REQUIRED",
-      message: "An organization scope is required to close a ticket",
-    });
-  }
+  // Authorization runs BEFORE input validation, and before the tool.
+  //
+  // Two reasons, both learned here. First, the tool closes the ticket through
+  // its own TransactionManager - a different connection from `client` below -
+  // so the scoped UPDATE failing and this handler calling ROLLBACK did NOT
+  // undo the tool's write; a cross-tenant caller got a 404 while the ticket
+  // really had been closed. Second, validating first let an uncredentialed
+  // caller probe the endpoint's field rules and learn it exists.
+  const authority = await authorizeTicketOperation(request, reply, ticketId);
+  if (!authority) return reply; // authorizeTicketOperation already replied
+  const orgId = authority.orgId;
 
   const parseResult = CloseTicketInputSchema.safeParse({
     ticketId: String(ticketId || ""),
@@ -1476,30 +1748,6 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const tool = toolRegistry.getLocalTool("close_ticket");
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
-
-  // Ownership is checked BEFORE the tool runs, not after.
-  //
-  // The tool closes the ticket through its own TransactionManager, which is a
-  // different connection from `client` below - so the scoped UPDATE failing
-  // and this handler calling ROLLBACK did NOT undo the tool's write. A caller
-  // naming another tenant's ticket got a 404 back while the ticket really had
-  // been closed. The scope check has to come first.
-  const owner = await pool.query(
-    `SELECT id, org_id FROM tickets
-      WHERE (ticket_number = $1 OR id = $2) AND org_id = $3
-      LIMIT 1`,
-    [validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0, String(orgId)]
-  );
-  if (owner.rows.length === 0) {
-    serverLogger.warn(
-      { ticketId: validatedData.ticketId, orgId: String(orgId) },
-      "Refused close for a ticket outside the caller's organization"
-    );
-    return reply.code(404).send({
-      error: "Not Found",
-      message: `Ticket ${validatedData.ticketId} not found or tenant access denied`,
-    });
-  }
 
   const client = await pool.connect();
   try {
@@ -1563,7 +1811,6 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   const params = request.params as any;
   const ticketIdStr = String(params.id || "");
-  const orgId = request.headers["x-org-id"];
 
   const parseResult = RestoreTicketInputSchema.safeParse({ ticketId: ticketIdStr });
   if (!parseResult.success) {
@@ -1572,6 +1819,13 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
       message: parseResult.error.issues[0]?.message || "Invalid ticket ID",
     });
   }
+
+  // Scope came from an x-org-id header, and the filter was appended only when
+  // that header was present - so omitting it restored across every
+  // organization. Same defect as the close route had.
+  const authority = await authorizeTicketOperation(request, reply, ticketIdStr);
+  if (!authority) return reply;
+  const orgId = authority.orgId;
 
   const isNumeric = /^\d+$/.test(ticketIdStr);
   const client = await pool.connect();
@@ -1583,13 +1837,10 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
     // literal 'open' before, which is in neither vocabulary and now violates
     // the tickets_status_lifecycle_check constraint added in migration 040.
     const query = isNumeric
-      ? `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE id = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`
-      : `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE ticket_number = $1 ${orgId ? "AND (org_id = $2 OR org_id IS NULL)" : ""} RETURNING *`;
+      ? `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE id = $1 AND org_id = $2 RETURNING *`
+      : `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE ticket_number = $1 AND org_id = $2 RETURNING *`;
     
-    const queryArgs = orgId
-      ? [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr, String(orgId)]
-      : [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr];
-
+    const queryArgs = [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr, String(orgId)] as any[];
     const { rows } = await client.query(query, queryArgs);
 
     if (rows.length === 0) {
@@ -1644,63 +1895,102 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
   }
 });
 
-fastify.post("/api/v1/internal/tickets/assign", async (request, reply) => {
-  const body = request.body as any;
-  const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getLocalTool("assign_ticket");
-  if (!tool) return reply.code(500).send({ error: "Tool assign_ticket not found" });
-  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
-  try {
-    const result = await tool.execute(payload, context);
-    return reply.code(200).send(result);
-  } catch (err: any) {
-    return reply.code(500).send({ error: err.message });
-  }
-});
+/**
+ * Runs a ticket tool only after every ticket the agent named has been proven
+ * to belong to this execution.
+ *
+ * The agent chooses WHAT to operate on; this decides WHETHER it may. The
+ * reference is then rewritten to the canonical identifier of the row that was
+ * actually authorized, so the tool cannot act on a different one.
+ *
+ * Applies to reads as much as writes: a cross-tenant read is a security
+ * failure even though nothing is mutated.
+ */
+async function runGuardedTicketTool(
+  request: any,
+  reply: any,
+  toolName: string,
+  referenceFields: string[]
+) {
+  const ctx = request.trustedContext!;
+  const body = (request.body || {}) as any;
+  const payload = body.data ? { ...body.data } : { ...body };
 
-fastify.post("/api/v1/internal/tickets/merge", async (request, reply) => {
-  const body = request.body as any;
-  const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getLocalTool("merge_ticket");
-  if (!tool) return reply.code(500).send({ error: "Tool merge_ticket not found" });
-  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
-  try {
-    const result = await tool.execute(payload, context);
-    return reply.code(200).send(result);
-  } catch (err: any) {
-    return reply.code(500).send({ error: err.message });
-  }
-});
+  const tool = toolRegistry.getLocalTool(toolName);
+  if (!tool) return reply.code(500).send({ error: `Tool ${toolName} not found` });
 
-fastify.post("/api/v1/internal/tickets/reopen", async (request, reply) => {
-  const body = request.body as any;
-  const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getLocalTool("reopen_ticket");
-  if (!tool) return reply.code(500).send({ error: "Tool reopen_ticket not found" });
+  const authorized: Record<string, AuthorizedTicket> = {};
+  for (const field of referenceFields) {
+    const reference = payload[field];
+    if (reference === undefined || reference === null || String(reference).trim() === "") {
+      return reply.code(400).send({
+        error: "Bad Request",
+        code: "TICKET_REFERENCE_REQUIRED",
+        message: `${field} is required`,
+      });
+    }
+
+    const result = await authorizeTicket(ctx, reference);
+    if (!result.ok || !result.resource) {
+      return reply.code(authorizationStatus(result.failure)).send({
+        error: result.failure === "RESOURCE_REFERENCE_INVALID" ? "Bad Request" : "Not Found",
+        code: result.failure,
+        message: result.reason,
+      });
+    }
+
+    authorized[field] = result.resource;
+    payload[field] =
+      result.resource.ticketNumber || result.resource.ticketId || String(result.resource.id);
+  }
+
+  await traceRecorder.record({
+    correlationId: ctx.correlationId,
+    component: "mcp",
+    eventType: `${toolName}_authorized`,
+    conversationId: ctx.conversationId,
+    projectId: ctx.projectId,
+    orgId: ctx.orgId,
+    ticketId: authorized[referenceFields[0]]?.id ?? null,
+    detail: { tool: toolName, tickets: Object.values(authorized).map((t) => t.id) },
+  });
+
   try {
     const result = await tool.execute(payload, {
-      correlationId: request.headers["x-correlation-id"],
+      correlationId: ctx.correlationId,
       traceId: request.headers["x-trace-id"],
     });
     return reply.code(200).send(result);
   } catch (err: any) {
+    await traceRecorder.record({
+      correlationId: ctx.correlationId,
+      component: "mcp",
+      eventType: `${toolName}_failed`,
+      status: "failed",
+      conversationId: ctx.conversationId,
+      projectId: ctx.projectId,
+      orgId: ctx.orgId,
+      errorMessage: err.message,
+    });
     return reply.code(500).send({ error: err.message });
   }
-});
+}
 
-fastify.post("/api/v1/internal/tickets/update-summary", async (request, reply) => {
-  const body = request.body as any;
-  const payload = body.data ? { ...body.data } : body;
-  const tool = toolRegistry.getLocalTool("update_summary");
-  if (!tool) return reply.code(500).send({ error: "Tool update_summary not found" });
-  const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
-  try {
-    const result = await tool.execute(payload, context);
-    return reply.code(200).send(result);
-  } catch (err: any) {
-    return reply.code(500).send({ error: err.message });
-  }
-});
+fastify.post("/api/v1/internal/tickets/assign", { preHandler: requireExecutionContext }, async (request, reply) =>
+  runGuardedTicketTool(request, reply, "assign_ticket", ["ticketId"])
+);
+
+fastify.post("/api/v1/internal/tickets/merge", { preHandler: requireExecutionContext }, async (request, reply) =>
+  runGuardedTicketTool(request, reply, "merge_ticket", ["ticketId", "primaryTicketId"])
+);
+
+fastify.post("/api/v1/internal/tickets/reopen", { preHandler: requireExecutionContext }, async (request, reply) =>
+  runGuardedTicketTool(request, reply, "reopen_ticket", ["ticketId"])
+);
+
+fastify.post("/api/v1/internal/tickets/update-summary", { preHandler: requireExecutionContext }, async (request, reply) =>
+  runGuardedTicketTool(request, reply, "update_summary", ["ticketId"])
+);
 
 fastify.get("/api/v1/internal/identities/search", async (request, reply) => {
   const query = request.query as any;
