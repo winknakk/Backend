@@ -91,6 +91,17 @@ export interface DatabaseAdapter {
   getMessages(conversationId: string): Promise<any[]>;
 
   /**
+   * Whether an identical message from the same role appears among the most
+   * recent `limit` messages. Bounded on purpose: the duplicate check it
+   * replaces read the whole conversation, so its cost grew with the
+   * conversation's age.
+   *
+   * Optional so an adapter may omit it; callers fall back to comparing the
+   * tail of getMessages.
+   */
+  hasRecentMessage?(conversationId: string, role: string, content: string, limit?: number): Promise<boolean>;
+
+  /**
    * Retrieves identity and channel details for a conversation.
    */
   getConversationIdent(conversationId: string): Promise<any>;

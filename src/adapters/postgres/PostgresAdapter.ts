@@ -1087,6 +1087,40 @@ export class PostgresAdapter implements DatabaseAdapter {
     }));
   }
 
+  /**
+   * Bounded duplicate check over the tail of a conversation.
+   *
+   * Reads at most `limit` rows and only the two columns being compared, so it
+   * costs the same on a conversation with ten messages as on one with ten
+   * thousand — unlike getMessages below, which has no LIMIT and returns every
+   * column of every row.
+   *
+   * Fails open. A false negative writes a duplicate message; a false positive
+   * would discard a customer's message outright, which is the worse outcome.
+   */
+  async hasRecentMessage(conversationId: string, role: string, content: string, limit: number = 5): Promise<boolean> {
+    if (!this.isValidConversationId(conversationId)) return false;
+    try {
+      const { rows } = await pool.query(
+        `SELECT 1
+           FROM (
+             SELECT role, content
+               FROM messages
+              WHERE conversation_id = $1::integer
+              ORDER BY created_at DESC
+              LIMIT $2
+           ) recent
+          WHERE recent.role = $3 AND recent.content = $4
+          LIMIT 1`,
+        [conversationId, limit, role, content]
+      );
+      return rows.length > 0;
+    } catch (err: any) {
+      logger.warn({ error: err.message, conversationId }, "hasRecentMessage failed; treating message as new");
+      return false;
+    }
+  }
+
   async getMessages(conversationId: string): Promise<any[]> {
     if (!this.isValidConversationId(conversationId)) return [];
     try {

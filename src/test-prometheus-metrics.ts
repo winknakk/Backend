@@ -45,7 +45,14 @@ async function run() {
 
   try {
     console.log("Fetching /metrics/prometheus...");
-    const res = await axios.get(`${baseUrl}/metrics/prometheus`);
+    // Metrics expose internal counters, so the endpoint is authenticated like
+    // any other non-public route. The test presents the service credential
+    // rather than the route being reopened.
+    // config captures API_KEY when its module first loads, which is earlier
+    // than the assignment above, so the effective value is read from config.
+    const { config } = await import("./config/env");
+    const authed = { headers: { Authorization: `Bearer ${config.API_KEY}` } };
+    const res = await axios.get(`${baseUrl}/metrics/prometheus`, authed);
     assert(res.status === 200, "Response status should be 200");
     assert(String(res.headers["content-type"])?.includes("text/plain"), "Content-Type must be text/plain");
 

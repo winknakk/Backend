@@ -2,6 +2,7 @@ import axios from "axios";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
+import { traceRecorder } from "../observability/TraceRecorder";
 
 const logger = createLogger("customer-notification");
 
@@ -200,6 +201,17 @@ export class CustomerNotificationService {
       await this.markSent(claimId);
       await this.appendToConversation(req.conversationId, body);
 
+      await traceRecorder.record({
+        correlationId: req.correlationId || `notify-${claimId}`,
+        component: "notification",
+        eventType: `${req.notificationType}_sent`,
+        conversationId: req.conversationId,
+        ticketId: req.ticketId ?? null,
+        projectId: req.projectId ?? recipient.projectId ?? null,
+        orgId: req.orgId ?? recipient.orgId ?? null,
+        detail: { channel: recipient.channel, notificationId: claimId, ticketNumber: req.ticketNumber ?? null },
+      });
+
       logger.info(
         {
           conversationId: req.conversationId,
@@ -213,6 +225,15 @@ export class CustomerNotificationService {
       return { sent: true, body };
     } catch (err: any) {
       await this.markFailed(claimId, err.message);
+      await traceRecorder.record({
+        correlationId: req.correlationId || `notify-${claimId}`,
+        component: "notification",
+        eventType: `${req.notificationType}_failed`,
+        status: "failed",
+        conversationId: req.conversationId,
+        ticketId: req.ticketId ?? null,
+        errorMessage: err.message,
+      });
       // Still record what we intended to say, so the thread is not silently
       // missing a turn the customer may or may not have received.
       await this.appendToConversation(req.conversationId, body);

@@ -105,7 +105,12 @@ export class TicketService {
         projectId: projectIdNum,
         subject: input.subject,
         summary: input.summary,
-        status: "Backlog",
+        // Lifecycle status, not Plane status. This still said "Backlog" after
+        // the two-layer split, which tickets_status_lifecycle_check rejects -
+        // every ticket created through this path failed at the insert. Plane's
+        // own state lives in plane_status and is set at promotion, so it stays
+        // null until the work item exists.
+        status: "NEW",
         priority: mapPlanePriorityToTicketPriority(input.priority) || input.priority,
         severity: input.severity,
         dueDate,

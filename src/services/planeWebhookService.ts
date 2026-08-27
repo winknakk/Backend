@@ -6,6 +6,7 @@ import { config } from "../config/env";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import { customerNotificationService } from "./CustomerNotificationService";
 import { createLogger } from "../observability/logger";
+import { traceRecorder } from "../observability/TraceRecorder";
 
 const logger = createLogger("planeWebhookService");
 
@@ -258,6 +259,30 @@ export class PlaneWebhookService {
       );
     } catch (dbErr: any) {
       logger.warn({ error: dbErr.message, planeIssueId }, "Could not update plane creator attribution");
+    }
+
+    // B-5: a Plane-side state change is part of the same causal chain. The
+    // correlation id is read from the ticket the change lands on, so the
+    // reverse-sync hop joins the chain that created the ticket rather than
+    // starting a fresh, unconnected one.
+    if (lifecycleResult?.applied && lifecycleResult.ticketId) {
+      const corr = await pool
+        .query(`SELECT correlation_id, project_id, org_id, conversation_id FROM tickets WHERE id = $1`, [
+          lifecycleResult.ticketId,
+        ])
+        .catch(() => null);
+      const row = corr?.rows?.[0];
+      await traceRecorder.record({
+        correlationId: row?.correlation_id || `reverse-sync-${lifecycleResult.ticketId}`,
+        component: "reverse_sync",
+        eventType: "plane_status_applied",
+        ticketId: lifecycleResult.ticketId,
+        planeIssueId: planeIssueId,
+        conversationId: row?.conversation_id ?? null,
+        projectId: row?.project_id ?? null,
+        orgId: row?.org_id ?? null,
+        detail: { planeStatus: status, notify: lifecycleResult.notify ?? null, eventId: lifecycleResult.eventId ?? null },
+      });
     }
 
     // The notification is driven by the lifecycle transition, not by Plane's

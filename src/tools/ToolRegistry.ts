@@ -390,7 +390,11 @@ export class ReopenTicketTool implements ITool {
       success: true,
       data: {
         ticketId: ticketIdStr,
-        status: "Backlog",
+        // Two layers, reported separately: reopen() moves the lifecycle to
+        // REOPENED, while Plane's own state returns to Backlog. Reporting one
+        // value as "status" conflated them.
+        status: "REOPENED",
+        planeStatus: "Backlog",
         alreadyActive,
         planeSynced: planeSync?.synced ?? false,
         planeIssueId: planeSync?.planeIssueId,
@@ -545,6 +549,13 @@ export class EscalateToPmTool implements ITool {
       }
       if (context?.traceId) {
         headers["x-trace-id"] = context.traceId;
+      }
+      // human_notify is authenticated by shared secret once STRICT_WEBHOOK_AUTH
+      // is on. This caller is inside the backend, but it still crosses the HTTP
+      // boundary, so without the header escalate_to_pm would start failing the
+      // moment enforcement is switched on.
+      if (config.WEBHOOK_SECRET) {
+        headers["x-webhook-secret"] = config.WEBHOOK_SECRET;
       }
 
       await axios.post(

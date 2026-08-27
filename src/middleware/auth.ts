@@ -18,8 +18,14 @@ declare module "fastify" {
  *
  * Each entry is either genuinely public (health), or carries its own
  * independent authentication:
- *   - /webhook/message and /api/v1/webhooks/* are HMAC-signature verified
- *     (webhookSignatureHook / verifyLineSignature)
+ *   - /webhook/message is HMAC-signature verified (webhookSignatureHook)
+ *   - /api/v1/webhooks/line is LINE-signature verified (verifyLineSignature)
+ *   - /api/v1/webhooks/plane is verified against PLANE_WEBHOOK_SECRET
+ *   - /api/v1/webhooks/human_notify is verified against WEBHOOK_SECRET, but
+ *     only ENFORCED when STRICT_WEBHOOK_AUTH is set. Until then it is open:
+ *     this comment previously claimed the whole /api/v1/webhooks/* prefix was
+ *     HMAC-verified while webhookSignatureHook matched only "/webhook/message",
+ *     so human_notify accepted anonymous requests for as long as it existed.
  *   - /api/v1/auth/* is the login surface itself
  *   - /api/v1/media/* uses signed, expiring media URLs
  *

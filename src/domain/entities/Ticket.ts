@@ -316,7 +316,10 @@ export class Ticket extends BaseAggregate<number> {
       throw new Error("Cannot merge closed tickets");
     }
     this._duplicateOfTicketId = primaryTicketId;
-    this._status = "merged";
+    // "merged" is not one of the eleven lifecycle statuses and would fail
+    // tickets_status_lifecycle_check. duplicate_of_ticket_id already records
+    // that this is a duplicate; CANCELLED is its lifecycle end state.
+    this._status = "CANCELLED";
     this.addDomainEvent(new TicketMergedEvent(this.id, primaryTicketId));
   }
 

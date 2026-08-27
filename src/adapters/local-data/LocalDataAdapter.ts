@@ -559,6 +559,19 @@ export class LocalDataAdapter implements DatabaseAdapter {
     }));
   }
 
+  /**
+   * Bounded duplicate check, matching PostgresAdapter.hasRecentMessage.
+   * Fails open for the same reason: duplicating a message beats losing one.
+   */
+  async hasRecentMessage(conversationId: string, role: string, content: string, limit: number = 5): Promise<boolean> {
+    try {
+      const recent = (await this.getMessages(conversationId)).slice(-limit);
+      return recent.some((m: any) => m.content === content && m.role === role);
+    } catch {
+      return false;
+    }
+  }
+
   async getMessages(conversationId: string): Promise<any[]> {
     const messages = this.readTable<any>("Messages", DbMessageSchema);
     return messages

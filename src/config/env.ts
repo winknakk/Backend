@@ -45,6 +45,15 @@ export const EnvSchema = z.object({
   SESSION_SECRET: z.string().min(32).optional(),
   SESSION_TTL_HOURS: z.coerce.number().min(1).max(168).default(12),
   WEBHOOK_SECRET: z.string().optional(),
+  // Enforcement switch for webhook authentication on /api/v1/webhooks/human_notify.
+  //
+  // Defaults to false because the published Main AI Core flow sends no
+  // credential on that call: enabling enforcement before the flow is updated
+  // and republished takes human takeover offline. While false the hook logs
+  // every unauthenticated call instead of rejecting it, so the flow can be
+  // migrated with the evidence visible. Set to true once the live flow node
+  // sends the header.
+  STRICT_WEBHOOK_AUTH: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   RATE_LIMIT_MAX: z.coerce.number().default(60),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
   PORT: z.coerce.number().default(3000),

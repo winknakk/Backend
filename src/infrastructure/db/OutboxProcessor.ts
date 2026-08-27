@@ -5,6 +5,7 @@ import { deletePlaneWorkItem } from "../../services/planeDeletionService";
 import { PlaneService } from "../../services/planeService";
 import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
 import { classifyOutboxFailure, backoffMs, logClassification } from "./OutboxFailureClassifier";
+import { traceRecorder } from "../../observability/TraceRecorder";
 
 const logger = createLogger("OutboxProcessor");
 
@@ -120,10 +121,33 @@ export class OutboxProcessor {
 
           // Mark as processed
           await this.outboxRepo.markProcessed(id);
+
+          // B-5: the outbox is a causal hop. Correlation comes from the
+          // payload when the producer supplied one; it is not invented.
+          await traceRecorder.record({
+            correlationId: payload.correlationId || `outbox-${id}`,
+            component: "outbox",
+            eventType: `${event_type}_dispatched`,
+            outboxEventId: Number(id),
+            ticketId: Number(payload.ticketDbId) || null,
+            projectId: payload.projectId ? Number(payload.projectId) : null,
+            orgId: payload.orgId ?? null,
+            detail: { eventType: event_type, attempts },
+          });
         } catch (err: any) {
           const nextAttempts = attempts + 1;
           const kind = classifyOutboxFailure(err);
           logClassification(id, event_type, kind, err);
+
+          await traceRecorder.record({
+            correlationId: payload.correlationId || `outbox-${id}`,
+            component: "outbox",
+            eventType: `${event_type}_failed`,
+            status: "failed",
+            outboxEventId: Number(id),
+            detail: { eventType: event_type, classification: kind, attempts: nextAttempts },
+            errorMessage: err.message,
+          });
 
           if (kind !== "transient") {
             // The payload is unacceptable, or the caller is not permitted.

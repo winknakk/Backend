@@ -64,7 +64,7 @@ import rootLogger, { createLogger } from "../observability/logger";
 import { startTimer } from "../observability/timing";
 import { authHook, authenticateToken, internalApiGuard } from "../middleware/auth";
 import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
-import { tenantScopeHook, resolveProjectFilter, resolveTenantScope } from "../middleware/tenantScope";
+import { tenantScopeHook, resolveProjectFilter, resolveTenantScope, canAccessProject } from "../middleware/tenantScope";
 import { requireExecutionContext } from "../middleware/executionContext";
 import { traceRecorder } from "../observability/TraceRecorder";
 import { adminSocketRegistry } from "./AdminSocketRegistry";
@@ -72,6 +72,7 @@ import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
 import { SmsNotificationService } from "../services/SmsNotificationService";
 import { pool } from "../adapters/postgres/PostgresAdapter";
+import { BackupManager } from "../adapters/postgres/BackupManager";
 import { QueueFactory } from "../queue/QueueFactory";
 import { startConfigWatcher } from "../cache/ConfigWatcher";
 import { GracefulShutdownService } from "./GracefulShutdownService";
@@ -196,7 +197,15 @@ async function requestHumanTakeover(input: {
   source?: string;
 }) {
   const { conversationId, role, content, reasonCode, reasonDetail, source } = input;
-  await dbAdapter.updateHandoffState(conversationId, "human");
+
+  // Ordered deliberately. Everything before the broadcast delays the operator's
+  // alert, so only two things are allowed to precede it: the lease that stops
+  // AgentX replying over the operator, and the project id the broadcast is
+  // scoped by. Persistence that nothing downstream is waiting on runs after the
+  // caller has its answer.
+
+  // 1. The lease. Awaited for both callers: /api/v1/internal/conversations/takeover
+  //    returns suppress_reply to AgentX on the strength of it.
   const pendingDurationMs = config.HUMAN_PENDING_TIMEOUT_MINUTES * 60 * 1000;
   const takeoverState = await takeoverManager.setTakeoverState(
     conversationId,
@@ -205,114 +214,151 @@ async function requestHumanTakeover(input: {
     pendingDurationMs
   );
 
-  if (content) {
-    const messages = await dbAdapter.getMessages(conversationId);
-    const exists = messages.some((message: any) => message.content === content && message.role === (role || "customer"));
-    if (!exists) {
-      await dbAdapter.saveMessage(conversationId, role || "customer", content);
-    }
-  }
-
-  let customerName = `Customer #${conversationId}`;
-  let conversationProjectId = "1";
+  // 2. Owning project, by primary key. This replaced a three-table join that
+  //    also resolved the customer's name; the name is not worth holding the
+  //    alert for, and the console already knows it from the conversation list.
+  let conversationProjectId: string | null = null;
   try {
-    const result = await pool.query(
-      `SELECT p.name, c.project_id FROM conversations c
-       JOIN identities i ON c.identity_id = i.id
-       JOIN profiles p ON i.profile_id = p.id
-       WHERE c.id = $1::integer`,
-      [conversationId]
-    );
-    customerName = result.rows[0]?.name || customerName;
-    conversationProjectId = String(result.rows[0]?.project_id || conversationProjectId);
+    const result = await pool.query(`SELECT project_id FROM conversations WHERE id = $1::integer`, [conversationId]);
+    const rawProjectId = result.rows[0]?.project_id;
+    conversationProjectId = rawProjectId === null || rawProjectId === undefined ? null : String(rawProjectId);
   } catch (err: any) {
-    serverLogger.error({ error: err.message, conversationId }, "Failed to fetch customer name for takeover notification");
+    serverLogger.error({ error: err.message, conversationId }, "Failed to resolve project for takeover broadcast");
   }
 
-  const notification = JSON.stringify({
-    event: "NEW_HUMAN_REQUEST",
-    data: {
-      conversationId,
-      customerName,
-      lastMessage: content || "Human assistance required",
-      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
-      reasonDetail: reasonDetail || null,
-      source: source || "workflow",
-      expiresAt: takeoverState.leaseExpiresAt,
-    },
-  });
-  // Scoped to the conversation's project. This loop previously sent to every
-  // connected admin socket, so a takeover request in one project was
-  // delivered to operators of every other project.
-  adminSocketRegistry.broadcastToProject(conversationProjectId, notification);
-
-  await publishOutbound(
-    "webchat:outbound",
-    JSON.stringify({
-      conversationId,
-      recipientId: "admin",
-      channel: "WebChat",
-      event: "takeover_change",
-      status: "PENDING_HUMAN",
-      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
-    })
-  );
-
-  // Legacy AgentX/MCP flows may dispatch SMS themselves after the internal
-  // takeover call. The direct Main AI human-notify path owns backend SMS.
-  if ((source || "workflow") !== "agentx") {
-    void smsNotificationService.sendTakeoverAlert({
-      conversationId,
-      customerName,
-      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
-      reasonDetail,
-      lastMessage: content,
-    }).catch((error: any) => {
-      serverLogger.error({ error: error.message, conversationId }, "Failed to send takeover SMS alert");
+  // 3. The operator's alert.
+  //
+  //    Scoped to the conversation's project. This previously fell back to
+  //    project "1" when the lookup failed, which delivered one project's
+  //    takeover to another project's operators. An unresolved project now
+  //    means no broadcast: the 30s console poll still surfaces the request,
+  //    and a missed alert is recoverable where a cross-tenant one is not.
+  if (conversationProjectId) {
+    const notification = JSON.stringify({
+      event: "NEW_HUMAN_REQUEST",
+      data: {
+        conversationId,
+        customerName: null,
+        lastMessage: content || "Human assistance required",
+        reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+        reasonDetail: reasonDetail || null,
+        source: source || "workflow",
+        expiresAt: takeoverState.leaseExpiresAt,
+      },
     });
+    adminSocketRegistry.broadcastToProject(conversationProjectId, notification);
+  } else {
+    serverLogger.warn(
+      { conversationId },
+      "Takeover broadcast skipped: conversation has no resolvable project. Refusing to guess a tenant"
+    );
   }
 
-  let smsTargetPhone = "";
+  // 4. The durable record of the handoff, awaited.
+  //
+  //    Issued directly rather than through dbAdapter.updateHandoffState, which
+  //    pairs this UPDATE with a BackupManager mirror that reads and rewrites
+  //    the entire encrypted conversations file using synchronous fs calls —
+  //    blocking the event loop, and with it every other request including the
+  //    socket write above. The mirror still happens, in the background block.
   try {
-    const projAdminResult = await pool.query(
-      `SELECT phone_number FROM operators o
-       JOIN operator_project_access opa ON o.id = opa.operator_id
-       WHERE opa.project_id = $1 AND o.phone_number IS NOT NULL
-       LIMIT 1`,
-      [parseInt(conversationProjectId, 10)]
-    );
-    if (projAdminResult.rows.length > 0 && projAdminResult.rows[0].phone_number) {
-      smsTargetPhone = projAdminResult.rows[0].phone_number;
-    } else {
-      const globalAdminResult = await pool.query(
-        `SELECT phone_number FROM operators WHERE role = 'super_admin' AND phone_number IS NOT NULL LIMIT 1`
-      );
-      if (globalAdminResult.rows.length > 0 && globalAdminResult.rows[0].phone_number) {
-        smsTargetPhone = globalAdminResult.rows[0].phone_number;
+    await pool.query(`UPDATE conversations SET handled_by = 'human', updated_at = NOW() WHERE id = $1::integer`, [
+      conversationId,
+    ]);
+  } catch (err: any) {
+    serverLogger.error({ error: err.message, conversationId }, "Failed to persist handoff state for takeover");
+    throw err;
+  }
+
+  // 5. Work no caller waits on. Each branch carries its own catch: an
+  //    unhandled rejection here would take the process down.
+  void (async () => {
+    // Backup mirror, matching what updateHandoffState would have written.
+    try {
+      const conversations = await BackupManager.readFromBackup<any>("conversations");
+      const match = conversations.find((c: any) => String(c.id) === String(conversationId));
+      if (match) {
+        match.handled_by = "human";
+        match.status = "escalated";
+        await BackupManager.saveToBackup("conversations", match, "id");
+      }
+    } catch (err: any) {
+      serverLogger.warn({ error: err.message, conversationId }, "Takeover backup mirror failed");
+    }
+
+    if (content) {
+      try {
+        const messageRole = role || "customer";
+        // Bounded duplicate check. The previous form loaded every message in
+        // the conversation and compared content across the whole history, so
+        // it grew without limit and silently dropped any legitimate repeat of
+        // an earlier sentence. Adapters without the bounded query fall back to
+        // the same comparison over the most recent messages only.
+        let alreadyStored = false;
+        if (typeof (dbAdapter as any).hasRecentMessage === "function") {
+          alreadyStored = await (dbAdapter as any).hasRecentMessage(conversationId, messageRole, content, 5);
+        } else {
+          const recent = (await dbAdapter.getMessages(conversationId)).slice(-5);
+          alreadyStored = recent.some((m: any) => m.content === content && m.role === messageRole);
+        }
+        if (!alreadyStored) {
+          await dbAdapter.saveMessage(conversationId, messageRole, content);
+        }
+      } catch (err: any) {
+        serverLogger.error({ error: err.message, conversationId }, "Failed to persist takeover message");
       }
     }
-  } catch (err: any) {
-    serverLogger.error({ error: err.message }, "Failed to fetch admin phone number from DB");
-  }
 
-  // Clean admin phone number format for THSMS (e.g. 0942415642)
-  let cleanPhone = smsTargetPhone.trim().replace(/\D/g, "");
-  if (cleanPhone.startsWith("66")) {
-    cleanPhone = "0" + cleanPhone.substring(2);
-  }
+    await publishOutbound(
+      "webchat:outbound",
+      JSON.stringify({
+        conversationId,
+        recipientId: "admin",
+        channel: "WebChat",
+        event: "takeover_change",
+        status: "PENDING_HUMAN",
+        reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+      })
+    );
 
-  const smsProviderUrl = process.env.SMS_PROVIDER_URL || "https://api-v2.thaibulksms.com/sms";
-  const apiKey = process.env.THAIBULKSMS_API_KEY || "";
-  const apiSecret = process.env.THAIBULKSMS_API_SECRET || "";
-  const rawToken = Buffer.from(`${apiKey}:${apiSecret}`).toString("base64");
-  const smsProviderToken = process.env.SMS_PROVIDER_TOKEN || `Basic ${rawToken}`;
+    // Legacy AgentX/MCP flows may dispatch SMS themselves after the internal
+    // takeover call. The direct Main AI human-notify path owns backend SMS.
+    if ((source || "workflow") !== "agentx") {
+      let customerName = `Customer #${conversationId}`;
+      try {
+        const nameResult = await pool.query(
+          `SELECT p.name FROM conversations c
+           JOIN identities i ON c.identity_id = i.id
+           JOIN profiles p ON i.profile_id = p.id
+           WHERE c.id = $1::integer`,
+          [conversationId]
+        );
+        customerName = nameResult.rows[0]?.name || customerName;
+      } catch (err: any) {
+        serverLogger.error({ error: err.message, conversationId }, "Failed to resolve customer name for takeover SMS");
+      }
 
-  return {
-    ...takeoverState,
-    smsTargetPhone: cleanPhone,
-    smsProviderUrl,
-    smsProviderToken
-  };
+      try {
+        await smsNotificationService.sendTakeoverAlert({
+          conversationId,
+          customerName,
+          reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+          reasonDetail,
+          lastMessage: content,
+        });
+      } catch (error: any) {
+        serverLogger.error({ error: error.message, conversationId }, "Failed to send takeover SMS alert");
+      }
+    }
+  })().catch((err: any) => {
+    serverLogger.error({ error: err?.message, conversationId }, "Takeover background work failed");
+  });
+
+  // The operator's phone number, the SMS provider URL and a base64 provider
+  // credential used to be assembled here and returned. Neither caller read any
+  // of it, so it cost two queries on the critical path and put a credential in
+  // a value that could be logged. Removed; SmsNotificationService owns dispatch.
+  return takeoverState;
 }
 
 const orchestrator = new Orchestrator(memoryService, agentManager, takeoverManager);
@@ -929,6 +975,35 @@ fastify.post("/api/v1/internal/tickets", { preHandler: requireExecutionContext }
   const ticket = result.data;
   const ticketId = ticket.ticket_id || ticket.ticketId;
   const dueDate = ticket.due_date || ticket.dueDate;
+
+  // B-5: bind the ticket to the execution that caused it, so the chain can be
+  // walked back to the LINE event later. Written before the reply so a caller
+  // that immediately queries the chain sees it.
+  const trusted = request.trustedContext;
+  if (trusted) {
+    await pool
+      .query(
+        `UPDATE tickets SET execution_context_id = $1, correlation_id = $2 WHERE ticket_id = $3`,
+        [trusted.contextId, trusted.correlationId, ticketId]
+      )
+      .catch((err) =>
+        serverLogger.warn({ error: err.message, ticketId }, "Could not bind ticket to execution context")
+      );
+
+    await traceRecorder.record({
+      correlationId: trusted.correlationId,
+      component: "ticketx",
+      eventType: "ticket_created",
+      conversationId: trusted.conversationId,
+      projectId: trusted.projectId,
+      orgId: trusted.orgId,
+      identityId: trusted.identityId,
+      lineEventId: trusted.lineEventId,
+      ticketId: Number(ticket.id) || null,
+      detail: { ticketNumber: ticketId, subject: String(payload.subject || "").slice(0, 120) },
+    });
+  }
+
   return reply.code(200).send({
     success: true,
     ticketId,
@@ -1214,8 +1289,32 @@ fastify.post("/api/v1/internal/tickets/promote", { preHandler: requireExecutionC
 
     const result = await planeService.promoteTicketToPlane(body);
     console.log("[Server] Promotion result:", JSON.stringify(result));
+
+    await traceRecorder.record({
+      correlationId: ctx.correlationId,
+      component: "plane",
+      eventType: "promote_completed",
+      status: result?.planeIssueId ? "ok" : "failed",
+      conversationId: ctx.conversationId,
+      projectId: ctx.projectId,
+      orgId: ctx.orgId,
+      // Plane's own id when it gave one; null otherwise. Never invented.
+      planeIssueId: result?.planeIssueId ? String(result.planeIssueId) : null,
+      detail: { ticketNumber: result?.ticketId ?? null, alreadyPromoted: !!result?.alreadyPromoted },
+    });
+
     return reply.code(200).send(result);
   } catch (err: any) {
+    await traceRecorder.record({
+      correlationId: request.trustedContext?.correlationId || `promote-failed-${request.id}`,
+      component: "plane",
+      eventType: "promote_failed",
+      status: "failed",
+      conversationId: request.trustedContext?.conversationId ?? null,
+      projectId: request.trustedContext?.projectId ?? null,
+      orgId: request.trustedContext?.orgId ?? null,
+      errorMessage: err?.message || String(err),
+    });
     console.error("[Server] /api/v1/internal/tickets/promote error:", err);
     return reply.code(500).send({
       statusCode: 500,
@@ -1223,6 +1322,37 @@ fastify.post("/api/v1/internal/tickets/promote", { preHandler: requireExecutionC
       message: err.message || String(err),
     });
   }
+});
+
+/**
+ * B-5: the causal chain for one ticket, back to the LINE event.
+ *
+ * Console-scoped: it exposes who talked to whom inside a tenant, so it is
+ * behind the same authentication and project scoping as ticket reads.
+ * missingLinks names the hops genuinely absent rather than presenting a
+ * partial chain as complete.
+ */
+fastify.get("/api/v1/tickets/:id/trace", async (request, reply) => {
+  // authHook (global onRequest) has already established the principal.
+  if (!request.principal) {
+    return reply.code(401).send({ error: "Unauthorized", message: "Authentication required" });
+  }
+  const { id } = request.params as { id: string };
+  if (!/^[0-9]+$/.test(String(id))) {
+    return reply.code(400).send({ error: "Bad Request", message: "Ticket id must be numeric" });
+  }
+  const ticketId = Number(id);
+
+  const owner = await pool.query(`SELECT project_id FROM tickets WHERE id = $1 LIMIT 1`, [ticketId]);
+  if (owner.rows.length === 0) {
+    return reply.code(404).send({ error: "Not Found", message: `Ticket ${ticketId} does not exist` });
+  }
+  if (!canAccessProject(request, owner.rows[0].project_id)) {
+    return reply.code(403).send({ error: "Forbidden", message: "Ticket is outside your project scope" });
+  }
+
+  const chain = await traceRecorder.chainForTicket(ticketId);
+  return reply.code(200).send(chain);
 });
 
 fastify.post("/api/v1/internal/messages", async (request, reply) => {
@@ -1318,6 +1448,18 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   const ticketId = payload.ticketId || payload.ticket_id || payload.id;
   const orgId = request.headers["x-org-id"] || payload.org_id || payload.orgId;
 
+  // Tenant scope is mandatory here. The org filter used to be appended only
+  // when an org was supplied, so a caller that simply OMITTED org_id matched
+  // the ticket number across every organization - closing another tenant's
+  // ticket by leaving a field out. Absent scope is refused, not widened.
+  if (!orgId || !String(orgId).trim()) {
+    return reply.code(400).send({
+      error: "Bad Request",
+      code: "ORG_SCOPE_REQUIRED",
+      message: "An organization scope is required to close a ticket",
+    });
+  }
+
   const parseResult = CloseTicketInputSchema.safeParse({
     ticketId: String(ticketId || ""),
     cancellation_reason: typeof rawReason === "string" ? rawReason.trim() : "",
@@ -1335,6 +1477,30 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
   if (!tool) return reply.code(500).send({ error: "Tool close_ticket not found" });
   const context = { correlationId: request.headers["x-correlation-id"], traceId: request.headers["x-trace-id"] };
 
+  // Ownership is checked BEFORE the tool runs, not after.
+  //
+  // The tool closes the ticket through its own TransactionManager, which is a
+  // different connection from `client` below - so the scoped UPDATE failing
+  // and this handler calling ROLLBACK did NOT undo the tool's write. A caller
+  // naming another tenant's ticket got a 404 back while the ticket really had
+  // been closed. The scope check has to come first.
+  const owner = await pool.query(
+    `SELECT id, org_id FROM tickets
+      WHERE (ticket_number = $1 OR id = $2) AND org_id = $3
+      LIMIT 1`,
+    [validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0, String(orgId)]
+  );
+  if (owner.rows.length === 0) {
+    serverLogger.warn(
+      { ticketId: validatedData.ticketId, orgId: String(orgId) },
+      "Refused close for a ticket outside the caller's organization"
+    );
+    return reply.code(404).send({
+      error: "Not Found",
+      message: `Ticket ${validatedData.ticketId} not found or tenant access denied`,
+    });
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -1343,13 +1509,21 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
     // Save cancellation reason and update status within transaction
     const updateRes = await client.query(
-      `UPDATE tickets 
-       SET cancellation_reason = $1, status = 'cancelled', updated_at = NOW() 
-       WHERE (ticket_number = $2 OR id = $3) ${orgId ? "AND (org_id = $4 OR org_id IS NULL)" : ""}
+      // 'cancelled' lowercase is not one of the eleven lifecycle statuses and
+      // fails tickets_status_lifecycle_check, so every close through this
+      // route errored at the update. The "OR org_id IS NULL" arm is gone too:
+      // no ticket has a null org_id, so it protected nothing and only widened
+      // the match beyond the caller's tenant.
+      `UPDATE tickets
+       SET cancellation_reason = $1, status = 'CANCELLED', updated_at = NOW()
+       WHERE (ticket_number = $2 OR id = $3) AND org_id = $4
        RETURNING id, ticket_number, org_id`,
-      orgId 
-        ? [validatedData.cancellation_reason, validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0, String(orgId)]
-        : [validatedData.cancellation_reason, validatedData.ticketId, parseInt(validatedData.ticketId, 10) || 0]
+      [
+        validatedData.cancellation_reason,
+        validatedData.ticketId,
+        parseInt(validatedData.ticketId, 10) || 0,
+        String(orgId),
+      ]
     );
 
     if (updateRes.rows.length === 0) {
@@ -1361,8 +1535,11 @@ fastify.post("/api/v1/internal/tickets/close", async (request, reply) => {
 
     // Atomic Audit logging in admin_audit_logs inside transaction
     await client.query(
-      `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      // admin_audit_logs has no action_type, actor_id or payload column - the
+      // real shape is (action, actor, changes), as admin.ts already writes.
+      // These inserts threw on every close and every restore.
+      `INSERT INTO admin_audit_logs (action, entity_type, entity_id, actor, changes, created_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
       [
         "TICKET_CLOSED",
         "Ticket",
@@ -1430,8 +1607,11 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
 
     // Atomic audit logging in admin_audit_logs inside transaction
     await client.query(
-      `INSERT INTO admin_audit_logs (action_type, entity_type, entity_id, actor_id, payload, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      // admin_audit_logs has no action_type, actor_id or payload column - the
+      // real shape is (action, actor, changes), as admin.ts already writes.
+      // These inserts threw on every close and every restore.
+      `INSERT INTO admin_audit_logs (action, entity_type, entity_id, actor, changes, created_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
       [
         "TICKET_RESTORED",
         "Ticket",
