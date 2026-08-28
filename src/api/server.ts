@@ -1338,14 +1338,35 @@ fastify.get("/api/v1/internal/tickets/status", { preHandler: requireExecutionCon
   return reply.code(200).send(tickets);
 });
 
-fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) => {
+fastify.post(
+  "/api/v1/internal/conversations/takeover",
+  { preHandler: requireExecutionContext },
+  async (request, reply) => {
+  const ctx = request.trustedContext!;
   const body = request.body as any;
   const payload = body.data ? { ...body.data } : body;
-  const conversationId = payload.conversationId;
-  const parsed = parseInt(String(conversationId), 10);
-  if (isNaN(parsed) || parsed <= 0 || String(conversationId) === "null" || String(conversationId) === "undefined") {
-    return reply.code(400).send({ error: "Bad Request", message: "Invalid conversationId" });
-  }
+
+  // Escalation is a backend operation, not a flow one. The conversation is
+  // taken from the execution context, never from the caller: PromptX used to
+  // write conversations.takeover_state directly by SQL with an id it chose.
+  const conversationId = ctx.conversationId;
+
+  await traceRecorder.record({
+    correlationId: ctx.correlationId,
+    component: "ticketx",
+    eventType: "takeover_requested",
+    conversationId: ctx.conversationId,
+    projectId: ctx.projectId,
+    orgId: ctx.orgId,
+    detail: {
+      reasonCode: payload.reasonCode || payload.reason_code || null,
+      source: payload.source || "agentx",
+      // No "claimed" field here: requireExecutionContext strips conversationId
+      // before this handler runs, so it would always read back as absent. The
+      // real attempt is recorded by the middleware as forbidden_fields_ignored.
+    },
+  });
+
   const state = await requestHumanTakeover({
     conversationId: String(conversationId),
     role: payload.role,
@@ -1360,6 +1381,7 @@ fastify.post("/api/v1/internal/conversations/takeover", async (request, reply) =
     status: state.status,
     suppress_reply: true,
     expires_at: state.leaseExpiresAt,
+    conversation_id: conversationId,
   });
 });
 
@@ -2616,6 +2638,10 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
       identity_id: identityRow?.identity_id,
       status: policyCheck.shouldProcess ? sessionContext.status : "muted",
       handledBy: sessionContext.handledBy,
+      // snake_case alias too: the flow that replaced its own SQL with this
+      // endpoint reads handled_by, and silently returning undefined would look
+      // like "no human is handling this".
+      handled_by: sessionContext.handledBy,
       channel,
       muteReason: policyCheck.shouldProcess ? null : policyCheck.reason
     };
@@ -2652,6 +2678,8 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
       [conversationId]
     );
     const conversationProjectId = String(projectResult.rows[0]?.project_id || "");
+    // Carried on the conversation so callers do not have to resolve it again.
+    (conversation as any).project_id = conversationProjectId || null;
 
     // Notify only Admin UI WebSockets connected to the conversation's project.
     const notifyPayload = JSON.stringify({
@@ -2666,12 +2694,77 @@ fastify.post("/api/v1/internal/sessions/resolve", async (request, reply) => {
     });
     adminSocketRegistry.broadcastToProject(conversationProjectId, notifyPayload);
 
+    // ------------------------------------------------------------------
+    // Mint the execution capability for this turn.
+    //
+    // This is the only point in the NEW PromptX path where the backend has
+    // resolved WHO is talking, from channel identifiers, before any AI has
+    // seen the message. So it is the only honest place to issue authority.
+    //
+    // The flow receives an opaque token it can do nothing with except pass
+    // on. Every tenant fact is read from the row this token names, so the
+    // Gate Agent's output can never become tenant authority.
+    //
+    // Minting never fails the resolve: a session that cannot be given a
+    // capability still returns, and the downstream call then fails closed at
+    // the guard rather than here. Returning null is honest; inventing a
+    // token would not be.
+    let executionContextToken: string | null = null;
+    let executionCorrelationId: string | null = null;
+    let executionContextId: string | null = null;
+
+    if (conversationId && conversationProjectId) {
+      try {
+        const orgRow = await pool.query(
+          `SELECT org_id FROM conversations WHERE id = $1 LIMIT 1`,
+          [conversationId]
+        );
+        const resolvedOrgId = orgRow.rows[0]?.org_id;
+        if (resolvedOrgId) {
+          const minted = await executionContextService.create({
+            channel: String(channel || "line").toLowerCase(),
+            lineEventId: payload.external_id || payload.externalId || null,
+            identityId: identityRow?.identity_id ?? null,
+            conversationId: Number(conversationId),
+            projectId: Number(conversationProjectId),
+            orgId: String(resolvedOrgId),
+          });
+          executionContextToken = minted.token;
+          executionCorrelationId = minted.context.correlationId;
+          executionContextId = minted.context.contextId;
+
+          await traceRecorder.record({
+            correlationId: minted.context.correlationId,
+            component: "line_webhook",
+            eventType: "session_resolved",
+            conversationId: Number(conversationId),
+            projectId: Number(conversationProjectId),
+            orgId: String(resolvedOrgId),
+            identityId: identityRow?.identity_id ?? null,
+            detail: { channel, via: "sessions/resolve" },
+          });
+        }
+      } catch (mintErr: any) {
+        serverLogger.warn(
+          { error: mintErr.message, conversationId },
+          "Could not mint an execution context for this session; downstream calls will fail closed"
+        );
+      }
+    }
+
     return reply.code(200).send({
       identity,
       profile,
       company,
       conversation,
       ticket,
+      // Opaque capability for this turn. Pass through unchanged; never log,
+      // never store, never place in message content.
+      execution: {
+        execution_context_token: executionContextToken,
+        correlation_id: executionCorrelationId,
+        execution_context_id: executionContextId,
+      },
       runtimeFlags,
       policy: {
         shouldProcess: policyCheck.shouldProcess,

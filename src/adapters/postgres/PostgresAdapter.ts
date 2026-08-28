@@ -447,9 +447,15 @@ export class PostgresAdapter implements DatabaseAdapter {
 
       // 5. Find open conversation
       const convResult = await this.executeReadQuery(
+        // LOWER() on both sides, matching the identity lookup above.
+        // This compared channel case-sensitively while its sibling query two
+        // steps earlier did not, and the data holds both "line" and "LINE"
+        // (21 and 6 rows). A caller saying "LINE" therefore found the identity
+        // and then found no conversation, returning an empty conversationId
+        // that failed downstream as `invalid input syntax for type integer`.
         `SELECT id, status, handled_by
          FROM conversations
-         WHERE identity_id = $1 AND channel = $2 AND status = 'open'
+         WHERE identity_id = $1 AND LOWER(channel) = LOWER($2) AND status = 'open'
          ORDER BY created_at DESC
          LIMIT 1`,
         [identity.identity_id, channel]

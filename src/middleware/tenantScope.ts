@@ -51,25 +51,35 @@ export async function resolveTenantScope(principal: AuthPrincipal): Promise<Tena
     return UNRESTRICTED;
   }
 
-  const cacheKey = `${principal.kind}:${principal.subject}:${principal.orgId}`;
+  // Explicit per-project grants (operator_project_access) come from the
+  // principal itself, so there is no lookup to amortise and nothing to cache.
+  //
+  // Caching them was actively wrong: the key was kind:subject:orgId, which
+  // omits the grants. Two tokens for the same operator carrying DIFFERENT
+  // project sets collided, and the first one seen decided access for both -
+  // so a re-issued token with a project grant removed kept the old, wider
+  // scope until the entry expired.
+  if (principal.projectIds !== null) {
+    return {
+      unrestricted: false,
+      orgId: principal.orgId,
+      projectIds: principal.projectIds,
+    };
+  }
+
+  // Org-wide role: every project belonging to the principal's organization.
+  // This one is a database lookup, and is what the cache exists for. Keyed by
+  // organization, because that is the only input.
+  const cacheKey = `org:${principal.orgId}`;
   const cached = scopeCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.scope;
   }
 
-  let projectIds: number[];
-  if (principal.projectIds !== null) {
-    // Explicit per-project grants (operator_project_access).
-    projectIds = principal.projectIds;
-  } else {
-    // Org-wide role: every project belonging to the principal's organization.
-    projectIds = await projectIdsForOrg(principal.orgId as string);
-  }
-
   const scope: TenantScope = {
     unrestricted: false,
     orgId: principal.orgId,
-    projectIds,
+    projectIds: await projectIdsForOrg(principal.orgId as string),
   };
   scopeCache.set(cacheKey, { scope, expiresAt: Date.now() + SCOPE_TTL_MS });
   return scope;

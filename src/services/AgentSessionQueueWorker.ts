@@ -1,6 +1,7 @@
 import axios from "axios";
 import { AgentSessionQueueService, QueueItem } from "./AgentSessionQueueService";
 import { createLogger } from "../observability/logger";
+import { tokenForContext } from "../domain/execution/ExecutionContextService";
 
 const logger = createLogger("agent-session-worker");
 
@@ -88,7 +89,24 @@ export class AgentSessionQueueWorker {
         // We set axios timeout slightly below lease duration so request fails before lease expires
         const requestTimeout = Math.max(this.leaseDurationMs - 5000, 10000);
 
-        await axios.post(this.dmGatewayUrl, currentItem.payload, {
+        // The capability is derived here, not read from the stored payload.
+        //
+        // The queue persists its payload, so keeping a signed token in it would
+        // leave a directly usable credential in a database row for the life of
+        // the queue entry. The signature is a deterministic HMAC over the
+        // context id, so re-deriving costs nothing and confers nothing extra -
+        // the context row's status and expiry are still checked on resolve, so
+        // a retry after revocation or expiry still fails closed.
+        const stored = (currentItem.payload || {}) as any;
+        const contextId = stored?.ticketx?.executionContextId;
+        const outboundPayload = contextId
+          ? {
+              ...stored,
+              ticketx: { ...stored.ticketx, executionToken: tokenForContext(String(contextId)) },
+            }
+          : stored;
+
+        await axios.post(this.dmGatewayUrl, outboundPayload, {
           headers: {
             "Content-Type": "application/json",
             "X-TicketX-Queue-Item-Id": String(queueItemId),

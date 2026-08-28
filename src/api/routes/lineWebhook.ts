@@ -562,6 +562,7 @@ export function registerLineWebhookRoutes(
             // like a context marker is typing plain text: it is not read from
             // there, and it is not forgeable in any case.
             let executionToken: string | undefined;
+            let executionContextId: string | undefined;
             if (decision.conversationId && decision.projectId) {
               try {
                 const convTenant = await pool.query(
@@ -580,6 +581,10 @@ export function registerLineWebhookRoutes(
                     correlationId: webhookEventId || undefined,
                   });
                   executionToken = created.token;
+                  // Carried separately: the queue persists its payload, so it
+                  // stores this id and re-derives the token at dispatch rather
+                  // than keeping a usable capability in a database row.
+                  executionContextId = created.context.contextId;
 
                   await traceRecorder.record({
                     correlationId: created.context.correlationId,
@@ -647,6 +652,7 @@ export function registerLineWebhookRoutes(
                   pushOnboardingCarousel: decision.pushOnboardingCarousel,
                   // Out-of-band capability token. Never placed in the message.
                   executionToken,
+                  executionContextId,
                   correlationId: webhookEventId,
                 }
               );

@@ -39,16 +39,14 @@ async function seedAndGenerate(): Promise<void> {
         `);
 
         // 4. Insert User Roles
+        //
+        // The table is defined once, by migration 029_seed_demo_accounts_and_orgs.sql.
+        // This seed used to carry its own byte-identical CREATE TABLE IF NOT EXISTS,
+        // which meant two definitions of a table the login path depends on and no
+        // way to notice if they drifted. Seeding a table this script does not own
+        // now fails loudly when migrations have not been run, which is the useful
+        // failure: it names the real problem instead of papering over it.
         await client.query(`
-          CREATE TABLE IF NOT EXISTS user_roles (
-            id VARCHAR(64) PRIMARY KEY,
-            user_email VARCHAR(255) NOT NULL UNIQUE,
-            role VARCHAR(32) NOT NULL,
-            org_id VARCHAR(64) NOT NULL DEFAULT 'org_default' REFERENCES organizations(id),
-            status VARCHAR(32) NOT NULL DEFAULT 'active',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          );
-
           INSERT INTO user_roles (id, user_email, role, org_id, status)
           VALUES ('usr_excise_001', 'somchai.excise@excise.go.th', 'customer', 'org_excise', 'active')
           ON CONFLICT (user_email) DO UPDATE SET role = EXCLUDED.role, org_id = EXCLUDED.org_id;
