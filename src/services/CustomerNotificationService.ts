@@ -1,4 +1,5 @@
 import axios from "axios";
+import { createHash } from "crypto";
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
@@ -8,6 +9,8 @@ const logger = createLogger("customer-notification");
 
 export type CustomerNotificationType =
   | "acknowledgement"
+  | "greeting"
+  | "thanks"
   | "ticket_created"
   | "resolution_confirmation"
   | "closed"
@@ -56,11 +59,53 @@ export interface SendResult {
  *    particle out of the comments here too.
  */
 export class CustomerNotificationService {
+  /**
+   * Acknowledgement variants. Every one is intent-neutral (fires before
+   * classification, so it must read naturally for a question as well as an
+   * incident report), promises nothing beyond "received, looking", and ends
+   * in the female particle. Picked deterministically from the idempotency
+   * key so a LINE webhook retry can never produce a differently-worded
+   * duplicate, while consecutive messages still vary.
+   */
+  private static readonly ACK_VARIANTS = [
+    "รับเรื่องแล้วนะคะ ขอเวลาสักครู่ค่ะ",
+    "รับเรื่องไว้แล้วค่ะ เดี๋ยวแอดมินดูให้นะคะ",
+    "รับทราบค่ะ ขอแอดมินดูสักครู่นะคะ",
+    "รับเรื่องค่ะ เดี๋ยวรีบดูให้เลยนะคะ",
+  ] as const;
+
+  /**
+   * Complete replies for turns the webhook answers at the edge: a pure
+   * greeting or pure thanks never reaches the AI (see detectPureSmallTalk in
+   * lineWebhook), so this line is the whole conversation turn, not a stall.
+   */
+  private static readonly GREETING_VARIANTS = [
+    "สวัสดีค่ะ มีอะไรให้แอดมินช่วยดูแลไหมคะ",
+    "สวัสดีค่ะ แจ้งเรื่องหรือสอบถามเข้ามาได้เลยนะคะ",
+    "สวัสดีค่า มีอะไรให้แอดมินช่วยบอกได้เลยนะคะ",
+  ] as const;
+
+  private static readonly THANKS_VARIANTS = [
+    "ยินดีค่ะ มีอะไรให้ช่วยอีกแจ้งได้เลยนะคะ",
+    "ยินดีดูแลเสมอค่ะ",
+    "ขอบคุณเช่นกันนะคะ มีอะไรเพิ่มเติมแจ้งได้เลยค่ะ",
+  ] as const;
+
+  private static pickVariant(variants: readonly string[], seed?: string | null): string {
+    if (!seed) return variants[0];
+    const digest = createHash("sha256").update(seed).digest();
+    return variants[digest[0] % variants.length];
+  }
+
   /** Wording is deliberately conservative — see rule 2 above. */
-  private body(type: CustomerNotificationType, ticketNumber?: string | null): string {
+  private body(type: CustomerNotificationType, ticketNumber?: string | null, seed?: string | null): string {
     switch (type) {
       case "acknowledgement":
-        return "รับเรื่องแล้วนะคะ กำลังตรวจสอบปัญหาให้อยู่ค่ะ";
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_VARIANTS, seed);
+      case "greeting":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.GREETING_VARIANTS, seed);
+      case "thanks":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.THANKS_VARIANTS, seed);
       case "ticket_created":
         return ticketNumber
           ? `สร้างเคส #${ticketNumber} ให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ`
@@ -179,7 +224,7 @@ export class CustomerNotificationService {
       return { sent: false, reason: "NO_RECIPIENT" };
     }
 
-    const body = this.body(req.notificationType, req.ticketNumber);
+    const body = this.body(req.notificationType, req.ticketNumber, req.idempotencyKey);
 
     const claimId = await this.claim(
       { ...req, projectId: req.projectId ?? recipient.projectId, orgId: req.orgId ?? recipient.orgId },
@@ -255,8 +300,8 @@ export class CustomerNotificationService {
   private async appendToConversation(conversationId: number, text: string): Promise<void> {
     await pool
       .query(
-        `INSERT INTO messages (conversation_id, role, content, message_type, created_at)
-         VALUES ($1, 'ai', $2, 'text', NOW())`,
+        `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+         VALUES ($1, 'ai', $2, 'text', 'notification', NOW())`,
         [conversationId, text]
       )
       .catch((err) => logger.warn({ error: err.message, conversationId }, "Could not append notification to conversation"));

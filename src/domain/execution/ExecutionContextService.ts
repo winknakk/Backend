@@ -123,6 +123,12 @@ export class ExecutionContextService {
     const ttl = input.ttlSeconds ?? DEFAULT_TTL_SECONDS;
     const promptxSlug = `support_${input.conversationId}`;
 
+    // Sign BEFORE inserting. Signing throws when SESSION_SECRET is absent, and
+    // doing it after the INSERT left an orphan active row while the caller got
+    // nothing — every webhook then forwarded an empty token and Plane promotion
+    // failed closed, with the row's existence masking the real failure.
+    const token = `${contextId}.${sign(contextId)}`;
+
     await pool.query(
       `INSERT INTO execution_contexts
          (context_id, correlation_id, channel, line_event_id, identity_id,
@@ -165,7 +171,7 @@ export class ExecutionContextService {
         orgId: input.orgId,
         promptxSlug,
       },
-      token: `${contextId}.${sign(contextId)}`,
+      token,
     };
   }
 

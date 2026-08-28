@@ -204,6 +204,30 @@ async function forwardPromptXWebhook(
   );
 }
 
+/**
+ * Detects a message that is ONLY a greeting or ONLY a thank-you, so the
+ * webhook can answer it completely at the edge: a 1-second human reply, no
+ * "รับเรื่องแล้ว" acknowledgement landing on a hello, and no second AI reply
+ * repeating the greeting 40 seconds later. Deliberately conservative — any
+ * substance after the greeting ("สวัสดีค่ะ ระบบล่ม") fails the pure match
+ * and flows to the AI as usual.
+ */
+// Male particles appear here only as CUSTOMER input to match, never as bot
+// output — test-line-project-onboarding greps this file for them, so they are
+// written as unicode escapes.
+const SMALL_TALK_TAIL =
+  "(?:[\\s!.,~]|ๆ|5|ค่ะ|คะ|ค่า|ค๊า|จ้า|จ๊ะ|จ้ะ|นะ|งับ|ฮะ|ฮับ|ผม|\\u0e04\\u0e23\\u0e31\\u0e1a|\\u0e04\\u0e31\\u0e1a)*";
+const GREETING_RE = new RegExp(`^(?:สวัสดี|หวัดดี|ดีจ้า|hello+|hi+|hey)${SMALL_TALK_TAIL}$`, "i");
+const THANKS_RE = new RegExp(`^(?:ขอบคุณ(?:มาก|ๆ)*|ขอบใจ|thanks?|thank\\s*you)${SMALL_TALK_TAIL}$`, "i");
+
+export function detectPureSmallTalk(text: string): "greeting" | "thanks" | null {
+  const t = String(text || "").trim();
+  if (!t || t.length > 30) return null;
+  if (GREETING_RE.test(t)) return "greeting";
+  if (THANKS_RE.test(t)) return "thanks";
+  return null;
+}
+
 function requireProjectId(value: unknown): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error("Invalid project ID");
@@ -501,6 +525,32 @@ export function registerLineWebhookRoutes(
               }
             }
 
+            // Pure greeting / thanks: answer completely at the edge and skip
+            // the AI turn (user decision 2026-08-27). The inbound text is
+            // already persisted above; the reply is idempotent on the event id
+            // and recorded as a notification, so it stays out of AI history.
+            if (!confirmationHandled && decision.conversationId && webhookEventId && event?.message?.type === "text") {
+              const smallTalk = detectPureSmallTalk(String(event.message.text || ""));
+              if (smallTalk) {
+                void customerNotificationService
+                  .send({
+                    conversationId: Number(decision.conversationId),
+                    notificationType: smallTalk,
+                    idempotencyKey: webhookEventId,
+                    projectId: decision.projectId ?? null,
+                    correlationId: webhookEventId,
+                  })
+                  .catch((stErr: any) =>
+                    logger.error(
+                      { error: stErr.message, webhookEventId },
+                      "Small-talk edge reply failed"
+                    )
+                  );
+                processed += 1;
+                continue;
+              }
+            }
+
             // --- B-0: mint the server-owned execution context ---
             //
             // Created here, after signature verification and identity /
@@ -551,14 +601,13 @@ export function registerLineWebhookRoutes(
               }
             }
 
-            // Acknowledge before any AI work begins. This is the Fast Path
-            // requirement: the customer hears back immediately, and never
-            // waits on the batch window, PromptX, RAG or Plane.
-            //
-            // Idempotency is keyed on webhookEventId, so a LINE retry cannot
-            // produce a second acknowledgement. (processEvent already drops
-            // duplicate webhookEventIds before this point; the ledger is the
-            // second, database-enforced guarantee.)
+            // Fast-path acknowledgement (restored 2026-08-27 by user decision,
+            // now with randomized wording in CustomerNotificationService so
+            // consecutive turns never repeat the same line). Fires before any
+            // AI work so the customer hears back immediately. Idempotent on
+            // webhookEventId: a LINE retry cannot produce a second bubble, and
+            // the deterministic variant pick means a retry could not even
+            // produce different wording.
             if (decision.conversationId && webhookEventId && event?.type === "message" && !confirmationHandled) {
               void customerNotificationService
                 .send({
@@ -636,6 +685,12 @@ export function registerLineWebhookRoutes(
                       projectId: decision.projectId,
                       projectName: decision.projectName,
                       conversationId: decision.conversationId,
+                      // B-0: the third forward site. Batch (590) and direct (650) already
+                      // carry the token; this queue path silently dropped it, so every
+                      // queued turn reached the flow with an empty execution_token and
+                      // Plane promotion failed closed.
+                      executionToken,
+                      correlationId: webhookEventId || undefined,
                     },
                   },
                   sequenceAt: new Date(),
@@ -652,6 +707,11 @@ export function registerLineWebhookRoutes(
                   projectId: decision.projectId,
                   projectName: decision.projectName,
                   conversationId: decision.conversationId,
+                  // B-0: the batch path already carries this; the direct path dropped it, so
+                  // every non-batched turn reached the flow with an empty execution_token and
+                  // Plane promotion failed closed (403 EXECUTION_CONTEXT_REQUIRED).
+                  executionToken,
+                  correlationId: webhookEventId || undefined,
                 });
               }
 

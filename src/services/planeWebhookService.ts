@@ -431,7 +431,10 @@ export class PlaneWebhookService {
           summary.checked += 1;
           try {
             const apiBase = (plane_api_base_url || config.PLANE_API_URL || "https://projects.oneweb.tech").replace(/\/+$/, "");
-            const url = `${apiBase}/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(plane_project_id)}/work-items/${encodeURIComponent(issueId)}/`;
+            // /issues/ is the endpoint this Plane instance serves; /work-items/ returned
+            // 404 "Page not found" for EVERY id, and the absent-branch below then
+            // deleted every successfully synced ticket from the DB (2026-08-27).
+            const url = `${apiBase}/api/v1/workspaces/${encodeURIComponent(workspace_slug)}/projects/${encodeURIComponent(plane_project_id)}/issues/${encodeURIComponent(issueId)}/`;
             const apiKey = credential_ref.startsWith("env:") ? (process.env[credential_ref.slice(4)] || config.PLANE_API_KEY) : credential_ref;
 
             const response = await this.httpClient.get(url, {
