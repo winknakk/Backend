@@ -49,7 +49,13 @@ export class SessionTokenService {
   private readonly ttlSeconds: number;
 
   constructor(secret: string, ttlHours: number) {
-    this.secret = secret && secret.length >= 32 ? secret : "ax_live_session_secret_2026_ticketx_secure_key_8f92a10b4c3e";
+    // Fail closed. A fallback constant here would sign real sessions with a key
+    // published in the repository, and would do it silently — the service would
+    // look healthy while every token it issued was forgeable.
+    if (!secret || secret.length < 32) {
+      throw new Error("SESSION_SECRET must be at least 32 characters");
+    }
+    this.secret = secret;
     this.ttlSeconds = Math.floor(ttlHours * 3600);
   }
 

@@ -42,7 +42,11 @@ export const EnvSchema = z.object({
   // Secret used to sign admin session tokens. Required (together with or
   // instead of API_KEY) for the API to serve authenticated requests at all —
   // see authHook, which fails closed when neither is configured.
-  SESSION_SECRET: z.string().min(32).default("ax_live_session_secret_2026_ticketx_secure_key_8f92a10b4c3e"),
+  // No default, deliberately. A default here is a signing key committed to the
+  // repository: every session token and every AgentX execution-context token
+  // would be forgeable by anyone who can read this file, and nothing would
+  // report that it had happened. Absent means absent — see validateEnv below.
+  SESSION_SECRET: z.string().min(32).optional(),
   SESSION_TTL_HOURS: z.coerce.number().min(1).max(168).default(12),
   WEBHOOK_SECRET: z.string().optional(),
   // Enforcement switch for webhook authentication on /api/v1/webhooks/human_notify.
@@ -109,14 +113,36 @@ export const validateEnv = (): Env => {
     result.error.issues.forEach((err) => {
       console.warn(`  - ${err.path.join(".")}: ${err.message}`);
     });
+    // In production we strictly throw an error
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("Strict environment validation failed in Production.");
+    }
   }
 
   const env = (result.data || {}) as Env;
 
-  // Ensure SESSION_SECRET is at least 32 characters, using fallback if missing
-  if (!env.SESSION_SECRET || env.SESSION_SECRET.length < 32) {
-    console.warn("⚠️  SESSION_SECRET is missing or less than 32 characters. Using default secure session secret.");
-    env.SESSION_SECRET = "ax_live_session_secret_2026_ticketx_secure_key_8f92a10b4c3e";
+  // SESSION_SECRET is load-bearing, not optional-in-practice.
+  //
+  // It signs both operator sessions and AgentX execution-context tokens, so
+  // without it ExecutionContextService throws and every guarded route fails
+  // closed - meaning ticket creation stops. That used to surface only when a
+  // customer sent a message and a ticket failed to appear. Refusing to boot
+  // says it at deploy time instead, which is the cheapest moment to find out.
+  //
+  // A substitution used to live here: a missing or short secret was quietly
+  // replaced with a constant written into this file. It made the symptom go
+  // away and left every token in the system forgeable by anyone holding the
+  // source, with nothing in the logs to say so. Do not reintroduce it. If the
+  // secret is missing, the answer is to set it - `openssl rand -base64 48`.
+  if (process.env.NODE_ENV === "production") {
+    const secret = env.SESSION_SECRET;
+    if (!secret || secret.length < 32) {
+      throw new Error(
+        "CONFIGURATION ERROR: SESSION_SECRET must be set to at least 32 characters in production. " +
+          "It signs operator sessions and AgentX execution-context tokens; without it, ticket " +
+          "creation fails closed at runtime."
+      );
+    }
   }
 
   return env;
