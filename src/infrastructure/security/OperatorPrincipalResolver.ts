@@ -38,9 +38,15 @@ export class OperatorPrincipalResolver {
   private async resolveOrgId(email: string, role: string): Promise<string | null> {
     if (GLOBAL_ROLES.has(role)) return null;
 
+    // status is normalised the same way the email already is. It used to be
+    // matched exactly, so a row edited by hand to 'Active', 'ACTIVE' or
+    // 'active ' resolved to no organization and the operator was refused a
+    // session with ORG_UNRESOLVED — a correct password, rejected on a
+    // capital letter. Only case and surrounding whitespace are forgiven:
+    // 'inactive', 'disabled' and 'suspended' still refuse, as they must.
     const res = await pool.query(
       `SELECT org_id FROM user_roles
-        WHERE LOWER(user_email) = LOWER($1) AND status = 'active'
+        WHERE LOWER(user_email) = LOWER($1) AND LOWER(TRIM(status)) = 'active'
         LIMIT 1`,
       [email]
     );
