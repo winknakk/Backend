@@ -916,10 +916,13 @@ export function registerLineWebhookRoutes(
             // the deterministic variant pick means a retry could not even
             // produce different wording.
             if (decision.conversationId && webhookEventId && event?.type === "message" && !confirmationHandled) {
+              const msgText = String(event?.message?.text || "").trim();
+              const isActionTurn = /^(?:ยืนยัน|ใช่(?:ค่ะ|ครับ|เลย|จ้า|แล้ว)?|ถูก(?:ต้อง|แล้ว)?|โอเค|ok|เค|ได้(?:ค่ะ|ครับ|เลย)?|เปิด(?:เคส)?เลย|จัดไป|ลุย|ตามนั้น|เยส|yes|yup|k|ยกเลิก|cancel|ไม่เอา|ไม่ต้อง(?:แล้ว)?|ไม่แจ้ง(?:แล้ว)?|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไร)(?:[\s.,!คะครับ]*)$/i.test(msgText);
+
               void customerNotificationService
                 .send({
                   conversationId: Number(decision.conversationId),
-                  notificationType: "acknowledgement",
+                  notificationType: isActionTurn ? "acknowledgement_action" : "acknowledgement",
                   idempotencyKey: webhookEventId,
                   projectId: decision.projectId ?? null,
                   correlationId: webhookEventId,

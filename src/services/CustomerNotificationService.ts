@@ -9,6 +9,7 @@ const logger = createLogger("customer-notification");
 
 export type CustomerNotificationType =
   | "acknowledgement"
+  | "acknowledgement_action"
   | "greeting"
   | "thanks"
   | "image_attached"
@@ -86,7 +87,17 @@ export class CustomerNotificationService {
     "รับเรื่องแล้วนะคะ ขอเวลาสักครู่ค่ะ",
     "รับเรื่องไว้แล้วค่ะ เดี๋ยวแอดมินดูให้นะคะ",
     "รับทราบค่ะ ขอแอดมินดูสักครู่นะคะ",
-    "รับเรื่องค่ะ เดี๋ยวรีบดูให้เลยนะคะ",
+    "รับเรื่องแล้วค่ะ รอสักครู่นะคะ",
+  ] as const;
+
+  /**
+   * Action Acknowledgement variants for short confirmation/cancellation turns.
+   */
+  private static readonly ACK_ACTION_VARIANTS = [
+    "รับทราบค่ะ",
+    "รับเรื่องค่ะ",
+    "รับทราบเรียบร้อยค่ะ",
+    "รับเรื่องแล้วนะคะ",
   ] as const;
 
   /**
@@ -117,6 +128,8 @@ export class CustomerNotificationService {
     switch (type) {
       case "acknowledgement":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_VARIANTS, seed);
+      case "acknowledgement_action":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_ACTION_VARIANTS, seed);
       case "greeting":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.GREETING_VARIANTS, seed);
       case "thanks":
@@ -274,11 +287,11 @@ export class CustomerNotificationService {
     // the LINE event, so a customer sending "แจ้งเคสค่ะ", then the details, then
     // a screenshot used to receive three of these — and now that the wording is
     // randomized they would not even look like the same message.
-    if (req.notificationType === "acknowledgement") {
+    if (req.notificationType === "acknowledgement" || req.notificationType === "acknowledgement_action") {
       const recent = await pool.query(
         `SELECT 1 FROM customer_notifications
           WHERE conversation_id = $1
-            AND notification_type = 'acknowledgement'
+            AND notification_type IN ('acknowledgement', 'acknowledgement_action')
             AND created_at >= NOW() - ($2::int * INTERVAL '1 second')
           LIMIT 1`,
         [req.conversationId, ACK_BURST_WINDOW_SECONDS]
