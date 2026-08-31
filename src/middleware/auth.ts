@@ -53,6 +53,11 @@ function isWebSocketRoute(url: string): boolean {
   return WEBSOCKET_ROUTES.includes(path);
 }
 
+function isCustomerPortalRoute(url: string): boolean {
+  const path = url.split("?")[0];
+  return path === "/api/portal" || path.startsWith("/api/portal/");
+}
+
 function isPublicRoute(url: string): boolean {
   const path = url.split("?")[0];
   return PUBLIC_ROUTES.some((route) => (route.endsWith("/") ? path.startsWith(route) : path === route || path.startsWith(`${route}/`)));
@@ -184,6 +189,12 @@ export async function internalApiGuard(request: FastifyRequest, reply: FastifyRe
  */
 export async function authHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (isPublicRoute(request.url)) {
+    return;
+  }
+
+  // Routes under /api/portal/* are protected by customerAuthHook, not the operator authHook.
+  // /api/portal is intentionally NOT in PUBLIC_ROUTES: it requires valid customer authentication.
+  if (isCustomerPortalRoute(request.url)) {
     return;
   }
 

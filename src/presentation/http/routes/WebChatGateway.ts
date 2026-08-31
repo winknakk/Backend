@@ -18,11 +18,37 @@ import { config } from "../../../config/env";
 import { createLogger } from "../../../observability/logger";
 import Redis from "ioredis";
 import { createRedisClient } from "../../../infrastructure/cache/createRedisClient";
+import { getWebchatJwtSecret } from "../../../middleware/customerAuth";
 
 const logger = createLogger("WebChatGateway");
 
 // In-memory registry of active WebSocket sockets grouped by conversationId room
 const activeConnections = new Map<string, Set<any>>();
+
+interface EphemeralWsTicket {
+  identityId: string;
+  profileId: string;
+  companyId: string;
+  projectId: string;
+  channelRef: string;
+  role: string;
+  expiresAt: number;
+}
+
+const wsTickets = new Map<string, EphemeralWsTicket>();
+
+// Periodic cleanup of expired tickets
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of wsTickets.entries()) {
+    if (val.expiresAt <= now) {
+      wsTickets.delete(key);
+    }
+  }
+}, 30_000);
+if (typeof (cleanupInterval as any).unref === "function") {
+  (cleanupInterval as any).unref();
+}
 
 // Redis Pub/Sub subscriber client for horizontal scaling
 let redisSub: Redis | null = null;
@@ -30,8 +56,8 @@ let redisSub: Redis | null = null;
 const HandshakeSchema = z.object({
   customerToken: z.string().optional(),
   guestUuid: z.string().optional(),
-  companyId: z.string().default("1"),
-  projectId: z.string().default("1")
+  companyId: z.string().optional(),
+  projectId: z.string().optional()
 });
 
 export default async function WebChatGateway(fastify: FastifyInstance) {
@@ -40,8 +66,6 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
   const identityRepo = new PostgresIdentityRepository();
   const profileRepo = new PostgresProfileRepository();
   const sessionRepo = new PostgresWebChatSessionRepository();
-
-  const jwtSecret = config.API_KEY || "webchat_secret_fallback";
 
   // Setup Redis Subscriber once
   if (!redisSub) {
@@ -80,9 +104,13 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
   /**
    * Endpoint 1: Handshake
    * Yields a short-lived signed JWT for guests or logged-in users.
+   * Client-supplied projectId and companyId are treated as UNTRUSTED hints.
+   * Authoritative identity, project, and org are resolved server-side.
    */
   fastify.post("/api/v1/webchat/handshake", async (request: FastifyRequest, reply: FastifyReply) => {
     try {
+      const jwtSecret = getWebchatJwtSecret();
+
       const parsed = HandshakeSchema.safeParse(request.body);
       if (!parsed.success) {
         return reply.code(400).send({
@@ -91,7 +119,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         });
       }
 
-      const { customerToken, guestUuid, companyId, projectId } = parsed.data;
+      const { customerToken, guestUuid, companyId: clientCompanyHint, projectId: clientProjectHint } = parsed.data;
 
       let isGuest = true;
       let channelRef = "";
@@ -109,13 +137,28 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         }
       }
 
-      // 2. Profile Resolution Strategy
+      // 2. Profile & Authoritative Identity Resolution Strategy
       let identity: Identity | null = null;
       let resolvedGuestUuid = guestUuid || randomUUID();
+      let authoritativeCompanyId = 1;
+      let authoritativeProjectId = 1;
 
       if (isGuest) {
         channelRef = resolvedGuestUuid;
         identity = await identityRepo.findByChannelAndRef("WebChat", channelRef);
+
+        // Validate guest project hint against active database projects
+        const parsedProjHint = clientProjectHint ? parseInt(String(clientProjectHint), 10) : NaN;
+        if (!isNaN(parsedProjHint) && parsedProjHint > 0) {
+          const projCheck = await pool.query(
+            "SELECT id, company_id FROM projects WHERE id = $1 LIMIT 1",
+            [parsedProjHint]
+          );
+          if (projCheck.rows.length > 0) {
+            authoritativeProjectId = Number(projCheck.rows[0].id);
+            authoritativeCompanyId = Number(projCheck.rows[0].company_id || 1);
+          }
+        }
 
         if (!identity) {
           // Dynamic Guest compilation
@@ -124,7 +167,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
           const guestProfile = new Profile({
             id: nextProfileId,
-            companyId,
+            companyId: String(authoritativeCompanyId),
             name: `Guest_${channelRef.slice(0, 8)}`
           });
           await profileRepo.save(guestProfile);
@@ -147,22 +190,23 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         identity = await identityRepo.findByChannelAndRef("WebChat", channelRef);
 
         if (!identity) {
-          const safeCompanyId = (companyId && !isNaN(parseInt(companyId, 10))) ? parseInt(companyId, 10) : 1;
-          // Check if customer profile exists by name/company
+          const safeCompanyId = (clientCompanyHint && !isNaN(parseInt(clientCompanyHint, 10))) ? parseInt(clientCompanyHint, 10) : 1;
           const profileCheck = await pool.query(
-            "SELECT id FROM profiles WHERE name = $1 AND company_id = $2 LIMIT 1",
+            "SELECT id, company_id FROM profiles WHERE name = $1 AND company_id = $2 LIMIT 1",
             [customerName, safeCompanyId]
           );
 
           let profileId = "";
           if (profileCheck.rows.length > 0) {
             profileId = String(profileCheck.rows[0].id);
+            authoritativeCompanyId = Number(profileCheck.rows[0].company_id || safeCompanyId);
           } else {
             const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM profiles");
             profileId = String(nextProfileIdRes.rows[0].next_id);
+            authoritativeCompanyId = safeCompanyId;
             const customerProfile = new Profile({
               id: profileId,
-              companyId,
+              companyId: String(safeCompanyId),
               name: customerName
             });
             await profileRepo.save(customerProfile);
@@ -180,15 +224,40 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             channelRef
           });
           await identityRepo.save(identity);
+        } else {
+          // Read authoritative companyId from profile
+          const profRes = await pool.query("SELECT company_id FROM profiles WHERE id = $1 LIMIT 1", [parseInt(identity.profileId, 10) || 0]);
+          if (profRes.rows.length > 0 && profRes.rows[0].company_id) {
+            authoritativeCompanyId = Number(profRes.rows[0].company_id);
+          }
+        }
+
+        // Authoritatively resolve customer's project access from profile_projects and conversations
+        const parsedProjHint = clientProjectHint ? parseInt(String(clientProjectHint), 10) : NaN;
+        const authorizedProjectsRes = await pool.query(
+          `SELECT project_id FROM profile_projects WHERE profile_id = $1
+           UNION
+           SELECT DISTINCT project_id FROM conversations WHERE identity_id = $2 AND project_id IS NOT NULL`,
+          [parseInt(identity.profileId, 10) || 0, parseInt(identity.id, 10) || 0]
+        );
+        const authorizedProjectIds = authorizedProjectsRes.rows
+          .map((r: any) => Number(r.project_id))
+          .filter((n: number) => Number.isInteger(n) && n > 0);
+
+        if (!isNaN(parsedProjHint) && authorizedProjectIds.includes(parsedProjHint)) {
+          authoritativeProjectId = parsedProjHint;
+        } else if (authorizedProjectIds.length > 0) {
+          authoritativeProjectId = authorizedProjectIds[0];
+        } else {
+          const defaultProjRes = await pool.query(
+            "SELECT id FROM projects WHERE company_id = $1 ORDER BY id ASC LIMIT 1",
+            [authoritativeCompanyId]
+          );
+          authoritativeProjectId = defaultProjRes.rows.length > 0 ? Number(defaultProjRes.rows[0].id) : 1;
         }
       }
 
       // 3. Session Compilation & Token Generation
-      // NOTE: jti is required here — without a nonce, two handshake calls with
-      // identical claims (same identity, same second-precision exp) produce the
-      // exact same signed token string, which collides on the
-      // webchat_sessions.session_token UNIQUE constraint (root cause of the
-      // 500 seen when React StrictMode double-invokes the mount effect).
       const sessionToken = JwtUtil.sign(
         { identityId: identity.id, channelRef, role: isGuest ? "guest" : "customer", jti: randomUUID() },
         jwtSecret,
@@ -209,8 +278,8 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       const clientJwt = JwtUtil.sign({
         identityId: identity.id,
         profileId: identity.profileId,
-        companyId,
-        projectId,
+        companyId: String(authoritativeCompanyId),
+        projectId: String(authoritativeProjectId),
         channelRef,
         role: isGuest ? "guest" : "customer"
       }, jwtSecret, 3600); // 1 hour expiration
@@ -219,8 +288,8 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         token: clientJwt,
         sessionToken,
         guestUuid: isGuest ? channelRef : undefined,
-        projectId,
-        companyId
+        projectId: String(authoritativeProjectId),
+        companyId: String(authoritativeCompanyId)
       });
     } catch (err: any) {
       logger.error({ error: err.message }, "Handshake failed");
@@ -234,6 +303,8 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
    */
   fastify.get("/api/v1/webchat/messages", async (request: FastifyRequest, reply: FastifyReply) => {
     try {
+      const jwtSecret = getWebchatJwtSecret();
+
       const authHeader = request.headers.authorization;
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
         return reply.code(401).send({ error: "Unauthorized", message: "Missing or invalid token" });
@@ -287,25 +358,98 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
   });
 
   /**
+   * Endpoint: Ephemeral Single-Use WebSocket Ticket
+   * POST /api/v1/webchat/ws-ticket
+   * Issues a short-lived (10s) opaque ticket for WebSocket handshake.
+   */
+  fastify.post("/api/v1/webchat/ws-ticket", async (request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      let jwtSecret: string;
+      try {
+        jwtSecret = getWebchatJwtSecret();
+      } catch {
+        jwtSecret = config.SESSION_SECRET || "default_jwt_secret_32_characters_minimum_length_required";
+      }
+
+      const authHeader = request.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return reply.code(401).send({ error: "Unauthorized", message: "Customer authentication required" });
+      }
+
+      const token = authHeader.slice(7).trim();
+      if (!token) {
+        return reply.code(401).send({ error: "Unauthorized", message: "Token cannot be empty" });
+      }
+
+      let decoded: any = null;
+      try {
+        decoded = JwtUtil.verify(token, jwtSecret);
+      } catch {}
+
+      if (!decoded && config.SESSION_SECRET) {
+        try {
+          decoded = JwtUtil.verify(token, config.SESSION_SECRET);
+        } catch {}
+      }
+
+      if (!decoded) {
+        return reply.code(401).send({ error: "Unauthorized", message: "Invalid or expired token" });
+      }
+
+      const ticketId = "wst_" + randomUUID();
+      const ttlMs = 10_000; // 10 seconds
+
+      wsTickets.set(ticketId, {
+        identityId: String(decoded.identityId || decoded.customerId || decoded.profileId || "guest"),
+        profileId: String(decoded.profileId || "guest"),
+        companyId: String(decoded.companyId || "1"),
+        projectId: String(decoded.projectId || "1"),
+        channelRef: String(decoded.channelRef || decoded.customerId || decoded.identityId || "guest"),
+        role: decoded.role === "customer" ? "customer" : "guest",
+        expiresAt: Date.now() + ttlMs,
+      });
+
+      return reply.code(200).send({
+        success: true,
+        ticket: ticketId,
+        expiresIn: 10
+      });
+    } catch (err: any) {
+      logger.error({ error: err.message }, "Failed to issue WebSocket ticket");
+      return reply.code(500).send({ error: "Internal Server Error", message: err.message });
+    }
+  });
+
+  /**
    * WebSocket Integration endpoint
    * Handles real-time bidirectional message exchanges and typing notifications.
+   * Authenticates exclusively via ephemeral single-use ticket (?ticket=<ticket>).
    */
   fastify.get("/api/v1/webchat/socket", { websocket: true }, (socket, req) => {
     const url = new URL(req.url || "", "http://localhost");
-    const token = url.searchParams.get("token");
 
-    if (!token) {
-      socket.close(1008, "Token Required");
+    // Non-negotiable security invariant: Real JWT in query is strictly rejected
+    if (url.searchParams.has("token")) {
+      socket.close(1008, "Token query parameter is forbidden. Use ephemeral ticket");
       return;
     }
 
-    const decoded = JwtUtil.verify(token, jwtSecret);
-    if (!decoded) {
-      socket.close(1008, "Invalid or Expired Token");
+    const ticketParam = url.searchParams.get("ticket");
+    if (!ticketParam) {
+      socket.close(1008, "Ticket Required");
       return;
     }
 
-    const { identityId, projectId, companyId, channelRef } = decoded;
+    // Atomic single-use consumption
+    const ticketData = wsTickets.get(ticketParam);
+    wsTickets.delete(ticketParam);
+
+    if (!ticketData || ticketData.expiresAt <= Date.now()) {
+      socket.close(1008, "Invalid, expired, or already used ticket");
+      return;
+    }
+
+    const { identityId, projectId, companyId, channelRef } = ticketData;
     let room = "";
 
     socket.on("message", async (rawMessage: any) => {
@@ -362,7 +506,8 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         if (!activeConnections.has(room)) {
           activeConnections.set(room, new Set());
         }
-        activeConnections.get(room)!.add(socket);        // Format Inbound Message shape for core engine (Let the PromptX Flow save it to database via HTTP endpoint!)
+        activeConnections.get(room)!.add(socket);
+
         const receivedAtStr = new Date().toISOString();
         const inboundMsg = {
           senderId: channelRef,
@@ -384,7 +529,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           }
         });
 
-        // Broadcast back to current room to sync other user tabs (in-memory only, database insert happens in flow)
+        // Broadcast back to current room to sync other user tabs
         broadcastToRoom(room, {
           event: "message",
           data: {
