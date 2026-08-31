@@ -105,7 +105,12 @@ fastify.removeContentTypeParser("application/json");
 fastify.addContentTypeParser("application/json", { parseAs: "buffer" }, (request, body, done) => {
   try {
     request.rawBody = body as Buffer;
-    done(null, JSON.parse((body as Buffer).toString("utf8")));
+    const str = (body as Buffer).toString("utf8").trim();
+    if (!str) {
+      done(null, {});
+      return;
+    }
+    done(null, JSON.parse(str));
   } catch (error: any) {
     done(error, undefined);
   }

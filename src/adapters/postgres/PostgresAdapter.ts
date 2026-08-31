@@ -140,9 +140,11 @@ export class PostgresAdapter implements DatabaseAdapter {
 
       // Write transactionally to outbox_events
       await pool.query(
-        `INSERT INTO outbox_events (event_type, payload, status, attempts)
-         VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO outbox_events (aggregate_type, aggregate_id, event_type, payload, status, attempts)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
         [
+          "ticket",
+          ticketNumber,
           "TicketCreated",
           JSON.stringify({ ticketId: ticketNumber }),
           "pending",
@@ -919,10 +921,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id = $${queryParams.length})`);
     }
     if (profileId) {
-      const parsed = parseInt(profileId, 10);
-      if (isNaN(parsed)) return [];
-      queryParams.push(parsed);
-      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id IN (SELECT id FROM identities WHERE profile_id = $${queryParams.length}))`);
+      queryParams.push(String(profileId).trim());
+      conditions.push(`t.conversation_id IN (SELECT id FROM conversations WHERE identity_id IN (SELECT id FROM identities WHERE profile_id::text = $${queryParams.length}))`);
     }
 
     if (conditions.length > 0) {

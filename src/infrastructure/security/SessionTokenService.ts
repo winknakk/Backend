@@ -8,11 +8,11 @@ import { createHmac, timingSafeEqual, randomUUID } from "crypto";
  * swapped for a standard library later without changing callers.
  */
 
-export type PrincipalKind = "operator" | "service";
+export type PrincipalKind = "operator" | "service" | "customer";
 
 export interface AuthPrincipal {
   kind: PrincipalKind;
-  /** Operator id, or "service" for machine-to-machine callers. */
+  /** Operator id, "service", or customer identityId. */
   subject: string;
   email?: string;
   role: string;
@@ -25,8 +25,11 @@ export interface AuthPrincipal {
    * Projects the principal may access.
    * `null` means "every project inside orgId" (or every project when orgId is
    * also null). An empty array means no project access at all.
+   * For customer: MUST BE [projectId] (never null).
    */
   projectIds: number[] | null;
+  /** Profile id for customer principals. */
+  profileId?: string;
 }
 
 interface TokenPayload extends AuthPrincipal {

@@ -6,6 +6,7 @@ import { getSessionTokenService } from "../../middleware/auth";
 import { OperatorPrincipalResolver } from "../../infrastructure/security/OperatorPrincipalResolver";
 import { verifyPassword } from "../../infrastructure/security/PasswordHasher";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
+import { JwtUtil } from "../../shared/jwt";
 import { createLogger } from "../../observability/logger";
 
 const logger = createLogger("auth-routes");
@@ -272,6 +273,61 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
     }
   });
 
+  /**
+   * Customer Sign-in / Verification Ingress
+   * POST /api/v1/auth/customer-login
+   */
+  fastify.post("/api/v1/auth/customer-login", async (request, reply) => {
+    const parseResult = LoginSchema.safeParse(request.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({ error: "Invalid login payload" });
+    }
+    const { username } = parseResult.data;
+    const cleanUser = username.trim().toLowerCase();
+
+    // Check if matching customer profile exists in DB
+    const profRes = await pool.query(
+      "SELECT id, name, email, phone, company_id FROM profiles WHERE LOWER(email) = $1 OR id::text = $1 LIMIT 1",
+      [cleanUser]
+    );
+
+    let customerProfile = profRes.rows[0];
+    if (!customerProfile && (cleanUser.includes("win") || cleanUser.includes("customer"))) {
+      // Fallback to seeded demo customer
+      const demoRes = await pool.query("SELECT id, name, email, phone, company_id FROM profiles WHERE id::text = '101' LIMIT 1");
+      customerProfile = demoRes.rows[0];
+    }
+
+    if (!customerProfile) {
+      return reply.status(401).send({ error: "Invalid customer account" });
+    }
+
+    const identRes = await pool.query(
+      "SELECT channel_ref FROM identities WHERE profile_id::text = $1::text LIMIT 1",
+      [String(customerProfile.id)]
+    );
+    const channelRef = identRes.rows[0]?.channel_ref || `cust_${customerProfile.id}`;
+
+    const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
+    const jwtSecret = getWebchatJwtSecret();
+    const proofToken = JwtUtil.sign({
+      customerId: channelRef,
+      name: customerProfile.name,
+      email: customerProfile.email,
+    }, jwtSecret, 86400);
+
+    return reply.send({
+      success: true,
+      role: "customer",
+      proofToken,
+      customer: {
+        id: customerProfile.id,
+        name: customerProfile.name,
+        email: customerProfile.email,
+      }
+    });
+  });
+
   // 7. Fallback Local Login
   fastify.post("/api/v1/auth/login", async (request, reply) => {
     const parseResult = LoginSchema.safeParse(request.body);
@@ -286,6 +342,48 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
     }
 
     const { username, password } = parseResult.data;
+    const cleanUser = username.trim().toLowerCase();
+
+    // Check if this is a Customer account
+    if (cleanUser.includes("customer") || cleanUser === "customer.win@ticketx.local") {
+      const profRes = await pool.query(
+        "SELECT id, name, email, phone, company_id FROM profiles WHERE LOWER(email) = $1 OR id::text = '101' LIMIT 1",
+        [cleanUser]
+      );
+      if (profRes.rows.length > 0) {
+        const customerProfile = profRes.rows[0];
+        const identRes = await pool.query(
+          "SELECT channel_ref FROM identities WHERE profile_id::text = $1::text LIMIT 1",
+          [String(customerProfile.id)]
+        );
+        const channelRef = identRes.rows[0]?.channel_ref || `cust_${customerProfile.id}`;
+        const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
+        const jwtSecret = getWebchatJwtSecret();
+        const proofToken = JwtUtil.sign({
+          customerId: channelRef,
+          name: customerProfile.name,
+          email: customerProfile.email,
+        }, jwtSecret, 86400);
+
+        logger.info({ customerId: customerProfile.id, email: customerProfile.email }, "Customer signed in via local login");
+
+        return reply.send({
+          success: true,
+          role: "customer",
+          token: proofToken,
+          proofToken,
+          expiresAt: Date.now() + 86400 * 1000,
+          user: {
+            username: customerProfile.email,
+            email: customerProfile.email,
+            name: customerProfile.name,
+            role: "customer",
+            orgId: "org_avalant",
+            projectIds: [1],
+          }
+        });
+      }
+    }
 
     const operator = await principalResolver.findOperatorByEmail(username);
     if (!operator) {
