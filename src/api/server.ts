@@ -79,6 +79,7 @@ import { webhookSignatureHook } from "../middleware/webhookSignature";
 import { rateLimitHook } from "../middleware/rateLimit";
 import { SmsNotificationService } from "../services/SmsNotificationService";
 import { pool } from "../adapters/postgres/PostgresAdapter";
+import { nextSequenceId, syncSerialSequences } from "../adapters/postgres/sequences";
 import { BackupManager } from "../adapters/postgres/BackupManager";
 import { QueueFactory } from "../queue/QueueFactory";
 import { startConfigWatcher } from "../cache/ConfigWatcher";
@@ -528,6 +529,17 @@ export function registerLocalTools(): void {
 async function bootstrap() {
   initOpenTelemetry();
   serverLogger.info("Initializing AutomationX V2 API Server bootstrap...");
+
+  // Realign any SERIAL sequence that sits below its table's MAX(id) before we
+  // accept traffic. Migration 043 does this once, but a restore, a seed file,
+  // or a hand-written INSERT with an explicit id can reintroduce the drift —
+  // and the symptom is a duplicate-key 503 on the LINE webhook, not a startup
+  // failure, so it stays invisible until a real user hits it.
+  try {
+    await syncSerialSequences(pool);
+  } catch (err: any) {
+    serverLogger.error({ error: err.message }, "SERIAL sequence sync failed at bootstrap");
+  }
 
   // Register graceful shutdown handlers
   GracefulShutdownService.register(fastify);
@@ -2314,9 +2326,9 @@ fastify.post("/api/v1/internal/conversations", async (request, reply) => {
     }
   }
 
-  // Get next id
-  const nextIdRes = await pool.query("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM conversations");
-  const nextId = nextIdRes.rows[0].next_id;
+  // Allocate from the table's own sequence — MAX(id)+1 left the sequence behind
+  // and collided with the DEFAULT nextval() writers (see migration 043).
+  const nextId = await nextSequenceId(pool, "conversations");
 
   const res = await pool.query(
     `INSERT INTO conversations (id, identity_id, channel, status, handled_by, project_id)

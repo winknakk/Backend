@@ -3,6 +3,7 @@ import { z } from "zod";
 import { randomUUID } from "crypto";
 import { JwtUtil } from "../../../shared/jwt";
 import { pool } from "../../../adapters/postgres/PostgresAdapter";
+import { nextSequenceId } from "../../../adapters/postgres/sequences";
 import { PostgresConversationRepository } from "../../../infrastructure/db/PostgresConversationRepository";
 import { PostgresMessageRepository } from "../../../infrastructure/db/PostgresMessageRepository";
 import { PostgresIdentityRepository } from "../../../infrastructure/db/PostgresIdentityRepository";
@@ -129,10 +130,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           });
           await profileRepo.save(guestProfile);
 
-          const nextIdentIdRes = await pool.query(
-            "SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM identities"
-          );
-          const nextIdentId = String(nextIdentIdRes.rows[0].next_id);
+          const nextIdentId = await nextSequenceId(pool, "identities");
 
           identity = new Identity({
             id: nextIdentId,
@@ -168,10 +166,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             await profileRepo.save(customerProfile);
           }
 
-          const nextIdentIdRes = await pool.query(
-            "SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM identities"
-          );
-          const nextIdentId = String(nextIdentIdRes.rows[0].next_id);
+          const nextIdentId = await nextSequenceId(pool, "identities");
 
           identity = new Identity({
             id: nextIdentId,
@@ -195,8 +190,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         86400
       );
 
-      const nextSessionIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM webchat_sessions");
-      const nextSessionId = String(nextSessionIdRes.rows[0].next_id);
+      const nextSessionId = await nextSequenceId(pool, "webchat_sessions");
 
       const webchatSession = new WebChatSession({
         id: nextSessionId,
@@ -341,8 +335,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         // Ensure active conversation exists on message send
         let conversation = await conversationRepo.findActiveByIdentity(identityId, projectId);
         if (!conversation) {
-          const nextConvRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM conversations");
-          const nextConvId = String(nextConvRes.rows[0].next_id);
+          const nextConvId = await nextSequenceId(pool, "conversations");
 
           conversation = new Conversation({
             id: nextConvId,

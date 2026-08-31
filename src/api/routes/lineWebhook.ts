@@ -216,16 +216,66 @@ async function forwardPromptXWebhook(
 // output — test-line-project-onboarding greps this file for them, so they are
 // written as unicode escapes.
 const SMALL_TALK_TAIL =
-  "(?:[\\s!.,~]|ๆ|5|ค่ะ|คะ|ค่า|ค๊า|จ้า|จ๊ะ|จ้ะ|นะ|งับ|ฮะ|ฮับ|ผม|\\u0e04\\u0e23\\u0e31\\u0e1a|\\u0e04\\u0e31\\u0e1a)*";
-const GREETING_RE = new RegExp(`^(?:สวัสดี|หวัดดี|ดีจ้า|hello+|hi+|hey)${SMALL_TALK_TAIL}$`, "i");
-const THANKS_RE = new RegExp(`^(?:ขอบคุณ(?:มาก|ๆ)*|ขอบใจ|thanks?|thank\\s*you)${SMALL_TALK_TAIL}$`, "i");
+  "(?:[\\s!.,~า]|ๆ|5|ค่ะ|คะ|ค่า|ค๊า|จ้า|จ๊ะ|จ้ะ|จร้า|นะ|น้า|งับ|ฮะ|ฮับ|ผม|ด้วย|เด้อ|ครัช|ค้าบ|\\u0e04\\u0e23\\u0e31\\u0e1a|\\u0e04\\u0e31\\u0e1a)*";
+const GREETING_RE = new RegExp(
+  `^(?:สวัสดี(?:ตอนเช้า|ตอนบ่าย|ตอนเย็น|ยามเช้า)?|หวัดดี|ดีจ้า|ดี|อรุณสวัสดิ์|ฮัลโหล|ฮายย*|ฮะโหล|hello+|helo+|hi+|hey+|hai|good\\s*(?:morning|afternoon|evening)|morning)${SMALL_TALK_TAIL}$`,
+  "i"
+);
+const THANKS_RE = new RegExp(
+  `^(?:ขอบ(?:พระ)?คุณ(?:มาก|หลาย|นะ)*|ขอบใจ|แต้งกิ้ว|แต๊งกิ้ว|แต้งค์|thank\\s*(?:you|u)?|thanks?|thx|tks|ty)${SMALL_TALK_TAIL}$`,
+  "i"
+);
 
 export function detectPureSmallTalk(text: string): "greeting" | "thanks" | null {
-  const t = String(text || "").trim();
+  let t = String(text || "").trim();
   if (!t || t.length > 30) return null;
+  // Collapse stretched letters — "งับบบบ", "ค่าาาา", "5555", "ดีค้าบบ" — so the
+  // pattern sees the canonical word. Runs of 3+ of the same character become
+  // one; legitimate Thai never triples a character.
+  t = t.replace(/(.)\1{2,}/g, "$1");
   if (GREETING_RE.test(t)) return "greeting";
   if (THANKS_RE.test(t)) return "thanks";
   return null;
+}
+
+/**
+ * Classifies the customer's reply to "รูปนี้เป็นของเคสล่าสุด TCK-… ใช่ไหมคะ".
+ * Deterministic on purpose — same philosophy as the ticket-close confirmation
+ * handler: attaching evidence to a case is a state change, and customer text
+ * must not reach an LLM that can perform one.
+ */
+export function classifyPendingImageReply(
+  text: string
+): { kind: "yes" | "no" | "ticket" | "other"; ticketId?: string } {
+  const t = String(text || "").trim();
+  const m = t.match(/TCK-\d{4}-\d{4,6}/i);
+  if (m) return { kind: "ticket", ticketId: m[0].toUpperCase() };
+  if (!t || t.length > 40) return { kind: "other" };
+  if (new RegExp(`^(?:ใช่(?:เลย|แล้ว)?|ถูก(?:ต้อง|แล้ว)?|yes|y|ok|โอเค)${SMALL_TALK_TAIL}$`, "i").test(t)) {
+    return { kind: "yes" };
+  }
+  if (new RegExp(`^(?:ไม่ใช่|ไม่|no|ผิด)${SMALL_TALK_TAIL}$`, "i").test(t)) {
+    return { kind: "no" };
+  }
+  return { kind: "other" };
+}
+
+/**
+ * Matches free-text against the conversation's live tickets by subject.
+ * Contains-in-either-direction only, and only a UNIQUE hit counts — anything
+ * ambiguous returns null so the message flows to the AI instead of a guess.
+ */
+export function matchTicketBySubject(
+  text: string,
+  tickets: Array<{ ticket_number: string; subject: string | null }>
+): string | null {
+  const t = String(text || "").trim();
+  if (t.length < 4 || t.length > 80) return null;
+  const hits = tickets.filter((k) => {
+    const s = String(k.subject || "").trim();
+    return s.length >= 4 && (s.includes(t) || t.includes(s));
+  });
+  return hits.length === 1 ? hits[0].ticket_number : null;
 }
 
 function requireProjectId(value: unknown): number {
@@ -369,6 +419,8 @@ export function registerLineWebhookRoutes(
           } else if (decision.action === "PASS_TO_AI") {
             if (event?.type === "message" && event?.message?.type === "image" && event?.message?.id) {
               const imageId = String(event.message.id);
+              let imageIngested = false;
+              let ingestedMessageId: number | null = null;
               let convId = decision.conversationId;
               if (!convId && event?.source?.userId) {
                 // The onboarding decision did not name a conversation, so it
@@ -447,12 +499,158 @@ export function registerLineWebhookRoutes(
                         ]
                       );
                       logger.info({ messageId, imageId, storageKey: att.storageKey }, "Auto-ingested LINE image attachment");
+                      imageIngested = true;
+                      ingestedMessageId = messageId;
                     }
                   }
                 } catch (imgErr: any) {
                   logger.error({ error: imgErr.message, imageId }, "Failed to auto-ingest LINE image");
                 }
               }
+
+              // An image carries no text for the classifier, so it never goes to
+              // the AI. Spec (user, 2026-08-28):
+              // - image accompanying a report text (either order): never attach
+              //   to an older case and never message about it — the text turn's
+              //   promotion collects the image into the NEW ticket; if that
+              //   ticket already exists, attach to it directly.
+              // - standalone image with a live case: ALWAYS ask first whether it
+              //   belongs to the newest case; the reply is handled
+              //   deterministically by handlePendingImageReply below.
+              // - standalone image, no live case: ask for a one-line description.
+              if (imageIngested && convId) {
+                void (async () => {
+                  try {
+                    const { PlaneService } = await import("../../services/planeService");
+                    const { AdapterFactory } = await import("../../adapters/AdapterFactory");
+                    const planeService = new PlaneService(AdapterFactory.getAdapter());
+
+                    const lastText = await pool.query(
+                      `SELECT created_at FROM messages
+                        WHERE conversation_id = $1::integer
+                          AND role = 'customer'
+                          AND message_type = 'text'
+                          AND created_at >= NOW() - INTERVAL '3 minutes'
+                        ORDER BY created_at DESC LIMIT 1`,
+                      [convId]
+                    );
+                    const newest = await pool.query(
+                      `SELECT ticket_number, subject, created_at FROM tickets
+                        WHERE conversation_id = $1::integer
+                          AND deleted_at IS NULL
+                          AND plane_issue_id IS NOT NULL AND plane_issue_id <> ''
+                          AND UPPER(COALESCE(status, '')) NOT IN ('CLOSED', 'CANCELLED')
+                        ORDER BY id DESC LIMIT 1`,
+                      [convId]
+                    );
+                    const newestTicket = newest.rows[0];
+
+                    if (lastText.rows.length > 0) {
+                      // The image accompanies a report. If that report's ticket
+                      // already exists (created after the text), it is the
+                      // unambiguous home for this screenshot; otherwise the turn
+                      // is still in flight and promotion will collect the image.
+                      if (
+                        newestTicket &&
+                        new Date(newestTicket.created_at) > new Date(lastText.rows[0].created_at)
+                      ) {
+                        const r = await planeService.attachPendingImagesToTicketNumber(
+                          Number(convId),
+                          newestTicket.ticket_number
+                        );
+                        if (r.attached > 0) {
+                          await customerNotificationService.send({
+                            conversationId: Number(convId),
+                            notificationType: "image_attached",
+                            ticketNumber: newestTicket.ticket_number,
+                            idempotencyKey: webhookEventId || `image-${imageId}`,
+                            projectId: decision.projectId ?? null,
+                            correlationId: webhookEventId,
+                          });
+                        }
+                      }
+                      return;
+                    }
+
+                    if (newestTicket) {
+                      // Standalone image: never attach on a guess — ask, and
+                      // remember which attachment the question is about.
+                      if (ingestedMessageId) {
+                        await pool.query(
+                          `UPDATE message_attachments
+                              SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+                            WHERE message_id = $1`,
+                          [
+                            ingestedMessageId,
+                            JSON.stringify({
+                              awaitingCaseConfirm: true,
+                              candidateTicket: newestTicket.ticket_number,
+                            }),
+                          ]
+                        );
+                      }
+                      await customerNotificationService.send({
+                        conversationId: Number(convId),
+                        notificationType: "image_confirm_case",
+                        ticketNumber: newestTicket.ticket_number,
+                        subject: newestTicket.subject || null,
+                        idempotencyKey: webhookEventId || `image-${imageId}`,
+                        projectId: decision.projectId ?? null,
+                        correlationId: webhookEventId,
+                      });
+                      return;
+                    }
+
+                    await customerNotificationService.send({
+                      conversationId: Number(convId),
+                      notificationType: "image_need_context",
+                      idempotencyKey: webhookEventId || `image-${imageId}`,
+                      projectId: decision.projectId ?? null,
+                      correlationId: webhookEventId,
+                    });
+                  } catch (attachErr: any) {
+                    logger.error(
+                      { error: attachErr.message, imageId, conversationId: convId },
+                      "Post-ingest image handling failed"
+                    );
+                  }
+                })();
+              }
+
+              if (imageIngested) {
+                processed += 1;
+                continue;
+              }
+            }
+
+            // Non-image media (a .webp sent as a FILE, videos, voice clips):
+            // the pipeline cannot read these, and letting them through meant an
+            // acknowledgement plus an empty AI turn (run 4vBCthf81M). Say what
+            // works instead, immediately, and end the turn. Stickers are
+            // emotional punctuation — consumed silently: no ack, no AI, and
+            // telling someone to resend a sticker as PNG would be absurd.
+            if (
+              event?.type === "message" &&
+              ["file", "video", "audio", "sticker"].includes(String(event?.message?.type || ""))
+            ) {
+              if (event.message.type !== "sticker" && decision.conversationId && webhookEventId) {
+                void customerNotificationService
+                  .send({
+                    conversationId: Number(decision.conversationId),
+                    notificationType: "unsupported_file",
+                    idempotencyKey: webhookEventId,
+                    projectId: decision.projectId ?? null,
+                    correlationId: webhookEventId,
+                  })
+                  .catch((fileErr: any) =>
+                    logger.error(
+                      { error: fileErr.message, webhookEventId },
+                      "Unsupported-file notice failed"
+                    )
+                  );
+              }
+              processed += 1;
+              continue;
             }
 
             // Image pre-ingestion (S3 upload) is done immediately above —
@@ -521,6 +719,110 @@ export function registerLineWebhookRoutes(
                 logger.error(
                   { error: confirmErr.message, webhookEventId },
                   "Customer confirmation handling failed"
+                );
+              }
+            }
+
+            // A screenshot question is pending ("รูปนี้เป็นของเคสล่าสุด … ใช่ไหมคะ"):
+            // resolve the customer's answer deterministically. Only a clear
+            // yes/no/เลขเคส/unique subject match consumes the turn — anything
+            // else clears the question and flows to the AI untouched.
+            if (!confirmationHandled && decision.conversationId && webhookEventId && event?.message?.type === "text") {
+              try {
+                const pending = await pool.query(
+                  `SELECT ma.id, ma.metadata->>'candidateTicket' AS candidate
+                     FROM message_attachments ma
+                     JOIN messages m ON m.id = ma.message_id
+                    WHERE m.conversation_id = $1::integer
+                      AND ma.metadata->>'awaitingCaseConfirm' = 'true'
+                      AND COALESCE(ma.metadata->>'planeIssueId', '') = ''
+                      AND ma.created_at >= NOW() - INTERVAL '10 minutes'
+                    ORDER BY ma.id DESC LIMIT 1`,
+                  [decision.conversationId]
+                );
+                if (pending.rows.length > 0) {
+                  const convIdNum = Number(decision.conversationId);
+                  const candidate = String(pending.rows[0].candidate || "");
+                  const reply = classifyPendingImageReply(String(event.message.text || ""));
+                  const clearPending = () =>
+                    pool.query(
+                      `UPDATE message_attachments ma
+                          SET metadata = COALESCE(ma.metadata, '{}'::jsonb) || '{"awaitingCaseConfirm": false}'::jsonb
+                         FROM messages m
+                        WHERE m.id = ma.message_id
+                          AND m.conversation_id = $1::integer
+                          AND ma.metadata->>'awaitingCaseConfirm' = 'true'`,
+                      [convIdNum]
+                    );
+                  const notify = (
+                    notificationType: "image_attached" | "image_which_case" | "image_case_not_found",
+                    ticketNumber?: string
+                  ) =>
+                    customerNotificationService.send({
+                      conversationId: convIdNum,
+                      notificationType,
+                      ticketNumber: ticketNumber ?? null,
+                      idempotencyKey: webhookEventId,
+                      projectId: decision.projectId ?? null,
+                      correlationId: webhookEventId,
+                    });
+                  const attachTo = async (ticketNumber: string): Promise<boolean> => {
+                    const { PlaneService } = await import("../../services/planeService");
+                    const { AdapterFactory } = await import("../../adapters/AdapterFactory");
+                    const planeService = new PlaneService(AdapterFactory.getAdapter());
+                    const r = await planeService.attachPendingImagesToTicketNumber(convIdNum, ticketNumber);
+                    return r.attached > 0;
+                  };
+
+                  let consumed = true;
+                  if (reply.kind === "yes" && candidate) {
+                    if (await attachTo(candidate)) {
+                      await clearPending();
+                      await notify("image_attached", candidate);
+                    } else {
+                      await clearPending();
+                      await notify("image_case_not_found");
+                    }
+                  } else if (reply.kind === "ticket" && reply.ticketId) {
+                    if (await attachTo(reply.ticketId)) {
+                      await clearPending();
+                      await notify("image_attached", reply.ticketId);
+                    } else {
+                      // Wrong or dead number — keep the question open for a retry.
+                      await notify("image_case_not_found");
+                    }
+                  } else if (reply.kind === "no") {
+                    await notify("image_which_case");
+                  } else {
+                    const live = await pool.query(
+                      `SELECT ticket_number, subject FROM tickets
+                        WHERE conversation_id = $1::integer
+                          AND deleted_at IS NULL
+                          AND plane_issue_id IS NOT NULL AND plane_issue_id <> ''
+                          AND UPPER(COALESCE(status, '')) NOT IN ('CLOSED', 'CANCELLED')
+                        ORDER BY id DESC LIMIT 5`,
+                      [convIdNum]
+                    );
+                    const bySubject = matchTicketBySubject(String(event.message.text || ""), live.rows);
+                    if (bySubject && (await attachTo(bySubject))) {
+                      await clearPending();
+                      await notify("image_attached", bySubject);
+                    } else {
+                      // Not an answer to the question — likely a new report.
+                      // Drop the pending question and process the text normally.
+                      await clearPending();
+                      consumed = false;
+                    }
+                  }
+                  if (consumed) {
+                    processed += 1;
+                    continue;
+                  }
+                }
+              } catch (pendErr: any) {
+                logger.error(
+                  { error: pendErr.message, webhookEventId },
+                  "Pending image reply handling failed; message continues to the AI"
                 );
               }
             }

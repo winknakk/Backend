@@ -11,6 +11,12 @@ export type CustomerNotificationType =
   | "acknowledgement"
   | "greeting"
   | "thanks"
+  | "image_attached"
+  | "image_confirm_case"
+  | "image_which_case"
+  | "image_case_not_found"
+  | "image_need_context"
+  | "unsupported_file"
   | "ticket_created"
   | "resolution_confirmation"
   | "closed"
@@ -26,7 +32,16 @@ export interface SendRequest {
   projectId?: number | null;
   orgId?: string | null;
   correlationId?: string | null;
+  /** Optional case subject, shown when asking which case an image belongs to. */
+  subject?: string | null;
 }
+
+/**
+ * How long one acknowledgement covers a burst of customer messages. Long
+ * enough to span a multi-part report plus its screenshots, short enough that a
+ * genuinely new report minutes later is acknowledged again.
+ */
+const ACK_BURST_WINDOW_SECONDS = 90;
 
 export interface SendResult {
   sent: boolean;
@@ -98,7 +113,7 @@ export class CustomerNotificationService {
   }
 
   /** Wording is deliberately conservative — see rule 2 above. */
-  private body(type: CustomerNotificationType, ticketNumber?: string | null, seed?: string | null): string {
+  private body(type: CustomerNotificationType, ticketNumber?: string | null, seed?: string | null, subject?: string | null): string {
     switch (type) {
       case "acknowledgement":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_VARIANTS, seed);
@@ -106,6 +121,37 @@ export class CustomerNotificationService {
         return CustomerNotificationService.pickVariant(CustomerNotificationService.GREETING_VARIANTS, seed);
       case "thanks":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.THANKS_VARIANTS, seed);
+      // Screenshot landed on an existing case. Naming the case is the point of
+      // the message, so the number is stated when it is known.
+      case "image_attached":
+        return ticketNumber
+          ? `ได้รับรูปแล้วนะคะ แนบเข้าเคส ${ticketNumber} ให้เรียบร้อยแล้วค่ะ`
+          : "ได้รับรูปแล้วนะคะ แนบเข้าเคสให้เรียบร้อยแล้วค่ะ";
+      // A standalone screenshot is never attached on a guess — ask which case
+      // it belongs to. The lineWebhook pending-reply handler resolves the
+      // answer (ใช่ / ไม่ใช่ / เลขเคส / ชื่อเรื่อง) deterministically.
+      case "image_confirm_case": {
+        // Truncating mid-word read as a glitch ("...ไม่ถูกต้") — allow the full
+        // subject up to a sane cap and mark a real cut with an ellipsis.
+        const raw = String(subject || "").trim();
+        const shown = raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+        const about = shown ? ` เรื่อง "${shown}"` : "";
+        return ticketNumber
+          ? `ได้รับรูปแล้วนะคะ รูปนี้เป็นของเคสล่าสุด ${ticketNumber}${about} ใช่ไหมคะ`
+          : "ได้รับรูปแล้วนะคะ เป็นรูปของเคสที่แจ้งไว้ล่าสุดใช่ไหมคะ";
+      }
+      case "image_which_case":
+        return "รบกวนบอกเลขเคส (TCK-...) หรือพิมพ์ชื่อเรื่องที่แจ้งไว้หน่อยนะคะ แอดมินจะได้แนบรูปให้ถูกเคสค่ะ";
+      case "image_case_not_found":
+        return "แอดมินยังไม่พบเคสตามที่แจ้งเลยค่ะ รบกวนเช็คเลขเคสอีกครั้งนะคะ";
+      // A file / clip the pipeline cannot read: say so at once with the fix in
+      // hand, instead of acknowledging and sending an empty turn to the AI.
+      case "unsupported_file":
+        return "ขออภัยค่ะ ไฟล์แบบนี้แอดมินยังเปิดดูไม่ได้ค่ะ รบกวนส่งเป็นรูปภาพ (PNG หรือ JPG) หรือพิมพ์อธิบายอาการมาได้เลยนะคะ";
+      // A screenshot with no case and no recent report to attach it to: ask for
+      // the one line that makes it actionable instead of guessing.
+      case "image_need_context":
+        return "ได้รับรูปแล้วนะคะ รบกวนพิมพ์อธิบายอาการสั้น ๆ อีกนิดค่ะ จะได้เปิดเคสให้ถูกต้องนะคะ";
       case "ticket_created":
         return ticketNumber
           ? `สร้างเคส #${ticketNumber} ให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ`
@@ -224,7 +270,29 @@ export class CustomerNotificationService {
       return { sent: false, reason: "NO_RECIPIENT" };
     }
 
-    const body = this.body(req.notificationType, req.ticketNumber, req.idempotencyKey);
+    // One acknowledgement per burst, not per message. Idempotency is keyed on
+    // the LINE event, so a customer sending "แจ้งเคสค่ะ", then the details, then
+    // a screenshot used to receive three of these — and now that the wording is
+    // randomized they would not even look like the same message.
+    if (req.notificationType === "acknowledgement") {
+      const recent = await pool.query(
+        `SELECT 1 FROM customer_notifications
+          WHERE conversation_id = $1
+            AND notification_type = 'acknowledgement'
+            AND created_at >= NOW() - ($2::int * INTERVAL '1 second')
+          LIMIT 1`,
+        [req.conversationId, ACK_BURST_WINDOW_SECONDS]
+      );
+      if (recent.rows.length > 0) {
+        logger.info(
+          { conversationId: req.conversationId, idempotencyKey: req.idempotencyKey },
+          "Acknowledgement suppressed: one was already sent for this burst"
+        );
+        return { sent: false, duplicate: true, reason: "RECENTLY_ACKNOWLEDGED" };
+      }
+    }
+
+    const body = this.body(req.notificationType, req.ticketNumber, req.idempotencyKey, req.subject);
 
     const claimId = await this.claim(
       { ...req, projectId: req.projectId ?? recipient.projectId, orgId: req.orgId ?? recipient.orgId },

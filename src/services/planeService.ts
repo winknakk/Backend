@@ -908,6 +908,234 @@ export class PlaneService {
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
   }
 
+  /**
+   * Copies customer screenshots from a conversation into a Plane work item and
+   * embeds them in its description.
+   *
+   * Shared by two callers: ticket promotion (images that arrived before the
+   * ticket existed) and the webhook's late-attach path (images that arrive
+   * after it). An attachment is uploaded at most once — the Plane asset id is
+   * recorded in message_attachments.metadata, and Plane itself dedupes on the
+   * external id — so the two callers cannot double-post the same screenshot.
+   *
+   * Best-effort by contract: the work item is already usable without evidence,
+   * so every failure is logged and swallowed rather than failing the caller.
+   */
+  async pushConversationImagesToIssue(
+    source: { conversationId: number; ticketNumber?: string; lineImageId?: string },
+    projectConfig: any,
+    planeIssueId: string,
+    baseDescriptionHtml: string
+  ): Promise<number> {
+    // Real intake (Interaction.pdf) attaches more than one screenshot per case,
+    // so this takes every unpushed image rather than only the latest.
+    const MAX_IMAGES = 5;
+    try {
+      let imageRows: CustomerImageAttachment[] = [];
+
+      if (source.lineImageId) {
+        const { rows } = await pool.query<CustomerImageAttachment>(
+          `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
+             FROM message_attachments ma
+             JOIN messages m ON m.id = ma.message_id
+            WHERE m.conversation_id = $1::integer
+              AND m.role = 'customer'
+              AND m.external_id = $2
+              AND ma.attachment_status = 'READY'
+              AND ma.storage_key IS NOT NULL
+              AND COALESCE(ma.file_type, '') LIKE 'image/%'
+              AND COALESCE(ma.metadata->>'planeIssueId', '') = ''
+            ORDER BY ma.id ASC
+            LIMIT ${MAX_IMAGES}`,
+          [source.conversationId, source.lineImageId]
+        );
+        imageRows = rows;
+      }
+
+      if (imageRows.length === 0) {
+        const { rows } = await pool.query<CustomerImageAttachment>(
+          `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
+             FROM message_attachments ma
+             JOIN messages m ON m.id = ma.message_id
+            WHERE m.conversation_id = $1::integer
+              AND m.role = 'customer'
+              AND ma.attachment_status = 'READY'
+              AND ma.storage_key IS NOT NULL
+              AND COALESCE(ma.file_type, '') LIKE 'image/%'
+              AND COALESCE(ma.metadata->>'planeIssueId', '') = ''
+              AND ma.created_at >= NOW() - INTERVAL '2 hours'
+            ORDER BY ma.id ASC
+            LIMIT ${MAX_IMAGES}`,
+          [source.conversationId]
+        );
+        imageRows = rows;
+      }
+
+      if (imageRows.length === 0) return 0;
+
+      const uploadedAssetUrls: string[] = [];
+      const mediaStorage = new S3MediaStorageService({});
+
+      for (const image of imageRows) {
+        try {
+          const media = await mediaStorage.download(image.storage_key);
+          const uploadRes = await this.apiClient.uploadWorkItemAttachment(projectConfig, planeIssueId, {
+            name: image.file_name || `line_${image.external_id || image.id}.jpg`,
+            type: image.file_type || media.mimeType || "image/jpeg",
+            size: image.file_size || media.buffer.length,
+            content: media.buffer,
+            externalId: `ticketx-message-attachment-${image.id}`,
+          });
+          if (uploadRes?.assetUrl) {
+            uploadedAssetUrls.push(uploadRes.assetUrl);
+            await pool.query(
+              `UPDATE message_attachments
+                  SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+                WHERE id = $1`,
+              [
+                image.id,
+                JSON.stringify({ planeIssueId, planeAssetUrl: uploadRes.assetUrl }),
+              ]
+            );
+          }
+        } catch (uploadErr: any) {
+          console.warn("[PlaneService] Individual image upload failed:", {
+            attachmentId: image.id,
+            error: uploadErr?.message || String(uploadErr),
+          });
+        }
+      }
+
+      if (uploadedAssetUrls.length > 0) {
+        const mediaEmbedHtml = `<h3>📷 Customer Screenshots / Attached Media</h3>` +
+          uploadedAssetUrls
+            .map((url) => `<p><img src="${escapePlaneHtml(url)}" alt="Customer Screenshot" style="max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 8px;" /></p>`)
+            .join("");
+
+        await this.apiClient.patchWorkItem(projectConfig, planeIssueId, {
+          description_html: `${baseDescriptionHtml}\n${mediaEmbedHtml}`,
+        });
+        console.log(
+          `[PlaneService] Embedded ${uploadedAssetUrls.length} image(s) into Plane Work Item ${planeIssueId} description.`
+        );
+      }
+      return uploadedAssetUrls.length;
+    } catch (error: any) {
+      console.warn("[PlaneService] Failed to attach customer image to Plane", {
+        ticketNumber: source.ticketNumber,
+        lineImageId: source.lineImageId,
+        error: error?.message || String(error),
+      });
+      return 0;
+    }
+  }
+
+  /**
+   * Attaches screenshots that arrived AFTER the ticket was filed.
+   *
+   * Customers routinely send the report first and the screenshot seconds later,
+   * by which time promotion has already run. This finds the conversation's most
+   * recent live ticket and pushes any unattached image into its work item,
+   * preserving the description already there.
+   *
+   * Returns the ticket number when something was attached, so the caller can
+   * tell the customer which case the screenshot landed on.
+   */
+  async attachPendingImagesToOpenTicket(
+    conversationId: number
+  ): Promise<{ attached: number; ticketNumber?: string; otherOpenCases?: boolean }> {
+    try {
+      // Two rows on purpose: the newest live case is the attach target, and the
+      // presence of a second one means the choice is a guess — the caller then
+      // TELLS the customer which case was picked instead of guessing silently.
+      const { rows } = await pool.query(
+        `SELECT id, ticket_number, plane_issue_id, project_id, org_id,
+                plane_workspace_slug, plane_project_id
+           FROM tickets
+          WHERE conversation_id = $1::integer
+            AND deleted_at IS NULL
+            AND plane_issue_id IS NOT NULL AND plane_issue_id <> ''
+            AND UPPER(COALESCE(status, '')) NOT IN ('CLOSED', 'CANCELLED')
+            AND created_at >= NOW() - INTERVAL '24 hours'
+          ORDER BY id DESC
+          LIMIT 2`,
+        [conversationId]
+      );
+      const ticket = rows[0];
+      if (!ticket) return { attached: 0 };
+      const otherOpenCases = rows.length > 1;
+
+      const projectConfig = await this.getProjectConfigForTicket(ticket);
+      // The description already carries the report; re-fetch it so appending the
+      // screenshots cannot overwrite anything Plane or an engineer added.
+      const workItem = await this.apiClient.getWorkItem(projectConfig, ticket.plane_issue_id);
+      const currentDescription = String(workItem?.description_html || "");
+
+      const attached = await this.pushConversationImagesToIssue(
+        { conversationId, ticketNumber: ticket.ticket_number },
+        projectConfig,
+        ticket.plane_issue_id,
+        currentDescription
+      );
+      return {
+        attached,
+        ticketNumber: attached > 0 ? ticket.ticket_number : undefined,
+        otherOpenCases: attached > 0 ? otherOpenCases : undefined,
+      };
+    } catch (error: any) {
+      console.warn("[PlaneService] Late image attach failed", {
+        conversationId,
+        error: error?.message || String(error),
+      });
+      return { attached: 0 };
+    }
+  }
+
+  /**
+   * Attaches the conversation's unpushed screenshots to ONE named case — used
+   * when the customer has told us (or confirmed) which case the image belongs
+   * to, so no newest-first guessing is involved. The ticket must belong to the
+   * same conversation, be Plane-linked and still open.
+   */
+  async attachPendingImagesToTicketNumber(
+    conversationId: number,
+    ticketNumber: string
+  ): Promise<{ attached: number; ticketNumber?: string }> {
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, ticket_number, plane_issue_id, project_id, org_id,
+                plane_workspace_slug, plane_project_id
+           FROM tickets
+          WHERE conversation_id = $1::integer
+            AND UPPER(ticket_number) = UPPER($2)
+            AND deleted_at IS NULL
+            AND plane_issue_id IS NOT NULL AND plane_issue_id <> ''
+            AND UPPER(COALESCE(status, '')) NOT IN ('CLOSED', 'CANCELLED')
+          LIMIT 1`,
+        [conversationId, ticketNumber]
+      );
+      const ticket = rows[0];
+      if (!ticket) return { attached: 0 };
+
+      const projectConfig = await this.getProjectConfigForTicket(ticket);
+      const workItem = await this.apiClient.getWorkItem(projectConfig, ticket.plane_issue_id);
+      const attached = await this.pushConversationImagesToIssue(
+        { conversationId, ticketNumber: ticket.ticket_number },
+        projectConfig,
+        ticket.plane_issue_id,
+        String(workItem?.description_html || "")
+      );
+      return { attached, ticketNumber: attached > 0 ? ticket.ticket_number : undefined };
+    } catch (error: any) {
+      console.warn("[PlaneService] Attach-by-number failed", {
+        conversationId,
+        ticketNumber,
+        error: error?.message || String(error),
+      });
+      return { attached: 0 };
+    }
+  }
+
   async promoteTicketToPlane(ticketIdOrData: any, optionalData?: any): Promise<any> {
     let ticket: any = null;
     let companyName = "Unknown";
@@ -992,97 +1220,20 @@ export class PlaneService {
     const planeIssueId = result.id;
 
     // A LINE image is stored in TicketX immediately, before the debounced AI
-    // request. Copy the image explicitly associated with this incident or the
-    // latest customer image from this conversation into Plane-owned storage,
-    // and embed the permanent Plane asset URL into the description.
-    const lineImageId = String(ticket.line_image_id || ticket.lineImageId || "").trim();
+    // request, so screenshots the customer sent before the ticket existed are
+    // copied into Plane-owned storage here. Images that arrive AFTER this point
+    // are handled by attachPendingImagesToOpenTicket, called from the webhook.
     if (ticket.conversation_id) {
-      try {
-        let imageRows: CustomerImageAttachment[] = [];
-
-        if (lineImageId) {
-          const { rows } = await pool.query<CustomerImageAttachment>(
-            `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
-             FROM message_attachments ma
-             JOIN messages m ON m.id = ma.message_id
-             WHERE m.conversation_id = $1::integer
-               AND m.role = 'customer'
-               AND m.external_id = $2
-               AND ma.attachment_status = 'READY'
-               AND ma.storage_key IS NOT NULL
-               AND COALESCE(ma.file_type, '') LIKE 'image/%'
-             ORDER BY ma.id ASC`,
-            [ticket.conversation_id, lineImageId]
-          );
-          imageRows = rows;
-        }
-
-        // Auto-detect recent customer image attachments if no specific lineImageId or no rows matched
-        if (imageRows.length === 0) {
-          const { rows } = await pool.query<CustomerImageAttachment>(
-            `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
-             FROM message_attachments ma
-             JOIN messages m ON m.id = ma.message_id
-             WHERE m.conversation_id = $1::integer
-               AND m.role = 'customer'
-               AND ma.attachment_status = 'READY'
-               AND ma.storage_key IS NOT NULL
-               AND COALESCE(ma.file_type, '') LIKE 'image/%'
-               AND ma.created_at >= NOW() - INTERVAL '2 hours'
-             ORDER BY ma.id DESC
-             LIMIT 1`,
-            [ticket.conversation_id]
-          );
-          imageRows = rows;
-        }
-
-        const uploadedAssetUrls: string[] = [];
-        const mediaStorage = new S3MediaStorageService({});
-
-        for (const image of imageRows) {
-          try {
-            const media = await mediaStorage.download(image.storage_key);
-            const uploadRes = await this.apiClient.uploadWorkItemAttachment(projectConfig, planeIssueId, {
-              name: image.file_name || `line_${image.external_id || image.id}.jpg`,
-              type: image.file_type || media.mimeType || "image/jpeg",
-              size: image.file_size || media.buffer.length,
-              content: media.buffer,
-              externalId: `ticketx-message-attachment-${image.id}`,
-            });
-            if (uploadRes?.assetUrl) {
-              uploadedAssetUrls.push(uploadRes.assetUrl);
-            }
-          } catch (uploadErr: any) {
-            console.warn("[PlaneService] Individual image upload failed:", {
-              attachmentId: image.id,
-              error: uploadErr?.message || String(uploadErr),
-            });
-          }
-        }
-
-        // If images were uploaded, embed the permanent Plane asset URLs into description_html
-        if (uploadedAssetUrls.length > 0) {
-          const mediaEmbedHtml = `<h3>📷 Customer Screenshots / Attached Media</h3>` +
-            uploadedAssetUrls
-              .map((url) => `<p><img src="${escapePlaneHtml(url)}" alt="Customer Screenshot" style="max-width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 8px;" /></p>`)
-              .join("");
-
-          const updatedDesc = `${payload.description_html}\n${mediaEmbedHtml}`;
-          await this.apiClient.patchWorkItem(projectConfig, planeIssueId, {
-            description_html: updatedDesc,
-          });
-          console.log(`[PlaneService] Embedded ${uploadedAssetUrls.length} image(s) into Plane Work Item ${planeIssueId} description.`);
-        }
-      } catch (error: any) {
-        // Evidence upload is best-effort: the work item already exists and
-        // must remain usable even if a media file was removed or Plane storage
-        // is temporarily unavailable.
-        console.warn("[PlaneService] Failed to attach customer image to Plane", {
+      await this.pushConversationImagesToIssue(
+        {
+          conversationId: Number(ticket.conversation_id),
           ticketNumber: ticket.ticket_number,
-          lineImageId,
-          error: error?.message || String(error),
-        });
-      }
+          lineImageId: String(ticket.line_image_id || ticket.lineImageId || "").trim(),
+        },
+        projectConfig,
+        planeIssueId,
+        payload.description_html
+      );
     }
 
     // ATOMIC UPDATE: Save historical snapshot IF ticket exists in DB
