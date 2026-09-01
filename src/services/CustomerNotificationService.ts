@@ -147,7 +147,7 @@ export class CustomerNotificationService {
         // Truncating mid-word read as a glitch ("...ไม่ถูกต้") — allow the full
         // subject up to a sane cap and mark a real cut with an ellipsis.
         const raw = String(subject || "").trim();
-        const shown = raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+        const shown = raw.length > 120 ? `${raw.slice(0, 120)}…` : raw;
         const about = shown ? ` เรื่อง "${shown}"` : "";
         return ticketNumber
           ? `ได้รับรูปแล้วนะคะ รูปนี้เป็นของเคสล่าสุด ${ticketNumber}${about} ใช่ไหมคะ`

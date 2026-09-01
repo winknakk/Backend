@@ -521,60 +521,44 @@ export function registerLineWebhookRoutes(
               if (imageIngested && convId) {
                 void (async () => {
                   try {
-                    const { PlaneService } = await import("../../services/planeService");
-                    const { AdapterFactory } = await import("../../adapters/AdapterFactory");
-                    const planeService = new PlaneService(AdapterFactory.getAdapter());
+                    // Debounce window (15s): wait in background to see if customer sends accompanying text
+                    await new Promise((resolve) => setTimeout(resolve, 15000));
 
-                    const lastText = await pool.query(
-                      `SELECT created_at FROM messages
+                    // Check if customer sent a text message during/after the image
+                    const recentText = await pool.query(
+                      `SELECT id, content, created_at FROM messages
                         WHERE conversation_id = $1::integer
                           AND role = 'customer'
                           AND message_type = 'text'
-                          AND created_at >= NOW() - INTERVAL '3 minutes'
+                          AND created_at >= NOW() - INTERVAL '30 seconds'
                         ORDER BY created_at DESC LIMIT 1`,
                       [convId]
                     );
+
+                    // If text arrived, the image is part of that turn — skip old-ticket prompt
+                    if (recentText.rows.length > 0) {
+                      logger.info(
+                        { convId, text: recentText.rows[0].content },
+                        "Image accompanied by text within debounce window; skipping old case confirmation"
+                      );
+                      return;
+                    }
+
+                    // Look for a very recent active ticket created within 5 minutes
                     const newest = await pool.query(
                       `SELECT ticket_number, subject, created_at FROM tickets
                         WHERE conversation_id = $1::integer
                           AND deleted_at IS NULL
                           AND plane_issue_id IS NOT NULL AND plane_issue_id <> ''
                           AND UPPER(COALESCE(status, '')) NOT IN ('CLOSED', 'CANCELLED')
+                          AND created_at >= NOW() - INTERVAL '5 minutes'
                         ORDER BY id DESC LIMIT 1`,
                       [convId]
                     );
                     const newestTicket = newest.rows[0];
 
-                    if (lastText.rows.length > 0) {
-                      // The image accompanies a report. If that report's ticket
-                      // already exists (created after the text), it is the
-                      // unambiguous home for this screenshot; otherwise the turn
-                      // is still in flight and promotion will collect the image.
-                      if (
-                        newestTicket &&
-                        new Date(newestTicket.created_at) > new Date(lastText.rows[0].created_at)
-                      ) {
-                        const r = await planeService.attachPendingImagesToTicketNumber(
-                          Number(convId),
-                          newestTicket.ticket_number
-                        );
-                        if (r.attached > 0) {
-                          await customerNotificationService.send({
-                            conversationId: Number(convId),
-                            notificationType: "image_attached",
-                            ticketNumber: newestTicket.ticket_number,
-                            idempotencyKey: webhookEventId || `image-${imageId}`,
-                            projectId: decision.projectId ?? null,
-                            correlationId: webhookEventId,
-                          });
-                        }
-                      }
-                      return;
-                    }
-
                     if (newestTicket) {
-                      // Standalone image: never attach on a guess — ask, and
-                      // remember which attachment the question is about.
+                      // Truly standalone image within 5 mins of ticket creation: ask confirmation
                       if (ingestedMessageId) {
                         await pool.query(
                           `UPDATE message_attachments
@@ -601,6 +585,7 @@ export function registerLineWebhookRoutes(
                       return;
                     }
 
+                    // Standalone image without any recent ticket in last 5 minutes: ask for context
                     await customerNotificationService.send({
                       conversationId: Number(convId),
                       notificationType: "image_need_context",
@@ -917,7 +902,11 @@ export function registerLineWebhookRoutes(
             // produce different wording.
             if (decision.conversationId && webhookEventId && event?.type === "message" && !confirmationHandled) {
               const msgText = String(event?.message?.text || "").trim();
-              const isActionTurn = /^(?:ยืนยัน|ใช่(?:ค่ะ|ครับ|เลย|จ้า|แล้ว)?|ถูก(?:ต้อง|แล้ว)?|โอเค|ok|เค|ได้(?:ค่ะ|ครับ|เลย)?|เปิด(?:เคส)?เลย|จัดไป|ลุย|ตามนั้น|เยส|yes|yup|k|ยกเลิก|cancel|ไม่เอา|ไม่ต้อง(?:แล้ว)?|ไม่แจ้ง(?:แล้ว)?|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไร)(?:[\s.,!คะครับ]*)$/i.test(msgText);
+              const tailPattern = "(?:[\\s.,!ๆ555คะครับค่ะคับค้าบคร้าบจ้าจ้ะงับฮะฮับนะน้าอ้วนผมวะอ่ะแอดมินพี่คุณ]*)$";
+              const isActionTurn =
+                new RegExp(`^(?:ครับ|ค่ะ|คับ|ค้าบ|คร้าบ|ค่า|ค๊า|ฮับ|ฮะ|งับ|จ้า|จ้ะ|จร้า|อือ|อื้อ|เค|k|ok|yes|yup|yep|sure|confirm|จัดไป|ลุย|ลุยเลย|เอาเลย|ตามนั้น|เปิดเลย|เปิดเคสเลย|จัดการเลย|จัดให้หน่อย|ถูก|ถูกต้อง|ถูกแล้ว|ใช่|ใช่เลย|ใช่แล้ว|ช่าย|โอเค|ได้|ได้เลย|ได้หมด|ยกเลิก|cancel|ไม่เอา|ไม่ต้อง|ไม่แจ้ง|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|หายแล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไร|อย่าเพิ่ง|no|nope|❌|👍|✅)${tailPattern}`, "i").test(msgText) ||
+                /(?:ยืนยัน|ถูกต้อง|ถูกแล้ว|ใช่เลย|โอเค|ได้เลย|เปิดเคสเลย|จัดไป|ตามนั้น|ส่งรูป|นี่รูป|รูปปัญหา|ภาพปัญหา|แนบรูป|ยกเลิก|cancel|ไม่เอาแล้ว|ไม่ต้องแล้ว|ไม่แจ้งแล้ว|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไรแล้ว|อย่าเพิ่งเปิด)/i.test(msgText) ||
+                /(?:^|\s|[.,!])(?:ใช่|ถูก|โอเค|ok|ได้|ครับ|ค่ะ|คับ|งับ|ฮะ|จ้า|เค|ยกเลิก|ไม่เอา|ไม่ต้อง)/i.test(msgText);
 
               void customerNotificationService
                 .send({
