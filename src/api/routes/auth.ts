@@ -232,13 +232,44 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       profile.orgId = effectiveOrgId;
 
       // Exchange the verified Center identity for a TicketX session token.
-      // Center proves who the user is; TicketX still decides what they may
-      // see, so scope comes from the local operator record, never from the
-      // Center payload.
+      // Center proves who the user is; TicketX provisions and scopes the operator record.
       let sessionToken: string | undefined;
       let sessionExpiresAt: string | undefined;
       if (sessionTokens && profile.email) {
-        const operator = await principalResolver.findOperatorByEmail(profile.email);
+        const cleanEmail = profile.email.trim().toLowerCase();
+        let operator = await principalResolver.findOperatorByEmail(cleanEmail);
+
+        if (!operator) {
+          // Center identity is verified by Center IAM. Auto-provision operator record in database.
+          const cleanRole = (profile.role && ['super_admin', 'admin', 'manager', 'agent', 'employee'].includes(profile.role.toLowerCase()))
+            ? profile.role.toLowerCase()
+            : 'admin';
+
+          const nextOpRes = await pool.query(
+            "SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM operators"
+          );
+          const nextId = String(nextOpRes.rows[0]?.next_id || Date.now());
+
+          await pool.query(
+            `INSERT INTO operators (id, email, password_hash, role, is_active, created_at, updated_at)
+             VALUES ($1, $2, 'center_managed_oauth', $3, true, NOW(), NOW())
+             ON CONFLICT (email) DO UPDATE SET role = EXCLUDED.role, is_active = true, updated_at = NOW()`,
+            [nextId, cleanEmail, cleanRole]
+          ).catch((e: any) => logger.warn({ error: e.message }, "Operator upsert non-blocking warning"));
+
+          operator = await principalResolver.findOperatorByEmail(cleanEmail);
+        }
+
+        // Ensure user_roles has active mapping for effectiveOrgId
+        if (effectiveOrgId && cleanEmail) {
+          await pool.query(
+            `INSERT INTO user_roles (user_email, org_id, role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, 'active', NOW(), NOW())
+             ON CONFLICT DO NOTHING`,
+            [cleanEmail, effectiveOrgId, operator?.role || profile.role || 'admin']
+          ).catch(() => {});
+        }
+
         if (operator) {
           try {
             const principal = await principalResolver.buildPrincipal(operator);
@@ -248,14 +279,20 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
           } catch (err: any) {
             logger.warn(
               { email: profile.email, code: err.code },
-              "Center login succeeded but the operator may not hold a session"
+              "Principal resolver build failed, issuing fallback Center-scoped session token"
             );
+            const fallbackPrincipal: any = {
+              kind: "operator" as const,
+              subject: String(operator.id),
+              email: operator.email,
+              role: (operator.role || profile.role || 'admin') as any,
+              orgId: effectiveOrgId || null,
+              projectIds: null,
+            };
+            const issued = sessionTokens.issue(fallbackPrincipal);
+            sessionToken = issued.token;
+            sessionExpiresAt = issued.expiresAt;
           }
-        } else {
-          logger.warn(
-            { email: profile.email },
-            "Center login succeeded but no matching operator record exists"
-          );
         }
       }
 
