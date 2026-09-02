@@ -8,6 +8,11 @@ export interface LineQuickReply {
   data: string;
 }
 
+export interface LineMessageQuickReply {
+  label: string;
+  text: string;
+}
+
 export interface LineProjectMenuItem {
   projectId: number;
   projectName: string;
@@ -51,6 +56,12 @@ export interface LineOnboardingDecision {
   duplicate?: boolean;
   replyText?: string;
   quickReplies?: LineQuickReply[];
+  /**
+   * Native LINE quick-reply chips that send a plain text message as the user
+   * (message action, not postback), so the tap flows through the normal AI
+   * path instead of the onboarding postback handler.
+   */
+  messageQuickReplies?: LineMessageQuickReply[];
   replyWithOnboardingCarousel?: boolean;
   pushOnboardingCarousel?: boolean;
   projectMenu?: LineProjectMenu;
@@ -114,6 +125,66 @@ const PROJECT_MENU_PAGE_SIZE = 10;
 const CAROUSEL_RECALL_AFTER_MS = 24 * 60 * 60 * 1000;
 
 export class LineProjectOnboardingService {
+  /**
+   * Canned prompts for the "แจ้งปัญหา" menu card. Same variant discipline as
+   * CustomerNotificationService: every line is female-voiced (ค่ะ / นะคะ),
+   * promises nothing beyond receive-and-look, and is picked deterministically
+   * from the webhookEventId so a LINE retry can never produce a
+   * differently-worded duplicate while consecutive taps still vary.
+   */
+  private static readonly REPORT_PROMPT_VARIANTS = [
+    "แจ้งปัญหาหรืออาการที่พบเข้ามาได้เลยนะคะ เดี๋ยวแอดมินตรวจสอบและเปิดเคสให้ค่ะ 😊",
+    "เล่าอาการหรือปัญหาที่เจอมาได้เลยค่ะ แนบรูปหน้าจอมาด้วยก็ได้นะคะ",
+    "เจอปัญหาตรงไหน แจ้งเข้ามาได้เลยนะคะ เดี๋ยวดูให้ทันทีค่ะ",
+    "แจ้งรายละเอียดปัญหาที่พบมาได้เลยค่ะ ถ้ามีภาพหน้าจอแนบมาด้วยจะช่วยให้เช็กไวขึ้นนะคะ",
+  ] as const;
+
+  /**
+   * Canned prompts for the "ตรวจสอบสถานะ" menu card. Every variant is a
+   * complete two-part sentence (send a case number, or use the summary
+   * option) so no random pick reads like a truncated message. "ปุ่มด้านล่าง"
+   * refers to the quick-reply chip attached alongside; one variant keeps the
+   * literal "ตรวจสอบสถานะ" keyword for users who come back after the chip
+   * has disappeared, because that text is what the AI path recognizes as a
+   * request for the latest-case summary.
+   */
+  private static readonly STATUS_PROMPT_VARIANTS = [
+    "ส่งเลขเคสที่ต้องการติดตามมาได้เลยนะคะ หรือกดปุ่มด้านล่างเพื่อดูสรุปเคสล่าสุดทั้งหมดก็ได้ค่ะ 🔍",
+    "แจ้งเลขเคสที่อยากติดตามมาได้เลยค่ะ หรือพิมพ์ “ตรวจสอบสถานะ” เพื่อดูสรุปรายการล่าสุดก็ได้นะคะ",
+    "อยากติดตามเคสไหน ส่งเลขเคสเข้ามาได้เลยนะคะ หรือกดปุ่มด้านล่างให้สรุปเคสล่าสุดให้ก็ได้ค่ะ",
+    "ส่งเลขเคสมาได้เลยค่ะ เดี๋ยวเช็กสถานะล่าสุดให้นะคะ ถ้าอยากดูภาพรวมทั้งหมด กดปุ่มด้านล่างได้เลยค่ะ",
+  ] as const;
+
+  /**
+   * Canned prompts for the "ปิดเคส" menu card. Asks which case to close; the
+   * follow-up (a ticket number or a description) flows to the AI path, where
+   * the gate maps it to CLOSE/FIND. The last two variants deliberately open
+   * the no-number path for customers who cannot recall the case number.
+   */
+  private static readonly CLOSE_PROMPT_VARIANTS = [
+    "ต้องการปิดเคสไหนคะ ส่งเลขเคสมาได้เลยค่ะ เดี๋ยวปิดให้ทันทีนะคะ",
+    "ยินดีด้วยนะคะที่เรื่องเรียบร้อย แจ้งเลขเคสที่จะปิดมาได้เลยค่ะ 🎉",
+    "แจ้งเลขเคสที่ต้องการปิดมาได้เลยนะคะ หรือเล่าก็ได้ค่ะว่าเรื่องไหนแก้เรียบร้อยแล้ว",
+    "อยากปิดเคสไหนคะ ส่งเลขเคสมาได้เลยค่ะ ถ้าจำเลขไม่ได้ บอกอาการที่เคยแจ้งไว้ก็ได้นะคะ",
+  ] as const;
+
+  /**
+   * Quick-reply chip shown on every status prompt (message action → AI path).
+   * Plain text label only: emoji here renders as a corrupted glyph on LINE PC.
+   * `text` intentionally matches the label — a message action shows `text` as
+   * the customer's own bubble, and echoing "ตรวจสอบสถานะ" read as a duplicate
+   * of the menu button they had just tapped.
+   */
+  private static readonly STATUS_QUICK_REPLIES: LineMessageQuickReply[] = [
+    { label: "ดูเคสล่าสุดทั้งหมด", text: "ดูเคสล่าสุดทั้งหมด" },
+  ];
+
+  private static pickVariant(variants: readonly string[], seed?: string | null): string {
+    if (!seed) return variants[0];
+    const digest = crypto.createHash("sha256").update(seed).digest();
+    return variants[digest[0] % variants.length];
+  }
+
   constructor(
     private readonly pool: Pool,
     private readonly codePepper: string,
@@ -582,7 +653,7 @@ export class LineProjectOnboardingService {
         );
       }
 
-      const menuMatch = /^ticketx:onboarding:menu:(start|report|status|connect|connect_new|change)$/.exec(postbackData);
+      const menuMatch = /^ticketx:onboarding:menu:(start|report|status|close_case|connect|connect_new|change)$/.exec(postbackData);
       if (menuMatch) {
         const projects = await this.findAvailableProjects(client, orgId, input.userId);
         const currentProjectId = this.resolveCurrentProjectId(projects, session, ready);
@@ -593,14 +664,29 @@ export class LineProjectOnboardingService {
             await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
             return this.choiceDecision("report_without_project");
           }
-          const target = projects.find((project) => project.id === currentProjectId) || projects[0];
+          const target = projects.find((project) => project.id === currentProjectId)
+            || (projects.length === 1 ? projects[0] : null);
+          if (!target) {
+            return this.projectMenuDecision("report_requires_project_selection", "selector", projects, null);
+          }
+          // Complete the session like the "start" intent does. The reply
+          // invites the customer to type their problem; if the session were
+          // left in AWAITING_CHOICE, that very message would be swallowed by
+          // the onboarding state machine (and answered with the carousel)
+          // instead of reaching the AI.
+          const provisioned = await this.provisionProject(client, target.orgId, input.userId, target.id);
+          await this.completeSession(client, target.orgId, input, target.id);
           return {
             action: "REPLY",
             state: "COMPLETED",
             reason: "report_issue_prompt",
             projectId: target.id,
             projectName: target.name,
-            replyText: `แจ้งปัญหาหรืออาการที่พบของโปรเจกต์ “${target.name}” เข้ามาได้เลยนะคะ ระบบจะตรวจสอบและเปิด Ticket ให้ทันทีค่ะ 😊`,
+            conversationId: provisioned.conversationId,
+            replyText: LineProjectOnboardingService.pickVariant(
+              LineProjectOnboardingService.REPORT_PROMPT_VARIANTS,
+              input.webhookEventId
+            ),
           };
         }
 
@@ -609,14 +695,58 @@ export class LineProjectOnboardingService {
             await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
             return this.choiceDecision("status_without_project");
           }
-          const target = projects.find((project) => project.id === currentProjectId) || projects[0];
+          const target = projects.find((project) => project.id === currentProjectId)
+            || (projects.length === 1 ? projects[0] : null);
+          if (!target) {
+            return this.projectMenuDecision("status_requires_project_selection", "selector", projects, null);
+          }
+          // Same as "report": the quick-reply chip and any typed case number
+          // must reach the AI path, which requires a COMPLETED session.
+          const provisioned = await this.provisionProject(client, target.orgId, input.userId, target.id);
+          await this.completeSession(client, target.orgId, input, target.id);
           return {
             action: "REPLY",
             state: "COMPLETED",
             reason: "check_status_prompt",
             projectId: target.id,
             projectName: target.name,
-            replyText: `ส่งเลขที่ Ticket ที่ต้องการติดตาม หรือพิมพ์ “ตรวจสอบสถานะ” เพื่อให้ระบบสรุปรายการล่าสุดของโปรเจกต์ “${target.name}” ได้เลยนะคะ 🔍`,
+            conversationId: provisioned.conversationId,
+            replyText: LineProjectOnboardingService.pickVariant(
+              LineProjectOnboardingService.STATUS_PROMPT_VARIANTS,
+              input.webhookEventId
+            ),
+            messageQuickReplies: LineProjectOnboardingService.STATUS_QUICK_REPLIES,
+          };
+        }
+
+        if (intent === "close_case") {
+          if (projects.length === 0) {
+            await this.upsertSession(client, orgId, input, "AWAITING_CHOICE");
+            return this.choiceDecision("close_without_project");
+          }
+          const target = projects.find((project) => project.id === currentProjectId)
+            || (projects.length === 1 ? projects[0] : null);
+          if (!target) {
+            return this.projectMenuDecision("close_requires_project_selection", "selector", projects, null);
+          }
+          // Same as "report"/"status": the customer's follow-up (a case number
+          // or a description of the solved issue) must reach the AI path.
+          const provisioned = await this.provisionProject(client, target.orgId, input.userId, target.id);
+          await this.completeSession(client, target.orgId, input, target.id);
+          return {
+            action: "REPLY",
+            state: "COMPLETED",
+            reason: "close_case_prompt",
+            projectId: target.id,
+            projectName: target.name,
+            conversationId: provisioned.conversationId,
+            replyText: LineProjectOnboardingService.pickVariant(
+              LineProjectOnboardingService.CLOSE_PROMPT_VARIANTS,
+              input.webhookEventId
+            ),
+            // The LIST chip helps customers who cannot recall the case number:
+            // tap it, read the summary, then send the number to close.
+            messageQuickReplies: LineProjectOnboardingService.STATUS_QUICK_REPLIES,
           };
         }
 
