@@ -73,6 +73,19 @@ function buildLineReply(decision: LineOnboardingDecision): Record<string, unknow
         },
       })),
     };
+  } else if (decision.messageQuickReplies?.length) {
+    // Message-action chips: the tap sends plain text as the user, so it flows
+    // through the normal AI path instead of the onboarding postback handler.
+    message.quickReply = {
+      items: decision.messageQuickReplies.map((item) => ({
+        type: "action",
+        action: {
+          type: "message",
+          label: item.label,
+          text: item.text,
+        },
+      })),
+    };
   }
   return message;
 }
@@ -405,6 +418,38 @@ export function registerLineWebhookRoutes(
           if (decision.action === "REPLY") {
             const replyStartedAt = process.hrtime.bigint();
             await sendLineReply(String(event.replyToken || ""), decision);
+            // The close-menu exchange must reach the AI's conversation history:
+            // the gate can only route the customer's follow-up ("TCK-... ครับ")
+            // to CLOSE when it can see that the previous assistant turn asked
+            // which case to close (live run r1KD5VIzkKeCJ9kBObrHR misrouted to
+            // GET_STATUS exactly because this canned prompt was never
+            // persisted). Deliberately ONLY the close prompt: the report and
+            // status prompt variants contain "ปุ่มด้านล่าง", which the gate's
+            // deterministic confirmation net reads as an awaiting-confirmation
+            // marker. NULL message_purpose keeps both rows visible to the
+            // history query (it filters only 'notification').
+            if (decision.reason === "close_case_prompt" && decision.conversationId && decision.replyText) {
+              try {
+                await pool.query(
+                  `INSERT INTO messages (conversation_id, role, content, message_type, external_id, created_at)
+                   VALUES ($1, 'customer', $2, 'text', $3, NOW()),
+                          ($1, 'ai', $4, 'text', $5, NOW())
+                   ON CONFLICT (conversation_id, external_id) DO NOTHING`,
+                  [
+                    decision.conversationId,
+                    "ปิดเคส",
+                    `${webhookEventId}:menu_tap`,
+                    decision.replyText,
+                    `${webhookEventId}:menu_prompt`,
+                  ]
+                );
+              } catch (persistErr: any) {
+                logger.error(
+                  { error: persistErr.message, webhookEventId, conversationId: decision.conversationId },
+                  "Failed to persist close-menu exchange"
+                );
+              }
+            }
             logger.info(
               {
                 webhookEventId,

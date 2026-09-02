@@ -41,6 +41,11 @@ export const LINE_ONBOARDING_CARDS = [
     postbackData: "ticketx:onboarding:menu:status",
   },
   {
+    fileName: "close.png",
+    label: "ปิดเคส",
+    postbackData: "ticketx:onboarding:menu:close_case",
+  },
+  {
     fileName: "change.png",
     label: "เปลี่ยน",
     postbackData: "ticketx:onboarding:menu:change",
