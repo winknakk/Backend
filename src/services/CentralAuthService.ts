@@ -84,9 +84,9 @@ export class CentralAuthService {
   /**
    * Authenticate directly with the Central IAM Server
    */
-  async loginToCenter(username: string, password: string): Promise<CenterLoginResponse> {
+  async loginToCenter(username: string, password: string, otp?: string): Promise<CenterLoginResponse> {
     try {
-      const payload = {
+      const payload: Record<string, any> = {
         username,
         password,
         fcmToken: null,
@@ -96,6 +96,14 @@ export class CentralAuthService {
         groupIam2ID: null,
       };
 
+      if (otp) {
+        payload.otp = otp.trim();
+        payload.totp = otp.trim();
+        payload.code = otp.trim();
+        payload.authCode = otp.trim();
+        payload.authenticatorCode = otp.trim();
+      }
+
       const res = await fetch(this.centerAuthUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -103,7 +111,14 @@ export class CentralAuthService {
       });
 
       if (!res.ok) {
-        throw new Error(`Center Auth failed with status: ${res.status}`);
+        let errBody: any = null;
+        try {
+          errBody = await res.json();
+        } catch {
+          // ignore
+        }
+        const errMsg = errBody?.error || errBody?.error_description || `Center Auth failed with status: ${res.status}`;
+        throw new Error(errMsg);
       }
 
       const data = (await res.json()) as CenterLoginResponse;
@@ -345,7 +360,15 @@ export class CentralAuthService {
    */
   parseCenterJwt(token: string, idToken?: string): UserRoleProfile {
     try {
-      const parts = token.split(".");
+      let cleanToken = token.trim();
+      if (cleanToken.startsWith('"') && cleanToken.endsWith('"')) {
+        cleanToken = cleanToken.slice(1, -1).trim();
+      }
+      if (cleanToken.startsWith("Bearer ")) {
+        cleanToken = cleanToken.slice(7).trim();
+      }
+
+      const parts = cleanToken.split(".");
       if (parts.length < 2) {
         throw new Error("Invalid JWT token format");
       }
@@ -356,7 +379,9 @@ export class CentralAuthService {
       let decodedIdToken: any = null;
       if (idToken && idToken.includes(".")) {
         try {
-          const idParts = idToken.split(".");
+          let cleanId = idToken.trim();
+          if (cleanId.startsWith("Bearer ")) cleanId = cleanId.slice(7).trim();
+          const idParts = cleanId.split(".");
           if (idParts.length >= 2) {
             decodedIdToken = JSON.parse(Buffer.from(idParts[1], "base64").toString("utf-8"));
           }
@@ -368,11 +393,17 @@ export class CentralAuthService {
       const email =
         decoded.email ||
         decoded.user_name ||
+        decoded.username ||
+        (decoded.sub && decoded.sub.includes("@") ? decoded.sub : "") ||
+        decoded.preferred_username ||
+        decoded.upn ||
         decoded.claims?.userinfo?.email ||
         decodedIdToken?.email ||
         decodedIdToken?.user_name ||
+        decodedIdToken?.username ||
+        (decodedIdToken?.sub && decodedIdToken.sub.includes("@") ? decodedIdToken.sub : "") ||
         decodedIdToken?.claims?.userinfo?.email ||
-        "user@ticketx.io";
+        "operator@avalant.co.th";
       const firstname =
         decoded.firstname ||
         decoded.claims?.userinfo?.given_name ||

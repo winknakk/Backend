@@ -13,6 +13,7 @@
     "test:line-onboarding-carousel": "npx tsx src/test-line-onboarding-carousel.ts",
     "db:migrate": "npx tsx src/adapters/postgres/run-migrations-cli.ts",
     "db:seed": "npx tsx src/adapters/postgres/run-seeds-cli.ts",
+    "db:clean-test-data": "npx tsx src/cli/clean-test-data.ts",
     "line:project-code": "npx tsx src/cli/line-project-code.ts",
     "line:onboarding-carousel": "npx tsx src/cli/line-onboarding-carousel.ts",
     "line:onboarding-bootstrap": "npx tsx src/cli/bootstrap-line-onboarding.ts",
