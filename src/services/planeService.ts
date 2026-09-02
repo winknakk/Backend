@@ -963,10 +963,16 @@ export class PlaneService {
               AND ma.storage_key IS NOT NULL
               AND COALESCE(ma.file_type, '') LIKE 'image/%'
               AND COALESCE(ma.metadata->>'planeIssueId', '') = ''
-              AND ma.created_at >= NOW() - INTERVAL '2 hours'
+              AND ma.created_at >= COALESCE(
+                (SELECT created_at FROM tickets
+                  WHERE conversation_id = $1::integer
+                    AND ($2::text IS NULL OR ticket_number <> $2::text)
+                  ORDER BY id DESC LIMIT 1),
+                NOW() - INTERVAL '2 hours'
+              )
             ORDER BY ma.id ASC
             LIMIT ${MAX_IMAGES}`,
-          [source.conversationId]
+          [source.conversationId, source.ticketNumber || null]
         );
         imageRows = rows;
       }
@@ -1185,23 +1191,6 @@ export class PlaneService {
       try {
         const identity = await this.dbAdapter.getConversationIdent(String(ticket.conversation_id));
         let mediaUrls: string[] = Array.isArray(ticket.media_urls) ? [...ticket.media_urls] : [];
-        try {
-          const messages = await this.dbAdapter.getMessages(String(ticket.conversation_id));
-          const imageMsgs = (messages || []).filter(
-            (m: any) =>
-              m.message_type === "image" ||
-              (typeof m.content === "string" &&
-                m.content.startsWith("http") &&
-                (m.content.includes("/content") || m.content.includes("/media/")))
-          );
-          for (const im of imageMsgs) {
-            if (im.content && !mediaUrls.includes(im.content)) {
-              mediaUrls.push(im.content);
-            }
-          }
-        } catch {
-          // Message lookup optional
-        }
         ticketWithSource = {
           ...ticket,
           channel: identity?.channel || ticket.channel,

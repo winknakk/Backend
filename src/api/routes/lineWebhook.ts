@@ -521,10 +521,10 @@ export function registerLineWebhookRoutes(
               if (imageIngested && convId) {
                 void (async () => {
                   try {
-                    // Debounce window (15s): wait in background to see if customer sends accompanying text
-                    await new Promise((resolve) => setTimeout(resolve, 15000));
+                    // Debounce window (10s): wait in background to see if customer sends accompanying text
+                    await new Promise((resolve) => setTimeout(resolve, 10000));
 
-                    // Check if customer sent a text message during/after the image
+                    // Check if customer sent a text message in the last 30 seconds (before or after the image)
                     const recentText = await pool.query(
                       `SELECT id, content, created_at FROM messages
                         WHERE conversation_id = $1::integer
@@ -535,57 +535,27 @@ export function registerLineWebhookRoutes(
                       [convId]
                     );
 
-                    // If text arrived, the image is part of that turn — skip old-ticket prompt
+                    // If text accompanied the image in this turn (within 30s), the AI flow handles both together — do not prompt
                     if (recentText.rows.length > 0) {
                       logger.info(
                         { convId, text: recentText.rows[0].content },
-                        "Image accompanied by text within debounce window; skipping old case confirmation"
+                        "Image accompanied by recent customer text within 30 seconds; AI flow handling turn"
                       );
                       return;
                     }
 
-                    // Look for a very recent active ticket created within 5 minutes
-                    const newest = await pool.query(
-                      `SELECT ticket_number, subject, created_at FROM tickets
-                        WHERE conversation_id = $1::integer
-                          AND deleted_at IS NULL
-                          AND plane_issue_id IS NOT NULL AND plane_issue_id <> ''
-                          AND UPPER(COALESCE(status, '')) NOT IN ('CLOSED', 'CANCELLED')
-                          AND created_at >= NOW() - INTERVAL '5 minutes'
-                        ORDER BY id DESC LIMIT 1`,
-                      [convId]
-                    );
-                    const newestTicket = newest.rows[0];
-
-                    if (newestTicket) {
-                      // Truly standalone image within 5 mins of ticket creation: ask confirmation
-                      if (ingestedMessageId) {
-                        await pool.query(
-                          `UPDATE message_attachments
-                              SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
-                            WHERE message_id = $1`,
-                          [
-                            ingestedMessageId,
-                            JSON.stringify({
-                              awaitingCaseConfirm: true,
-                              candidateTicket: newestTicket.ticket_number,
-                            }),
-                          ]
-                        );
-                      }
-                      await customerNotificationService.send({
-                        conversationId: Number(convId),
-                        notificationType: "image_confirm_case",
-                        ticketNumber: newestTicket.ticket_number,
-                        subject: newestTicket.subject || null,
-                        idempotencyKey: webhookEventId || `image-${imageId}`,
-                        projectId: decision.projectId ?? null,
-                        correlationId: webhookEventId,
-                      });
-                      return;
+                    // Standalone image: mark attachment so if customer replies with a ticket number or explanation,
+                    // we can attach it deterministically.
+                    if (ingestedMessageId) {
+                      await pool.query(
+                        `UPDATE message_attachments
+                            SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"awaitingCaseConfirm": true}'::jsonb
+                          WHERE message_id = $1`,
+                        [ingestedMessageId]
+                      );
                     }
 
-                    // Standalone image without any recent ticket in last 5 minutes: ask for context
+                    // Prompt customer for context ("ได้รับรูปแล้วนะคะ รบกวนพิมพ์อธิบายอาการสั้น ๆ อีกนิดค่ะ...")
                     await customerNotificationService.send({
                       conversationId: Number(convId),
                       notificationType: "image_need_context",
