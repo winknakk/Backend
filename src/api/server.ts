@@ -560,30 +560,72 @@ async function bootstrap() {
       try {
         const webhookUrl = `${config.PROMPTX_FLOW_WEBHOOK_URL}/sync`;
 
-        // Ensure local conversation and identity exist first for the stable customer identity
-        const localConvId = await memoryService.ensureConversation(job.data.senderId, "1", "WebChat");
-        serverLogger.info(`[BullMQ Worker] Ensured local conversation (ID: ${localConvId}) for customer: ${job.data.senderId}`);
+        // Resolve the real project and organization for this customer.
+        //
+        // These used to be the literals "1" and "org_default", which pinned
+        // every WebChat conversation to one project no matter who was talking:
+        // a customer whose tickets live in another project saw an empty portal
+        // and a bot with the wrong tenant context. Both values now come from
+        // the customer's own open WebChat conversation, falling back to the old
+        // literals only when nothing resolves, so behaviour is unchanged for
+        // anyone who really is in project 1.
+        let convProjectId = "1";
+        let convOrgId = "org_default";
+        try {
+          const identRef = job.data.senderId;
+          if (identRef) {
+            const convRes = await pool.query(
+              `SELECT c.project_id, p.org_id
+               FROM conversations c
+               JOIN identities i ON i.id = c.identity_id
+               LEFT JOIN projects p ON p.id = c.project_id
+               WHERE (i.channel_ref = $1 OR i.channel_ref = 'cust_' || $1)
+                 AND LOWER(c.channel) = 'webchat' AND c.status = 'open'
+               ORDER BY c.id DESC LIMIT 1`,
+              [identRef]
+            );
+            if (convRes.rows.length > 0 && convRes.rows[0].project_id) {
+              convProjectId = String(convRes.rows[0].project_id);
+              if (convRes.rows[0].org_id) convOrgId = String(convRes.rows[0].org_id);
+            }
+          }
+        } catch (lookupErr: any) {
+          // A failed lookup must not drop the message: fall through on the
+          // legacy literals and let the flow answer.
+          serverLogger.warn({ error: lookupErr.message }, "[BullMQ Worker] WebChat project lookup failed; using defaults");
+        }
 
+        // Ensure local conversation and identity exist first for the stable customer identity
+        const localConvId = await memoryService.ensureConversation(job.data.senderId, convProjectId, "WebChat");
+        serverLogger.info(`[BullMQ Worker] Ensured local conversation (ID: ${localConvId}) for customer: ${job.data.senderId} in Project: ${convProjectId}`);
+
+        // WebChat talks to the same PromptX flow layer LINE does (LINE goes via
+        // LINE_DM_GATEWAY_WEBHOOK_URL in AgentSessionQueueWorker). It is
+        // deliberately NOT routed through the local Orchestrator: that path ends
+        // at PromptXMcpClient.chatAgent(), which calls a remote MCP tool named
+        // "chat" that this PromptX project does not expose — the customer saw
+        // "MCP error -32602: Tool chat not found" for every message. See
+        // ISSUE-051.
         serverLogger.info(`[BullMQ Worker] Forwarding WebChat message to PromptX Flow: ${webhookUrl}`);
 
         const response = await axios.post(webhookUrl, {
           channel: "webchat",
           customer_ref: job.data.senderId,
           message: job.data.text,
-          project_id: "1",
-          org_id: "org_default",
+          project_id: convProjectId,
+          org_id: convOrgId,
           destination: "default",
           received_at: new Date().toISOString()
         }, { timeout: 45000 });
 
         const data = response.data || {};
         const replyText = String(
-          data.reply_text || 
-          data.reply || 
-          data.text || 
-          data.message || 
-          data.body?.reply_text || 
-          data.data?.reply_text || 
+          data.reply_text ||
+          data.reply ||
+          data.text ||
+          data.message ||
+          data.body?.reply_text ||
+          data.data?.reply_text ||
           ""
         );
         const suppressReply = data.suppress_reply === true || replyText.trim().length === 0;
@@ -596,7 +638,7 @@ async function bootstrap() {
           await publishOutbound(
             "webchat:outbound",
             JSON.stringify({
-              conversationId: convId || sessionContext.conversationId,
+              conversationId: convId || sessionContext.conversationId || localConvId,
               recipientId: job.data.senderId,
               channel: "WebChat",
               text: replyText,

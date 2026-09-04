@@ -502,6 +502,56 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       return reply.status(401).send({ error: "Invalid username or password" });
     }
 
+    // If account has role 'customer', issue Customer Portal token instead of rejecting with 403
+    if (operator.role === 'customer') {
+      const profRes = await pool.query(
+        "SELECT id, name, email, phone, company_id FROM profiles WHERE LOWER(email) = $1 ORDER BY id ASC LIMIT 1",
+        [cleanUser]
+      );
+      const customerProfile = profRes.rows[0];
+      const identRes = await pool.query(
+        "SELECT channel_ref, org_id FROM identities WHERE profile_id::text = $1::text LIMIT 1",
+        [String(customerProfile?.id || operator.id)]
+      );
+      const channelRef = identRes.rows[0]?.channel_ref || `cust_${customerProfile?.id || operator.id}`;
+      const orgId = identRes.rows[0]?.org_id || "org_excise";
+
+      const projRes = await pool.query(
+        "SELECT project_id FROM profile_projects WHERE profile_id::text = $1::text",
+        [String(customerProfile?.id || operator.id)]
+      );
+      const projectIds = projRes.rows.map((r: any) => Number(r.project_id)).filter((n: number) => Number.isInteger(n));
+
+      const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
+      const jwtSecret = getWebchatJwtSecret();
+      const proofToken = JwtUtil.sign({
+        customerId: channelRef,
+        name: customerProfile?.name || 'คุณวิน (ลูกค้า)',
+        email: operator.email,
+        companyId: String(customerProfile?.company_id || 101),
+        projectId: String(projectIds[0] || 101),
+      }, jwtSecret, 86400);
+
+      logger.info({ email: operator.email }, "Customer signed in via verified password");
+
+      return reply.send({
+        success: true,
+        role: "customer",
+        token: proofToken,
+        proofToken,
+        expiresAt: Date.now() + 86400 * 1000,
+        user: {
+          username: operator.email,
+          email: operator.email,
+          name: customerProfile?.name || 'คุณวิน (ลูกค้า)',
+          role: "customer",
+          orgId,
+          companyId: customerProfile?.company_id || 101,
+          projectIds: projectIds.length > 0 ? projectIds : [101],
+        }
+      });
+    }
+
     let principal;
     try {
       principal = await principalResolver.buildPrincipal(operator);

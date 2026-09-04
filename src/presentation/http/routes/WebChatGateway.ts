@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { z } from "zod";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { JwtUtil } from "../../../shared/jwt";
 import { pool } from "../../../adapters/postgres/PostgresAdapter";
 import { nextSequenceId } from "../../../adapters/postgres/sequences";
@@ -61,6 +61,93 @@ const HandshakeSchema = z.object({
   projectId: z.string().optional()
 });
 
+/**
+ * Backend-owned quick actions for the web portal.
+ *
+ * Deliberately NOT driven by LineProjectOnboardingService: its entry point takes
+ * a LINE webhook event and dedupes against line_onboarding_sessions, so feeding
+ * web traffic through it would fabricate LINE events and mix two channels'
+ * state. The LINE menu also solves a problem the portal does not have — a LINE
+ * user is anonymous until they link a project, while a portal user arrives
+ * authenticated with a project already resolved.
+ *
+ * The values are an enum the client echoes back; they are matched, never
+ * executed, and identity is always taken from the WS ticket.
+ */
+export type WebChatAction = { label: string; value: string; style?: "primary" | "default" };
+
+export const WEBCHAT_ACTIONS: Record<string, WebChatAction> = {
+  start: { label: "🚀 เริ่มใช้งาน", value: "start" },
+  report_issue: { label: "📝 แจ้งปัญหา", value: "report_issue", style: "primary" },
+  check_status: { label: "🔍 ตรวจสอบสถานะ", value: "check_status" },
+  close_case: { label: "✅ ปิดเคส", value: "close_case" },
+  change_project: { label: "🔄 เปลี่ยนโปรเจกต์", value: "change_project" },
+  connect_new: { label: "🔗 เชื่อมใหม่", value: "connect_new" },
+};
+
+/** The greeting the portal shows when a conversation has no history yet. */
+function buildWebChatMenu(): { text: string; actions: WebChatAction[] } {
+  return {
+    text: "สวัสดีค่ะ ยินดีต้อนรับสู่ศูนย์บริการ TicketX ค่ะ! ต้องการให้ช่วยเรื่องไหนดีคะ เลือกจากเมนูด้านล่าง หรือพิมพ์แจ้งเรื่องได้เลยค่ะ",
+    actions: [
+      WEBCHAT_ACTIONS.start,
+      WEBCHAT_ACTIONS.report_issue,
+      WEBCHAT_ACTIONS.check_status,
+      WEBCHAT_ACTIONS.close_case,
+      WEBCHAT_ACTIONS.change_project,
+      WEBCHAT_ACTIONS.connect_new,
+    ],
+  };
+}
+
+/**
+ * Reply to a tapped chip. Returns null for anything not in the enum, so an
+ * unknown value falls through to the normal AI path instead of being trusted.
+ */
+function resolvePostback(value: string): { text: string; actions?: WebChatAction[] } | null {
+  switch (value) {
+    case "start":
+      return {
+        text: "👋 ยินดีต้อนรับสู่ TicketX Support ค่ะ! ท่านสามารถสอบถามข้อสงสัย แจ้งปัญหาการใช้งาน หรือติดตามสถานะตั๋วงานได้ตลอดเวลาเลยนะคะ",
+        actions: [
+          WEBCHAT_ACTIONS.report_issue,
+          WEBCHAT_ACTIONS.check_status,
+          WEBCHAT_ACTIONS.change_project,
+        ]
+      };
+    case "report_issue":
+      return {
+        text: "ได้เลยค่ะ เล่ารายละเอียดปัญหาที่พบให้ฟังได้เลยนะคะ หรือกดปุ่ม '+ เปิดตั๋วใหม่' ด้านบนเพื่อกรอกแบบฟอร์มและแนบรูปภาพค่ะ",
+        actions: [WEBCHAT_ACTIONS.check_status]
+      };
+    case "check_status":
+      return {
+        text: "ท่านสามารถดูรายการตั๋วทั้งหมดได้ที่เมนู 'ตั๋วของฉัน' หรือพิมพ์เลขที่ตั๋ว (เช่น TCK-...) เพื่อให้ AI ตรวจสอบสถานะล่าสุดให้ได้ทันทีค่ะ",
+        actions: [WEBCHAT_ACTIONS.report_issue, WEBCHAT_ACTIONS.close_case]
+      };
+    case "close_case":
+      return {
+        text: "หากปัญหาได้รับการแก้ไขเรียบร้อยแล้ว ท่านสามารถพิมพ์เลขตั๋วงานที่ต้องการปิด หรือแจ้งยืนยันการปิดเคสได้เลยนะคะ",
+        actions: [WEBCHAT_ACTIONS.check_status]
+      };
+    case "change_project":
+      return {
+        text: "ต้องการสลับโปรเจกต์ใช่ไหมคะ? ท่านสามารถพิมพ์ชื่อโครงการที่ต้องการสลับ หรือกดปุ่ม 'เชื่อมโปรเจกต์ใหม่' ด้านล่างได้เลยค่ะ",
+        actions: [WEBCHAT_ACTIONS.connect_new, WEBCHAT_ACTIONS.check_status]
+      };
+    case "connect_new":
+      return {
+        // The example here was a live join code for project 101. A bot message
+        // reaches guests, so it must describe the format, never a real code.
+        text: "กรุณาพิมพ์ **รหัสโครงการ (Project Code รูปแบบ TX-XXXX-XXXX)** หรือรหัส 4 หลัก เพื่อยืนยันและเชื่อมต่อเข้าสู่โครงการใหม่ค่ะ",
+      };
+    case "show_menu":
+      return buildWebChatMenu();
+    default:
+      return null;
+  }
+}
+
 export default async function WebChatGateway(fastify: FastifyInstance) {
   const conversationRepo = new PostgresConversationRepository();
   const messageRepo = new PostgresMessageRepository();
@@ -85,7 +172,11 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
               role: payload.role || "ai",
               content: payload.text,
               createdAt: payload.sentAt || new Date().toISOString(),
-              attachments: payload.attachments || []
+              attachments: payload.attachments || [],
+              // Optional quick-action chips. Kept optional so the three existing
+              // publishers (takeover_change, PromptX reply, human reply) keep
+              // working untouched.
+              actions: Array.isArray(payload.actions) ? payload.actions : undefined
             }
           };
 
@@ -229,10 +320,51 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
         // Authoritatively resolve customer's project access from profile_projects and conversations
         const parsedProjHint = clientProjectHint ? parseInt(String(clientProjectHint), 10) : NaN;
+        //
+        // Ordering is load-bearing, not cosmetic. This used to be a bare UNION
+        // whose first row was then taken as the answer, so a customer linked to
+        // several projects landed in whichever one the planner happened to emit
+        // first: the EX03 customer kept resolving to project 1 and saw an empty
+        // portal while 21 of their tickets sat in project 101.
+        //
+        // Preference, by authority rather than by recency of chatter:
+        //   1. an explicit profile_projects grant, most recently granted first
+        //   2. the project of their most recent open WebChat conversation
+        //   3. the project of their most recent conversation on any channel
+        //
+        // Membership decides for a signed-in customer; conversation history is
+        // only the fallback for a guest who has no grant at all. Ordering the
+        // other way round looks reasonable until history is polluted: this
+        // customer had been talking in project 1 purely because the old bug put
+        // them there, so "most recent conversation" would have kept them there
+        // for good while their 21 EX03 tickets stayed invisible.
+        // `recency` is only comparable inside one rank — conversation ids at
+        // ranks 0/1, epoch seconds at rank 2. DISTINCT ON therefore reduces each
+        // project to its own best rank first, and only then are projects ordered
+        // against each other. Grouping with MIN(rank)/MAX(recency) instead would
+        // let a rank-2 epoch outrank a rank-0 conversation id in the tiebreak.
         const authorizedProjectsRes = await pool.query(
-          `SELECT project_id FROM profile_projects WHERE profile_id = $1
-           UNION
-           SELECT DISTINCT project_id FROM conversations WHERE identity_id = $2 AND project_id IS NOT NULL`,
+          `SELECT project_id
+             FROM (
+               SELECT DISTINCT ON (project_id) project_id, rank, recency
+                 FROM (
+                   SELECT project_id, 0 AS rank,
+                          EXTRACT(EPOCH FROM COALESCE(created_at, TIMESTAMP 'epoch'))::bigint AS recency
+                     FROM profile_projects
+                    WHERE profile_id = $1
+                   UNION ALL
+                   SELECT project_id, 1 AS rank, id AS recency
+                     FROM conversations
+                    WHERE identity_id = $2 AND project_id IS NOT NULL
+                      AND LOWER(channel) = 'webchat' AND status = 'open'
+                   UNION ALL
+                   SELECT project_id, 2 AS rank, id AS recency
+                     FROM conversations
+                    WHERE identity_id = $2 AND project_id IS NOT NULL
+                 ) candidates
+                ORDER BY project_id, rank ASC, recency DESC
+             ) best
+            ORDER BY rank ASC, recency DESC`,
           [parseInt(identity.profileId, 10) || 0, parseInt(identity.id, 10) || 0]
         );
         const authorizedProjectIds = authorizedProjectsRes.rows
@@ -254,7 +386,14 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
       // 3. Session Compilation & Token Generation
       const sessionToken = JwtUtil.sign(
-        { identityId: identity.id, channelRef, role: isGuest ? "guest" : "customer", jti: randomUUID() },
+        {
+          identityId: identity.id,
+          channelRef,
+          role: isGuest ? "guest" : "customer",
+          projectId: String(authoritativeProjectId),
+          companyId: String(authoritativeCompanyId),
+          jti: randomUUID()
+        },
         jwtSecret,
         86400
       );
@@ -312,7 +451,18 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
       const { identityId, projectId } = decoded;
 
-      const activeConv = await conversationRepo.findActiveByIdentity(identityId, projectId);
+      let activeConv = await conversationRepo.findActiveByIdentity(identityId, projectId);
+      if (!activeConv) {
+        const convRes = await pool.query(
+          `SELECT id, project_id FROM conversations 
+           WHERE identity_id = $1 AND LOWER(channel) = 'webchat' AND status = 'open'
+           ORDER BY id DESC LIMIT 1`,
+          [parseInt(identityId, 10) || 0]
+        );
+        if (convRes.rows.length > 0) {
+          activeConv = { id: String(convRes.rows[0].id) } as any;
+        }
+      }
       if (!activeConv) {
         return reply.code(200).send({ conversationId: null, messages: [] });
       }
@@ -393,11 +543,31 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       const ticketId = "wst_" + randomUUID();
       const ttlMs = 10_000; // 10 seconds
 
+      let resolvedProj = decoded.projectId;
+      let resolvedComp = decoded.companyId;
+      if (!resolvedProj || resolvedProj === "1") {
+        try {
+          const authCheck = await pool.query(
+            `SELECT c.project_id, p.company_id 
+             FROM conversations c
+             JOIN projects p ON p.id = c.project_id
+             WHERE (c.identity_id::text = $1 OR c.identity_id IN (SELECT id FROM identities WHERE channel_ref = $2))
+               AND c.status = 'open'
+             ORDER BY c.id DESC LIMIT 1`,
+            [String(decoded.identityId || "0"), String(decoded.channelRef || decoded.customerId || "")]
+          );
+          if (authCheck.rows.length > 0) {
+            resolvedProj = String(authCheck.rows[0].project_id);
+            resolvedComp = String(authCheck.rows[0].company_id);
+          }
+        } catch {}
+      }
+
       wsTickets.set(ticketId, {
         identityId: String(decoded.identityId || decoded.customerId || decoded.profileId || "guest"),
         profileId: String(decoded.profileId || "guest"),
-        companyId: String(decoded.companyId || "1"),
-        projectId: String(decoded.projectId || "1"),
+        companyId: String(resolvedComp || "101"),
+        projectId: String(resolvedProj || "101"),
         channelRef: String(decoded.channelRef || decoded.customerId || decoded.identityId || "guest"),
         role: decoded.role === "customer" ? "customer" : "guest",
         expiresAt: Date.now() + ttlMs,
@@ -465,7 +635,28 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           return;
         }
 
-        // 2. Handle Text Message
+        // 2. Handle a tapped quick action.
+        if (typeof payload.postback === "string") {
+          const resolved = resolvePostback(payload.postback);
+          if (!resolved) {
+            logger.warn({ postback: payload.postback }, "Unknown WebChat postback ignored");
+            return;
+          }
+          socket.send(JSON.stringify({
+            event: "message",
+            data: {
+              id: randomUUID(),
+              role: "ai",
+              content: resolved.text,
+              createdAt: new Date().toISOString(),
+              attachments: [],
+              actions: resolved.actions
+            }
+          }));
+          return;
+        }
+
+        // 3. Handle Text Message
         const parsed = z.object({
           text: z.string().min(1),
           tempId: z.string().optional()
@@ -495,11 +686,101 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         const conversationId = conversation.id;
         room = `conversation:${conversationId}`;
 
-        // Join connection set to the conversation room if not joined yet
         if (!activeConnections.has(room)) {
           activeConnections.set(room, new Set());
         }
         activeConnections.get(room)!.add(socket);
+
+        // Check if message is a project join code (format TX-XXXX-XXXX, or the 4-char hint)
+        const trimmedText = parsed.data.text.trim();
+        const isJoinCodePattern = /^TX-[A-Z0-9]+-[A-Z0-9]+$/i.test(trimmedText) || /^[A-Z0-9]{4,6}$/i.test(trimmedText);
+        if (isJoinCodePattern) {
+          const codeHash = createHash("sha256").update(trimmedText.toUpperCase()).digest("hex");
+          const codeRes = await pool.query(
+            `SELECT pjc.project_id, p.name as project_name, p.company_id, c.name as company_name
+             FROM project_join_codes pjc
+             JOIN projects p ON p.id = pjc.project_id
+             LEFT JOIN companies c ON c.id = p.company_id
+             WHERE (pjc.code_digest = $1 OR UPPER(pjc.code_hint) = UPPER($2))
+               AND pjc.status = 'active'
+             LIMIT 1`,
+            [codeHash, trimmedText.slice(-4).toUpperCase()]
+          );
+          if (codeRes.rows.length > 0) {
+            const row = codeRes.rows[0];
+            const newProjectId = String(row.project_id);
+            const newCompanyId = String(row.company_id || companyId);
+            const projName = row.project_name;
+            const compName = row.company_name;
+
+            if (identityId && identityId !== "guest") {
+              const identRow = await pool.query("SELECT profile_id FROM identities WHERE id = $1", [parseInt(identityId, 10)]);
+              const pId = identRow.rows[0]?.profile_id;
+              if (pId) {
+                await pool.query(
+                  `INSERT INTO profile_projects (profile_id, project_id, created_at)
+                   VALUES ($1, $2, NOW())
+                   ON CONFLICT (profile_id, project_id) DO NOTHING`,
+                  [pId, parseInt(newProjectId, 10)]
+                );
+                await pool.query(
+                  `UPDATE profiles SET company_id = $1 WHERE id = $2`,
+                  [parseInt(newCompanyId, 10), pId]
+                );
+              }
+            }
+
+            await pool.query(
+              `UPDATE conversations SET project_id = $1, org_id = $2, status = 'open' WHERE id = $3`,
+              [parseInt(newProjectId, 10), row.org_id || 'org_default', conversationId]
+            );
+
+            const jwtSecret = getWebchatJwtSecret();
+            const freshSessionToken = JwtUtil.sign(
+              {
+                identityId,
+                channelRef,
+                role: "customer",
+                projectId: newProjectId,
+                companyId: newCompanyId,
+                jti: randomUUID()
+              },
+              jwtSecret,
+              86400
+            );
+
+            const successText = `✅ ยืนยันตัวตนสำเร็จ!\nยินดีต้อนรับสู่โครงการ **${projName}** (${compName || ''})\n\nขณะนี้ระบบพร้อมให้บริการแล้วค่ะ ท่านสามารถสอบถามข้อมูล แจ้งปัญหาการใช้งาน หรือขอความช่วยเหลือได้ทันทีค่ะ`;
+
+            await pool.query(
+              `INSERT INTO messages (conversation_id, role, content, message_type, created_at)
+               VALUES ($1, 'ai', $2, 'text', NOW())`,
+              [conversationId, successText]
+            );
+
+            socket.send(JSON.stringify({
+              event: "message",
+              data: {
+                id: randomUUID(),
+                role: "ai",
+                content: successText,
+                createdAt: new Date().toISOString(),
+                attachments: []
+              }
+            }));
+
+            socket.send(JSON.stringify({
+              event: "project_switched",
+              data: {
+                projectId: parseInt(newProjectId, 10),
+                projectName: projName,
+                companyId: parseInt(newCompanyId, 10),
+                companyName: compName,
+                token: freshSessionToken
+              }
+            }));
+            return;
+          }
+        }
 
         const receivedAtStr = new Date().toISOString();
         const inboundMsg = {
@@ -548,13 +829,44 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
     (async () => {
       try {
-        const conversation = await conversationRepo.findActiveByIdentity(identityId, projectId);
+        let conversation = await conversationRepo.findActiveByIdentity(identityId, projectId);
+        if (!conversation) {
+          const res = await pool.query(
+            `SELECT id, project_id FROM conversations 
+             WHERE (identity_id::text = $1 OR identity_id IN (SELECT id FROM identities WHERE channel_ref = $2))
+               AND status = 'open' 
+             ORDER BY id DESC LIMIT 1`,
+            [identityId, channelRef]
+          );
+          if (res.rows.length > 0) {
+            conversation = { id: String(res.rows[0].id), projectId: String(res.rows[0].project_id) } as any;
+          }
+        }
         if (conversation) {
           room = `conversation:${conversation.id}`;
           if (!activeConnections.has(room)) {
             activeConnections.set(room, new Set());
           }
           activeConnections.get(room)!.add(socket);
+        }
+
+        // Greet with the quick-action menu only when there is nothing to read
+        // yet, so it never lands on top of an ongoing conversation. Sent on
+        // this socket alone — not broadcast — because it is a per-viewer
+        // greeting, not conversation content, and it is not persisted.
+        if (!conversation) {
+          const menu = buildWebChatMenu();
+          socket.send(JSON.stringify({
+            event: "message",
+            data: {
+              id: randomUUID(),
+              role: "ai",
+              content: menu.text,
+              createdAt: new Date().toISOString(),
+              attachments: [],
+              actions: menu.actions
+            }
+          }));
         }
       } catch (err: any) {
         logger.error({ error: err.message }, "Error registering socket room connection");
