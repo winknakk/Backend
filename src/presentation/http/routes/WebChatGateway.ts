@@ -736,8 +736,16 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             );
 
             const jwtSecret = getWebchatJwtSecret();
+            // `customerId` is required, not decorative: the client keeps this
+            // token as its login proof, and the handshake above only accepts a
+            // proof that carries `decoded.customerId` (see the customerToken
+            // branch). Without it the token verified but produced no identity,
+            // so every reload silently dropped the upgraded session back to
+            // guest — the bot had said "ยืนยันตัวตนสำเร็จ" and the portal still
+            // showed the guest gate, 0 projects and a 403 on /api/portal/profile.
             const freshSessionToken = JwtUtil.sign(
               {
+                customerId: channelRef,
                 identityId,
                 channelRef,
                 role: "customer",
