@@ -185,8 +185,8 @@ async function publishOutbound(channel: string, payload: string): Promise<void> 
     }
   }
 
-  // If Redis is not configured or publish failed, perform in-memory broadcast
-  if (!publishedToRedis && parsed) {
+  // Always execute in-memory broadcast for immediate local socket delivery
+  if (parsed) {
     try {
       broadcastWebChatOutbound(parsed);
     } catch (err: any) {
@@ -827,28 +827,91 @@ async function bootstrap() {
 
         if (!suppressReply && replyText.trim().length > 0) {
           // Ensure AI reply is persisted into messages table if PromptX flow didn't already insert it
+          let insertedAiMsgId: string | null = null;
           try {
             const existing = await pool.query(
               `SELECT id FROM messages WHERE conversation_id = $1 AND role = 'ai' AND content = $2 AND created_at > NOW() - INTERVAL '1 minute' LIMIT 1`,
               [parseInt(targetConvId, 10), replyText]
             );
             if (existing.rows.length === 0) {
-              await pool.query(
+              const ins = await pool.query(
                 `INSERT INTO messages (conversation_id, role, content, message_type, created_at)
-                 VALUES ($1, 'ai', $2, 'text', NOW())`,
+                 VALUES ($1, 'ai', $2, 'text', NOW())
+                 RETURNING id`,
                 [parseInt(targetConvId, 10), replyText]
               );
+              insertedAiMsgId = ins.rows[0]?.id ? String(ins.rows[0].id) : null;
+            } else {
+              insertedAiMsgId = String(existing.rows[0].id);
             }
           } catch (insertErr: any) {
             serverLogger.warn({ error: insertErr.message }, "[BullMQ Worker] Failed ensuring AI message insertion in DB");
+          }
+
+          // Extract actions / quick replies from PromptX flow response or canonical patterns
+          let extractedActions: any[] = [];
+          if (Array.isArray(data.actions)) {
+            extractedActions = data.actions;
+          } else if (Array.isArray(data.quick_replies)) {
+            extractedActions = data.quick_replies.map((qr: any) => ({
+              label: qr.label || qr.text,
+              value: qr.value || qr.text || qr.label,
+              style: qr.style || (String(qr.label || "").includes("ยืนยัน") ? "primary" : undefined),
+            }));
+          } else if (Array.isArray(data.quickReplies)) {
+            extractedActions = data.quickReplies.map((qr: any) => ({
+              label: qr.label || qr.text,
+              value: qr.value || qr.text || qr.label,
+              style: qr.style || (String(qr.label || "").includes("ยืนยัน") ? "primary" : undefined),
+            }));
+          } else if (Array.isArray(data.lineMessages?.[0]?.quickReply?.items)) {
+            extractedActions = data.lineMessages[0].quickReply.items.map((it: any) => ({
+              label: it.action?.label || it.action?.text,
+              value: it.action?.text || it.action?.label,
+              style: String(it.action?.label || "").includes("ยืนยัน") ? "primary" : undefined,
+            }));
+          } else if (Array.isArray(data.line_messages?.[0]?.quickReply?.items)) {
+            extractedActions = data.line_messages[0].quickReply.items.map((it: any) => ({
+              label: it.action?.label || it.action?.text,
+              value: it.action?.text || it.action?.label,
+              style: String(it.action?.label || "").includes("ยืนยัน") ? "primary" : undefined,
+            }));
+          } else {
+            // Pattern fallback for canonical confirmation turns
+            if (replyText.includes("กดปุ่ม 'ยืนยัน'")) {
+              extractedActions = [
+                { label: "🟢 ยืนยัน", value: "ยืนยัน", style: "primary" },
+                { label: "❌ ยกเลิก", value: "ยกเลิก" }
+              ];
+            } else if (replyText.includes("ยืนยันปิดเคส")) {
+              const tck = replyText.match(/TCK-\d{4}-\d{4,6}/i)?.[0];
+              const tckSuffix = tck ? ` ${tck}` : "";
+              extractedActions = [
+                { label: "🟢 ยืนยันปิดเคส", value: `ยืนยันปิดเคส${tckSuffix}`, style: "primary" },
+                { label: "⏳ ยังไม่ปิด", value: "ยังไม่ปิด" },
+                { label: "🔴 ยังมีปัญหาอยู่", value: `ยังมีปัญหาอยู่${tckSuffix}` }
+              ];
+            } else if (replyText.includes("ใช้งานได้แล้ว") && replyText.includes("ยังมีปัญหาอยู่")) {
+              const tck = replyText.match(/TCK-\d{4}-\d{4,6}/i)?.[0];
+              const tckSuffix = tck ? ` ${tck}` : "";
+              extractedActions = [
+                { label: "🟢 ผ่าน / ปิดเคส", value: `ใช้งานได้แล้ว${tckSuffix}`, style: "primary" },
+                { label: "🔴 ไม่ผ่าน / มีปัญหา", value: `ยังมีปัญหาอยู่${tckSuffix}` }
+              ];
+            }
           }
 
           const outboundPayload = {
             conversationId: targetConvId,
             recipientId: resolvedSenderRef,
             channel: "WebChat",
+            id: insertedAiMsgId || randomUUID(),
+            externalId: insertedAiMsgId || undefined,
+            messageId: insertedAiMsgId || undefined,
             text: replyText,
-            sentAt: new Date().toISOString()
+            role: "ai",
+            sentAt: new Date().toISOString(),
+            actions: extractedActions.length > 0 ? extractedActions : undefined,
           };
           // Broadcast single outbound payload
           await publishOutbound("webchat:outbound", JSON.stringify(outboundPayload));

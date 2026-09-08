@@ -4,6 +4,9 @@ import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { traceRecorder } from "../observability/TraceRecorder";
+import Redis from "ioredis";
+import { createRedisClient } from "../infrastructure/cache/createRedisClient";
+import { broadcastWebChatOutbound } from "../presentation/http/routes/WebChatGateway";
 
 const logger = createLogger("customer-notification");
 
@@ -473,6 +476,58 @@ export class CustomerNotificationService {
     );
   }
 
+  private redisPub: Redis | null = null;
+
+  private getRedisPub(): Redis {
+    if (!this.redisPub) {
+      this.redisPub = createRedisClient("customer-notification-pub", { maxRetriesPerRequest: null });
+    }
+    return this.redisPub;
+  }
+
+  /** Pushes a WebChat notification with normalized buttons across Redis and in-memory. */
+  private async pushWebChat(
+    conversationId: number,
+    recipientRef: string,
+    text: string,
+    messageId: number | null,
+    quickReplies: NotificationQuickReply[] = []
+  ): Promise<void> {
+    const actions = (quickReplies || []).map((qr) => ({
+      label: qr.label,
+      value: qr.text,
+      style: qr.label.includes("ผ่าน") || qr.label.includes("ยืนยัน") ? ("primary" as const) : undefined,
+    }));
+
+    const outboundPayload = {
+      conversationId: String(conversationId),
+      recipientId: recipientRef,
+      channel: "WebChat" as const,
+      id: messageId ? String(messageId) : undefined,
+      externalId: messageId ? String(messageId) : undefined,
+      messageId: messageId ?? undefined,
+      text,
+      role: "ai" as const,
+      sentAt: new Date().toISOString(),
+      actions: actions.length > 0 ? actions : undefined,
+    };
+
+    // 1. Direct in-memory broadcast for immediate local socket delivery
+    try {
+      broadcastWebChatOutbound(outboundPayload);
+    } catch (inMemErr: any) {
+      logger.warn({ error: inMemErr.message, conversationId }, "WebChat in-memory notification broadcast failed");
+    }
+
+    // 2. Redis publish for horizontal scaling across instances
+    try {
+      const pub = this.getRedisPub();
+      await pub.publish("webchat:outbound", JSON.stringify(outboundPayload));
+    } catch (redisErr: any) {
+      logger.warn({ error: redisErr.message, conversationId }, "WebChat Redis notification publish failed");
+    }
+  }
+
   /**
    * Sends a customer notification at most once.
    *
@@ -530,17 +585,22 @@ export class CustomerNotificationService {
         ? CustomerNotificationService.defaultQuickReplies(req.notificationType, req.ticketNumber)
         : req.quickReplies;
 
+    let insertedMsgId: number | null = null;
     try {
       if (recipient.channel === "line") {
         await this.pushLine(recipient.recipientRef, body, quickReplies);
+        insertedMsgId = await this.appendToConversation(req.conversationId, body);
+      } else if (recipient.channel === "webchat") {
+        insertedMsgId = await this.appendToConversation(req.conversationId, body);
+        await this.pushWebChat(req.conversationId, recipient.recipientRef, body, insertedMsgId, quickReplies);
       } else {
         // Other channels deliver through their own gateway; the ledger row
         // and the conversation record are still written.
-        logger.info({ channel: recipient.channel }, "Non-LINE channel: notification recorded, delivery delegated");
+        logger.info({ channel: recipient.channel }, "Non-LINE/WebChat channel: notification recorded, delivery delegated");
+        insertedMsgId = await this.appendToConversation(req.conversationId, body);
       }
 
       await this.markSent(claimId);
-      await this.appendToConversation(req.conversationId, body);
 
       await traceRecorder.record({
         correlationId: req.correlationId || `notify-${claimId}`,
@@ -577,7 +637,9 @@ export class CustomerNotificationService {
       });
       // Still record what we intended to say, so the thread is not silently
       // missing a turn the customer may or may not have received.
-      await this.appendToConversation(req.conversationId, body);
+      if (!insertedMsgId) {
+        await this.appendToConversation(req.conversationId, body);
+      }
       logger.error(
         { conversationId: req.conversationId, type: req.notificationType, error: err.message },
         "Customer notification delivery failed"
@@ -586,14 +648,19 @@ export class CustomerNotificationService {
     }
   }
 
-  private async appendToConversation(conversationId: number, text: string): Promise<void> {
-    await pool
-      .query(
+  private async appendToConversation(conversationId: number, text: string): Promise<number | null> {
+    try {
+      const res = await pool.query(
         `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
-         VALUES ($1, 'ai', $2, 'text', 'notification', NOW())`,
+         VALUES ($1, 'ai', $2, 'text', 'notification', NOW())
+         RETURNING id`,
         [conversationId, text]
-      )
-      .catch((err) => logger.warn({ error: err.message, conversationId }, "Could not append notification to conversation"));
+      );
+      return res.rows[0]?.id ? Number(res.rows[0].id) : null;
+    } catch (err: any) {
+      logger.warn({ error: err.message, conversationId }, "Could not append notification to conversation");
+      return null;
+    }
   }
 }
 

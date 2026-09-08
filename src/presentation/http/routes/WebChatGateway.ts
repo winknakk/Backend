@@ -26,6 +26,7 @@ import { S3MediaStorageService } from "../../../media/services/S3MediaStorageSer
 import { adminSocketRegistry } from "../../../api/AdminSocketRegistry";
 import { projectResolver, normalizeJoinCode } from "../../../domain/project/ProjectResolver";
 import { findOrCreateWebChatGuestIdentity } from "../../../infrastructure/db/guestIdentityProvisioning";
+import { customerMessagePreRouter } from "../../../services/CustomerMessagePreRouter";
 
 const logger = createLogger("WebChatGateway");
 
@@ -177,10 +178,13 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         try {
           const payload = JSON.parse(message);
           const outEvent = payload.event || (payload.type === "takeover_started" ? "takeover_started" : "message");
+          const resolvedId = payload.id || (payload.messageId ? String(payload.messageId) : undefined) || randomUUID();
+          const resolvedExternalId = payload.externalId || (payload.messageId ? String(payload.messageId) : undefined) || (payload.id ? String(payload.id) : undefined);
           const msgPayload = outEvent === "message" ? {
             event: "message",
             data: {
-              id: payload.id || randomUUID(),
+              id: resolvedId,
+              externalId: resolvedExternalId,
               role: payload.role || "ai",
               content: payload.text || payload.content || "",
               createdAt: payload.sentAt || new Date().toISOString(),
@@ -205,7 +209,13 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             targetRooms.push(`conversation:${payload.conversationId}`);
           }
           if (payload.recipientId) {
-            targetRooms.push(`recipient:${payload.recipientId}`);
+            const rId = String(payload.recipientId);
+            targetRooms.push(`recipient:${rId}`);
+            if (rId.startsWith("cust_")) {
+              targetRooms.push(`recipient:${rId.replace(/^cust_/, "")}`);
+            } else {
+              targetRooms.push(`recipient:cust_${rId}`);
+            }
           }
 
           broadcastToRooms(targetRooms, msgPayload);
@@ -716,6 +726,25 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
     const { identityId, projectId, companyId, channelRef } = ticketData;
     let room = "";
+    const joinedRooms = new Set<string>();
+    const joinRoom = (r: string) => {
+      if (!r) return;
+      joinedRooms.add(r);
+      if (!activeConnections.has(r)) {
+        activeConnections.set(r, new Set());
+      }
+      activeConnections.get(r)!.add(socket);
+    };
+
+    joinRoom(`recipient:${channelRef}`);
+    if (identityId && identityId !== "guest" && identityId !== channelRef) {
+      joinRoom(`recipient:${identityId}`);
+    }
+    if (channelRef.startsWith("cust_")) {
+      joinRoom(`recipient:${channelRef.replace(/^cust_/, "")}`);
+    } else {
+      joinRoom(`recipient:cust_${channelRef}`);
+    }
 
     socket.on("message", async (rawMessage: any) => {
       try {
@@ -738,22 +767,100 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
         // 2. Handle a tapped quick action.
         if (typeof payload.postback === "string") {
-          const resolved = resolvePostback(payload.postback);
+          const postbackVal = payload.postback.trim();
+
+          // Resolve active conversation for this customer session
+          let activeConvId = 0;
+          try {
+            const convCheck = await conversationRepo.findActiveByIdentity(identityId, projectId);
+            if (convCheck?.id) {
+              activeConvId = parseInt(String(convCheck.id), 10);
+            } else {
+              const res = await pool.query(
+                `SELECT id FROM conversations 
+                 WHERE (identity_id::text = $1 OR identity_id IN (SELECT id FROM identities WHERE channel_ref = $2))
+                   AND status = 'open' 
+                 ORDER BY id DESC LIMIT 1`,
+                [identityId, channelRef]
+              );
+              if (res.rows.length > 0) activeConvId = parseInt(String(res.rows[0].id), 10);
+            }
+          } catch {}
+
+          if (activeConvId > 0) {
+            const preResult = await customerMessagePreRouter.route({
+              channel: "webchat",
+              conversationId: activeConvId,
+              text: postbackVal,
+              senderId: channelRef,
+              projectId: projectId ? parseInt(String(projectId), 10) : null,
+            });
+
+            if (preResult.handled) {
+              if (preResult.replyText) {
+                let aiMsgId: number | null = null;
+                try {
+                  const ins = await pool.query(
+                    `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+                     VALUES ($1, 'ai', $2, 'text', 'pre_router', NOW())
+                     RETURNING id`,
+                    [activeConvId, preResult.replyText]
+                  );
+                  aiMsgId = ins.rows[0]?.id ? Number(ins.rows[0].id) : null;
+                } catch (err: any) {
+                  logger.warn({ error: err.message, activeConvId }, "Failed persisting postback reply");
+                }
+
+                const outPayload = {
+                  conversationId: String(activeConvId),
+                  recipientId: channelRef,
+                  channel: "WebChat" as const,
+                  id: aiMsgId ? String(aiMsgId) : randomUUID(),
+                  externalId: aiMsgId ? String(aiMsgId) : undefined,
+                  messageId: aiMsgId ?? undefined,
+                  text: preResult.replyText,
+                  role: "ai" as const,
+                  sentAt: new Date().toISOString(),
+                  actions: preResult.actions,
+                };
+                broadcastWebChatOutbound(outPayload);
+              }
+              return;
+            }
+          }
+
+          const resolved = resolvePostback(postbackVal);
           if (!resolved) {
-            logger.warn({ postback: payload.postback }, "Unknown WebChat postback ignored");
+            logger.warn({ postback: postbackVal }, "Unknown WebChat postback ignored");
             return;
           }
-          socket.send(JSON.stringify({
-            event: "message",
-            data: {
-              id: randomUUID(),
-              role: "ai",
-              content: resolved.text,
-              createdAt: new Date().toISOString(),
-              attachments: [],
-              actions: resolved.actions
-            }
-          }));
+
+          let staticMsgId: number | null = null;
+          if (activeConvId > 0) {
+            try {
+              const ins = await pool.query(
+                `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+                 VALUES ($1, 'ai', $2, 'text', 'pre_router', NOW())
+                 RETURNING id`,
+                [activeConvId, resolved.text]
+              );
+              staticMsgId = ins.rows[0]?.id ? Number(ins.rows[0].id) : null;
+            } catch {}
+          }
+
+          const outPayload = {
+            conversationId: activeConvId > 0 ? String(activeConvId) : undefined,
+            recipientId: channelRef,
+            channel: "WebChat" as const,
+            id: staticMsgId ? String(staticMsgId) : randomUUID(),
+            externalId: staticMsgId ? String(staticMsgId) : undefined,
+            messageId: staticMsgId ?? undefined,
+            text: resolved.text,
+            role: "ai" as const,
+            sentAt: new Date().toISOString(),
+            actions: resolved.actions,
+          };
+          broadcastWebChatOutbound(outPayload);
           return;
         }
 
@@ -809,11 +916,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
         const conversationId = conversation.id;
         room = `conversation:${conversationId}`;
-
-        if (!activeConnections.has(room)) {
-          activeConnections.set(room, new Set());
-        }
-        activeConnections.get(room)!.add(socket);
+        joinRoom(room);
 
         // Project join code.
         //
@@ -1191,6 +1294,59 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           return;
         }
 
+        // 6.5 Deterministic Pre-Router: small talk, menu, ticket status lookup, confirmations
+        const preResult = await customerMessagePreRouter.route({
+          channel: "webchat",
+          conversationId: parseInt(String(conversationId), 10),
+          text: rawText,
+          senderId: channelRef,
+          projectId: parseInt(convProjectId, 10) || null,
+        });
+
+        if (preResult.handled) {
+          logger.info(
+            { conversationId, reason: preResult.reason },
+            "[WebChatGateway] Inbound message handled deterministically at edge; skipping AI flow"
+          );
+          if (preResult.replyText) {
+            let aiMsgId: number | null = null;
+            try {
+              const aiInsertRes = await pool.query(
+                `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+                 VALUES ($1, 'ai', $2, 'text', 'pre_router', NOW())
+                 RETURNING id`,
+                [conversationId, preResult.replyText]
+              );
+              aiMsgId = aiInsertRes.rows[0]?.id ? Number(aiInsertRes.rows[0].id) : null;
+            } catch (aiErr: any) {
+              logger.warn({ error: aiErr.message, conversationId }, "Failed persisting pre-router AI reply");
+            }
+
+            const outPayload = {
+              conversationId: String(conversationId),
+              recipientId: channelRef,
+              channel: "WebChat" as const,
+              id: aiMsgId ? String(aiMsgId) : randomUUID(),
+              externalId: aiMsgId ? String(aiMsgId) : undefined,
+              messageId: aiMsgId ?? undefined,
+              text: preResult.replyText,
+              role: "ai" as const,
+              sentAt: new Date().toISOString(),
+              actions: preResult.actions,
+            };
+
+            broadcastWebChatOutbound(outPayload);
+            try {
+              if (redisSub) {
+                const redisPubClient = createRedisClient("webchat-gateway-preroute-pub", { maxRetriesPerRequest: null });
+                await redisPubClient.publish("webchat:outbound", JSON.stringify(outPayload));
+                await redisPubClient.quit();
+              }
+            } catch {}
+          }
+          return;
+        }
+
         // 7. Normal AI mode: delegate to background queue immediately (maxRetry: 0 to prevent duplicate flow runs)
         const inboundMsg = {
           senderId: channelRef,
@@ -1223,13 +1379,6 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       }
     });
 
-    // Handle initial socket link setup
-    const recipientRoom = `recipient:${channelRef}`;
-    if (!activeConnections.has(recipientRoom)) {
-      activeConnections.set(recipientRoom, new Set());
-    }
-    activeConnections.get(recipientRoom)!.add(socket);
-
     (async () => {
       try {
         let conversation = await conversationRepo.findActiveByIdentity(identityId, projectId);
@@ -1247,10 +1396,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         }
         if (conversation) {
           room = `conversation:${conversation.id}`;
-          if (!activeConnections.has(room)) {
-            activeConnections.set(room, new Set());
-          }
-          activeConnections.get(room)!.add(socket);
+          joinRoom(room);
         }
 
         // Greet with the quick-action menu only when there is nothing to read
@@ -1277,18 +1423,16 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
     })();
 
     socket.on("close", () => {
-      if (activeConnections.has(recipientRoom)) {
-        activeConnections.get(recipientRoom)!.delete(socket);
-        if (activeConnections.get(recipientRoom)!.size === 0) {
-          activeConnections.delete(recipientRoom);
+      for (const r of joinedRooms) {
+        const set = activeConnections.get(r);
+        if (set) {
+          set.delete(socket);
+          if (set.size === 0) {
+            activeConnections.delete(r);
+          }
         }
       }
-      if (room && activeConnections.has(room)) {
-        activeConnections.get(room)!.delete(socket);
-        if (activeConnections.get(room)!.size === 0) {
-          activeConnections.delete(room);
-        }
-      }
+      joinedRooms.clear();
     });
   });
 }
@@ -1398,15 +1542,20 @@ export function broadcastWebChatOutbound(payload: {
   text?: string;
   content?: string;
   id?: string;
+  externalId?: string;
+  messageId?: string | number;
   role?: string;
   sentAt?: string;
   attachments?: any[];
   actions?: any[];
 }) {
+  const resolvedId = payload.id || (payload.messageId ? String(payload.messageId) : undefined) || randomUUID();
+  const resolvedExternalId = payload.externalId || (payload.messageId ? String(payload.messageId) : undefined) || (payload.id ? String(payload.id) : undefined);
   const msgPayload = {
     event: "message",
     data: {
-      id: payload.id || randomUUID(),
+      id: resolvedId,
+      externalId: resolvedExternalId,
       role: payload.role || "ai",
       content: payload.text || payload.content || "",
       createdAt: payload.sentAt || new Date().toISOString(),
@@ -1420,7 +1569,13 @@ export function broadcastWebChatOutbound(payload: {
     targetRooms.push(`conversation:${payload.conversationId}`);
   }
   if (payload.recipientId) {
-    targetRooms.push(`recipient:${payload.recipientId}`);
+    const rId = String(payload.recipientId);
+    targetRooms.push(`recipient:${rId}`);
+    if (rId.startsWith("cust_")) {
+      targetRooms.push(`recipient:${rId.replace(/^cust_/, "")}`);
+    } else {
+      targetRooms.push(`recipient:cust_${rId}`);
+    }
   }
 
   broadcastToRooms(targetRooms, msgPayload);
