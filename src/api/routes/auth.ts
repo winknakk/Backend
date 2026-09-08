@@ -422,77 +422,17 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
    * Customer Sign-in / Verification Ingress
    * POST /api/v1/auth/customer-login
    */
-  fastify.post("/api/v1/auth/customer-login", async (request, reply) => {
-    const parseResult = LoginSchema.safeParse(request.body);
-    if (!parseResult.success) {
-      return reply.status(400).send({ error: "Invalid login payload" });
-    }
-    const { username } = parseResult.data;
-    const cleanUser = username.trim().toLowerCase();
-
-    // This route verifies no password. It reads a profile and mints a 24-hour
-    // portal token, so it is a demo affordance and nothing more — off unless
-    // someone has explicitly asked for it, and refused outright in production
-    // (env.ts fails the boot if the flag is set there).
-    if (!config.ALLOW_DEMO_LOGIN) {
-      logger.warn({ username: cleanUser, ip: request.ip }, "Demo customer login attempted while ALLOW_DEMO_LOGIN is off");
-      return reply.status(401).send({ error: "Invalid customer account" });
-    }
-
-    // Matched on email only. This used to also match `id::text = $1`, and to
-    // fall back to profile 101 for any username containing "win" or
-    // "customer" — so an arbitrary string was enough to be issued somebody
-    // else's token.
-    const profRes = await pool.query(
-      "SELECT id, name, email, phone, company_id FROM profiles WHERE LOWER(email) = $1 LIMIT 1",
-      [cleanUser]
-    );
-
-    const customerProfile = profRes.rows[0];
-    if (!customerProfile) {
-      return reply.status(401).send({ error: "Invalid customer account" });
-    }
-
-    const identity = await resolveIdentityForProfile({
-      profileId: customerProfile.id,
-      channel: CUSTOMER_PROOF_CHANNEL,
-    });
-    if (!identity) {
-      // No WebChat identity for this profile. Synthesising one here used to
-      // hand the handshake a channel_ref it could not find, which made it
-      // create a second profile for the same person.
-      logger.warn(
-        { profileId: customerProfile.id, channel: CUSTOMER_PROOF_CHANNEL },
-        "Customer login refused: profile has no identity on the requested channel"
-      );
-      return reply.status(409).send({
-        error: "Conflict",
-        code: "NO_CHANNEL_IDENTITY",
-        message: "This account has no WebChat identity. It must be provisioned before signing in.",
-      });
-    }
-    const channelRef = identity.channelRef;
-
-    const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
-    const jwtSecret = getWebchatJwtSecret();
-    const proofToken = JwtUtil.sign({
-      kind: "customer",
-      customerId: channelRef,
-      name: customerProfile.name,
-      email: customerProfile.email,
-    }, jwtSecret, 86400);
-
-    return reply.send({
-      success: true,
-      role: "customer",
-      proofToken,
-      customer: {
-        id: customerProfile.id,
-        name: customerProfile.name,
-        email: customerProfile.email,
-      }
-    });
-  });
+  // POST /api/v1/auth/customer-login has been removed (ISSUE-056).
+  //
+  // It parsed a username, never read `password`, looked the address up in
+  // `profiles`, and minted a 24-hour customer proof — so knowing an email was
+  // the whole of the authentication. It was gated on ALLOW_DEMO_LOGIN, but that
+  // gate is only refused at boot when `process.env.NODE_ENV === "production"`,
+  // and this deployment sets no NODE_ENV at all; a production host that
+  // inherited the flag would have run the bypass with the guard silent.
+  // Nothing in the product called the route: no frontend, flow, or ops
+  // reference existed. Deleting it makes email-only sign-in impossible
+  // regardless of how the environment is configured.
 
   // 7. Fallback Local Login
   fastify.post("/api/v1/auth/login", async (request, reply) => {
@@ -512,63 +452,12 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
 
     // Customer accounts, which carry no password.
     //
-    // This branch returned a token without ever consulting `password`. The
-    // condition was a substring test on the username, and the query carried
-    // `OR id::text = '101'`, so it matched whatever was sent: posting
-    // {"username":"customer","password":"anything"} was a valid sign-in to the
-    // customer portal. It is now behind the demo flag, and the profile has to
-    // actually match the address given.
-    if (config.ALLOW_DEMO_LOGIN && cleanUser.includes("customer")) {
-      const profRes = await pool.query(
-        "SELECT id, name, email, phone, company_id FROM profiles WHERE LOWER(email) = $1 LIMIT 1",
-        [cleanUser]
-      );
-      if (profRes.rows.length > 0) {
-        const customerProfile = profRes.rows[0];
-        const identity = await resolveIdentityForProfile({
-          profileId: customerProfile.id,
-          channel: CUSTOMER_PROOF_CHANNEL,
-        });
-        if (!identity) {
-          logger.warn(
-            { profileId: customerProfile.id, channel: CUSTOMER_PROOF_CHANNEL },
-            "Demo customer login refused: profile has no identity on the requested channel"
-          );
-          return reply.status(409).send({
-            error: "Conflict",
-            code: "NO_CHANNEL_IDENTITY",
-            message: "This account has no WebChat identity. It must be provisioned before signing in.",
-          });
-        }
-        const channelRef = identity.channelRef;
-        const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
-        const jwtSecret = getWebchatJwtSecret();
-        const proofToken = JwtUtil.sign({
-          kind: "customer",
-          customerId: channelRef,
-          name: customerProfile.name,
-          email: customerProfile.email,
-        }, jwtSecret, 86400);
-
-        logger.info({ customerId: customerProfile.id, email: customerProfile.email }, "Customer signed in via local login");
-
-        return reply.send({
-          success: true,
-          role: "customer",
-          token: proofToken,
-          proofToken,
-          expiresAt: Date.now() + 86400 * 1000,
-          user: {
-            username: customerProfile.email,
-            email: customerProfile.email,
-            name: customerProfile.name,
-            role: "customer",
-            orgId: "org_avalant",
-            projectIds: [1],
-          }
-        });
-      }
-    }
+    // The password-free demo branch that used to sit here is removed
+    // (ISSUE-056). It ran before findOperatorByEmail and before any password
+    // check: `config.ALLOW_DEMO_LOGIN && cleanUser.includes("customer")` was
+    // enough to be handed a 24-hour customer proof for whatever profile shared
+    // that email address. Authentication now always continues to the operator
+    // lookup and the password verification below.
 
     const operator = await principalResolver.findOperatorByEmail(username);
     if (!operator) {
