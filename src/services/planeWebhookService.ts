@@ -78,8 +78,6 @@ function canonicalStatusName(name: string): string {
     triage: "Triaged",
     started: "In Progress",
     "in progress": "In Progress",
-    "appsup test": "In Progress",
-    "internal test": "In Progress",
     "test failed": "Test Failed",
     "testing failed": "Test Failed",
     "waiting for customer": "Waiting for Customer",
@@ -88,8 +86,6 @@ function canonicalStatusName(name: string): string {
     "delivery to customer": "Delivery to Customer",
     "delivered to customer": "Delivery to Customer",
     delivered: "Delivery to Customer",
-    "customer test": "Delivery to Customer",
-    "customer uat": "Delivery to Customer",
     "re open": "Re-Open",
     reopen: "Re-Open",
     reopened: "Re-Open",
@@ -365,6 +361,15 @@ export class PlaneWebhookService {
       });
     }
 
+    // Engineering reopened a case the customer had already confirmed/closed
+    // (Plane "Re-Open"): tell the customer (operator decision 2026-09-08),
+    // without chips — nothing is asked of them yet.
+    if (lifecycleResult?.applied && lifecycleResult.notify === "reopened" && lifecycleResult.ticketId) {
+      void this.dispatchReopenedByTeamNotification(planeIssueId, lifecycleResult.ticketId, lifecycleResult.eventId ?? null).catch((err) => {
+        logger.error({ error: err.message, planeIssueId }, "Failed to dispatch reopened-by-team notification");
+      });
+    }
+
     return {
       processed: true,
       matched: syncResult.matched,
@@ -408,6 +413,28 @@ export class PlaneWebhookService {
       projectId: ticket.project_id ?? null,
       orgId: ticket.org_id ?? null,
       correlationId: planeIssueId,
+    });
+  }
+
+  private async dispatchReopenedByTeamNotification(planeIssueId: string, ticketId: number, eventId: number | null): Promise<void> {
+    const { rows } = await pool.query(
+      `SELECT t.id, t.ticket_number, t.subject, t.conversation_id, t.project_id, t.org_id
+         FROM tickets t WHERE t.id = $1 LIMIT 1`,
+      [ticketId]
+    );
+    if (rows.length === 0 || !rows[0].conversation_id) return;
+    const ticket = rows[0];
+    await customerNotificationService.send({
+      conversationId: Number(ticket.conversation_id),
+      notificationType: "reopened_by_team",
+      idempotencyKey: eventId ? `ticket_event:${eventId}` : `ticket:${ticketId}:reopened_by_team`,
+      ticketId: Number(ticket.id),
+      ticketNumber: ticket.ticket_number,
+      subject: ticket.subject ?? null,
+      projectId: ticket.project_id ?? null,
+      orgId: ticket.org_id ?? null,
+      correlationId: planeIssueId,
+      quickReplies: [],
     });
   }
 

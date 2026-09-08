@@ -1306,6 +1306,29 @@ export class PlaneService {
     };
   }
 
+  /**
+   * Posts the customer's re-open feedback as a Plane comment on the linked
+   * work item. Returns false (never throws) when the ticket is not linked or
+   * Plane refuses — feedback is already persisted on the ticket by then.
+   */
+  async addCustomerFeedbackComment(ticketId: string | number, text: string, meta: { ticketNumber?: string | null; reopenedCount?: number | null } = {}): Promise<boolean> {
+    try {
+      const { ticket } = await this.dbAdapter.getTicketCompanyContext(String(ticketId));
+      if (!ticket) return false;
+      const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+      if (!planeIssueId || String(planeIssueId).startsWith("mock-")) return false;
+      const projectConfig = await this.getProjectConfigForTicket(ticket);
+      const resolvedId = await this.resolvePlaneWorkItemId(String(ticketId), String(planeIssueId));
+      const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+      const header = `👤 Customer feedback (Re-Open${meta.reopenedCount ? ` #${meta.reopenedCount}` : ""}${meta.ticketNumber ? ` · ${meta.ticketNumber}` : ""})`;
+      await this.apiClient.addWorkItemComment(projectConfig, resolvedId, `<p><strong>${esc(header)}</strong></p><p>${esc(text)}</p>`);
+      return true;
+    } catch (err: any) {
+      console.warn(`[PlaneService] Could not add customer feedback comment for ticket ${ticketId}: ${err?.message}`);
+      return false;
+    }
+  }
+
   async syncTicketStatusToPlane(ticketId: string, status: string): Promise<PlaneTicketReopenResult> {
     const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
     if (!ticket) throw new Error(`Ticket not found: ${ticketId}`);
@@ -1357,28 +1380,4 @@ export class PlaneService {
     };
   }
 
-  async appendCustomerFeedbackToPlane(ticketId: string, feedback: string): Promise<boolean> {
-    try {
-      const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
-      if (!ticket) return false;
-      const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
-      if (!planeIssueId || String(planeIssueId).startsWith("mock-")) return false;
-
-      const projectConfig = await this.getProjectConfigForTicket(ticket);
-      const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
-      const issue = await this.apiClient.getWorkItem(projectConfig, resolvedPlaneIssueId).catch(() => null);
-      const existingHtml = (issue as any)?.description_html || "";
-      const feedbackHtml = `\n<hr/><h3>⚠️ Customer Re-Open Feedback</h3><p>${escapePlaneHtml(feedback)}</p><p><em>Reported via LINE OA at ${new Date().toISOString()}</em></p>`;
-
-      await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, {
-        description_html: `${existingHtml}${feedbackHtml}`,
-      });
-      return true;
-    } catch (err: any) {
-      console.warn("[PlaneService] Could not append customer feedback to Plane work item:", err?.message);
-      return false;
-    }
-  }
-
 }
-

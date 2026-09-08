@@ -281,6 +281,26 @@ export class PlaneApiClient {
    * Copies customer evidence into Plane-owned storage. This deliberately does
    * not expose TicketX's short-lived signed media URLs in the work item.
    */
+  /**
+   * Adds a comment to a work item (re-open path: the customer's feedback
+   * lands where the engineer reads it). Endpoint shape follows the
+   * attachments call: `/issues/{id}/comments/` first, `/work-items/` second.
+   */
+  async addWorkItemComment(projectConfig: PlaneProjectConfig, workItemId: string, commentHtml: string): Promise<{ id?: string }> {
+    const projectBase = this.getProjectBaseUrl(projectConfig);
+    const encodedId = encodeURIComponent(workItemId);
+    const headers = { ...this.getHeaders(projectConfig), "Content-Type": "application/json" };
+    const body = { comment_html: commentHtml };
+    try {
+      const res = await this.httpClient.post(`${projectBase}/issues/${encodedId}/comments/`, body, { headers, timeout: 10_000 });
+      return { id: res.data?.id };
+    } catch (err: any) {
+      if (err?.response?.status !== 404) throw err;
+      const res = await this.httpClient.post(`${projectBase}/work-items/${encodedId}/comments/`, body, { headers, timeout: 10_000 });
+      return { id: res.data?.id };
+    }
+  }
+
   async uploadWorkItemAttachment(
     projectConfig: PlaneProjectConfig,
     workItemId: string,

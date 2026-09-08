@@ -253,56 +253,6 @@ const lineProjectOnboardingService = new LineProjectOnboardingService(
   config.LINE_ONBOARDING_MODE
 );
 
-/**
- * The one place a `takeover_started` event is put on the wire.
- *
- * Lifted verbatim out of requestHumanTakeover so the admin console can emit the
- * same event without inheriting the rest of that function. Admin takeover set
- * the lease and returned 200 while publishing nothing at all, so a customer was
- * never told an operator had joined (ISSUE-064); a live Redis subscriber saw
- * zero messages across a takeover and its release.
- *
- * Reusing requestHumanTakeover wholesale was the wrong shape: it transitions to
- * PENDING_HUMAN ("a human has been asked for"), while the admin route means
- * ACTIVE_HUMAN ("an operator has taken this") and has a response contract to
- * keep. The transition differs between the two callers; only the event is
- * shared, so only the event was extracted. `state` is therefore a parameter.
- *
- * The payload shape is unchanged, including the fields duplicated at both the
- * top level and inside `data` — the frontend normaliser reads `data.status`
- * first and other consumers read the top level, and this is not the change to
- * start pruning that.
- */
-async function publishTakeoverStarted(input: {
-  conversationId: string;
-  state: "PENDING_HUMAN" | "ACTIVE_HUMAN";
-  reasonCode?: string;
-  recipientId?: string;
-}): Promise<void> {
-  const { conversationId, state, reasonCode, recipientId } = input;
-  await publishOutbound(
-    "webchat:outbound",
-    JSON.stringify({
-      conversationId,
-      recipientId: recipientId || undefined,
-      channel: "WebChat",
-      event: "takeover_started",
-      data: {
-        conversation_id: String(conversationId),
-        conversationId: String(conversationId),
-        state,
-        status: state,
-        reason: reasonCode || "ai_escalation",
-        reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN"
-      },
-      status: state,
-      state,
-      reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
-      sentAt: new Date().toISOString()
-    })
-  );
-}
-
 async function requestHumanTakeover(input: {
   conversationId: string;
   role?: string;
@@ -421,7 +371,27 @@ async function requestHumanTakeover(input: {
       }
     }
 
-    await publishTakeoverStarted({ conversationId, state: "PENDING_HUMAN", reasonCode, recipientId });
+    await publishOutbound(
+      "webchat:outbound",
+      JSON.stringify({
+        conversationId,
+        recipientId: recipientId || undefined,
+        channel: "WebChat",
+        event: "takeover_started",
+        data: {
+          conversation_id: String(conversationId),
+          conversationId: String(conversationId),
+          state: "PENDING_HUMAN",
+          status: "PENDING_HUMAN",
+          reason: reasonCode || "ai_escalation",
+          reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN"
+        },
+        status: "PENDING_HUMAN",
+        state: "PENDING_HUMAN",
+        reasonCode: reasonCode || "CUSTOMER_REQUESTED_HUMAN",
+        sentAt: new Date().toISOString()
+      })
+    );
 
     // Legacy AgentX/MCP flows may dispatch SMS themselves after the internal
     // takeover call. The direct Main AI human-notify path owns backend SMS.
@@ -3214,9 +3184,6 @@ registerAdminRoutes(fastify, {
   trafficSplitter,
   dbAdapter,
   takeoverManager,
-  // So the admin console emits the same canonical event the internal takeover
-  // path does, through the same publishOutbound instance (ISSUE-064).
-  publishTakeoverStarted,
 });
 
 // Register WebChat Gateway and WebSockets

@@ -32,7 +32,15 @@ export type CustomerNotificationType =
   | "close_no_open_case"
   | "close_which_case"
   | "resolution_nudge"
-  | "auto_closed";
+  | "auto_closed"
+  // Re-open path (2026-09-08).
+  | "reopen_which_kind"
+  | "reopen_feedback_saved"
+  | "reopen_new_issue_prompt"
+  | "reopened_by_team"
+  | "reopen_too_old"
+  | "reopen_confirmation_request"
+  | "reopen_escalated";
 
 /** LINE quick-reply chip (message action): the tap sends `text` as the customer. */
 export interface NotificationQuickReply {
@@ -205,6 +213,49 @@ export class CustomerNotificationService {
     "เปิดเคส {ticket} ขึ้นมาตรวจสอบอีกครั้งแล้วค่ะ ทีมงานกำลังดูให้อยู่นะคะ ขอบคุณที่แจ้งค่ะ",
   ] as const;
 
+  /** Appended to the re-open line: the next message / screenshot goes to the engineer. */
+  private static readonly REOPEN_ASK_VARIANTS = [
+    "รบกวนบอกอาการที่ยังเจอ หรือส่งรูปหน้าจอมาได้เลยนะคะ แอดมินจะแนบให้ทีมงานทันทีค่ะ",
+    "ถ้าสะดวก ช่วยเล่าอาการที่ยังติดอยู่ หรือส่งรูปมาได้เลยค่ะ จะส่งต่อให้ทีมงานดูทันทีนะคะ",
+  ] as const;
+
+  /** "ใช้ได้แล้ว แต่…" — ask before touching any case. */
+  private static readonly REOPEN_WHICH_KIND_VARIANTS = [
+    "ขอถามให้ชัดก่อนนะคะ เป็นอาการเดิมของเคส {ticket}{about} ที่ยังไม่หาย หรือเป็นปัญหาใหม่คนละเรื่องคะ แตะเลือกข้างล่างนี้ได้เลยค่ะ",
+    "เพื่อให้ส่งต่อถูกที่ ขอเช็คนิดนึงค่ะ ยังเป็นอาการเดิมของเคส {ticket}{about} หรือเป็นปัญหาใหม่คะ แตะเลือกได้เลยค่ะ",
+  ] as const;
+
+  private static readonly REOPEN_FEEDBACK_SAVED_VARIANTS = [
+    "แนบรายละเอียดให้ทีมงานในเคส {ticket} แล้วนะคะ ขอบคุณค่ะ มีอะไรเพิ่มส่งมาได้อีกเลย",
+    "รับไว้แล้วค่ะ ส่งต่อให้ทีมงานในเคส {ticket} เรียบร้อยนะคะ",
+  ] as const;
+
+  private static readonly REOPEN_NEW_ISSUE_PROMPT_VARIANTS = [
+    "รับทราบค่ะ เคส {ticket} ยังเปิดรอไว้เหมือนเดิมนะคะ ส่วนปัญหาใหม่ เล่าอาการมาได้เลยค่ะ แอดมินจะเปิดเคสใหม่ให้",
+    "โอเคค่ะ ถ้าเป็นคนละเรื่อง แอดมินจะเปิดเป็นเคสใหม่ให้นะคะ เล่าอาการที่เจอมาได้เลยค่ะ เคส {ticket} ยังอยู่เหมือนเดิม",
+  ] as const;
+
+  /** Engineering set Re-Open in Plane on a case the customer already confirmed. */
+  private static readonly REOPENED_BY_TEAM_VARIANTS = [
+    "ทีมงานขอเปิดเคส {ticket}{about} เพื่อตรวจสอบเพิ่มเติมนะคะ มีความคืบหน้าจะรีบแจ้งค่ะ",
+    "แจ้งให้ทราบค่ะ เคส {ticket}{about} ทีมงานขอเปิดกลับมาดูอีกครั้งนะคะ เรียบร้อยเมื่อไหร่แอดมินจะแจ้งค่ะ",
+    "เคส {ticket}{about} ทีมงานขอตรวจสอบเพิ่มเติมอีกหน่อยนะคะ ระหว่างนี้ถ้ามีข้อมูลเพิ่มส่งมาได้เลยค่ะ",
+  ] as const;
+
+  private static readonly REOPEN_TOO_OLD_VARIANTS = [
+    "เคส {ticket} ปิดไปเกิน {days} วันแล้วค่ะ แอดมินขอเปิดเป็นเคสใหม่ให้นะคะ เล่าอาการที่เจอตอนนี้มาได้เลยค่ะ",
+    "เคส {ticket} ปิดไปนานเกิน {days} วันแล้วนะคะ เพื่อให้ทีมงานติดตามได้ถูกต้อง แอดมินจะเปิดเคสใหม่ให้ค่ะ บอกอาการที่เจอมาได้เลย",
+  ] as const;
+
+  private static readonly REOPEN_QUESTION_VARIANTS = [
+    "ต้องการเปิดเคส {ticket}{about} อีกครั้งใช่ไหมคะ แตะ 'เปิดเคสอีกครั้ง' ได้เลยค่ะ",
+    "ขอยืนยันก่อนนะคะ จะเปิดเคส {ticket}{about} กลับมาให้ทีมงานดูอีกครั้งใช่ไหมคะ แตะ 'เปิดเคสอีกครั้ง' ได้เลยค่ะ",
+  ] as const;
+
+  private static readonly REOPEN_ESCALATED_VARIANTS = [
+    "เคส {ticket} กลับมามีปัญหาหลายรอบแล้ว แอดมินส่งให้เจ้าหน้าที่ดูแลโดยตรงนะคะ จะติดต่อกลับโดยเร็วค่ะ ขออภัยในความไม่สะดวกค่ะ",
+  ] as const;
+
   /** "ยังไม่ปิด" — leave the case waiting, without nagging. */
   private static readonly CLOSE_DECLINED_VARIANTS = [
     "โอเคค่ะ ยังไม่ปิดเคส {ticket} นะคะ ลองใช้งานให้แน่ใจก่อนได้เลย พร้อมเมื่อไหร่ค่อยแจ้งแอดมินค่ะ",
@@ -322,7 +373,24 @@ export class CustomerNotificationService {
       case "closed":
         return this.fill(CustomerNotificationService.CLOSED_VARIANTS, seed, ticketNumber, null);
       case "reopened":
-        return this.fill(CustomerNotificationService.REOPENED_VARIANTS, seed, ticketNumber, null);
+        // detail = "" suppresses the ask (a re-open that already carried the symptoms).
+        return `${this.fill(CustomerNotificationService.REOPENED_VARIANTS, seed, ticketNumber, null)}${
+          detail === "" ? "" : ` ${CustomerNotificationService.pickVariant(CustomerNotificationService.REOPEN_ASK_VARIANTS, `${seed}:ask`)}`
+        }`;
+      case "reopen_which_kind":
+        return this.fill(CustomerNotificationService.REOPEN_WHICH_KIND_VARIANTS, seed, ticketNumber, subject);
+      case "reopen_feedback_saved":
+        return this.fill(CustomerNotificationService.REOPEN_FEEDBACK_SAVED_VARIANTS, seed, ticketNumber, null);
+      case "reopen_new_issue_prompt":
+        return this.fill(CustomerNotificationService.REOPEN_NEW_ISSUE_PROMPT_VARIANTS, seed, ticketNumber, null);
+      case "reopened_by_team":
+        return this.fill(CustomerNotificationService.REOPENED_BY_TEAM_VARIANTS, seed, ticketNumber, subject);
+      case "reopen_too_old":
+        return this.fill(CustomerNotificationService.REOPEN_TOO_OLD_VARIANTS, seed, ticketNumber, null).replace("{days}", String(detail || "7"));
+      case "reopen_confirmation_request":
+        return this.fill(CustomerNotificationService.REOPEN_QUESTION_VARIANTS, seed, ticketNumber, subject);
+      case "reopen_escalated":
+        return this.fill(CustomerNotificationService.REOPEN_ESCALATED_VARIANTS, seed, ticketNumber, null);
       case "close_declined":
         return this.fill(CustomerNotificationService.CLOSE_DECLINED_VARIANTS, seed, ticketNumber, null);
       case "close_no_open_case":
@@ -365,17 +433,59 @@ export class CustomerNotificationService {
       case "resolution_confirmation":
       case "resolution_nudge":
         return [
-          { label: "🟢 ผ่าน / ปิดเคส", text: `ใช้งานได้แล้ว${n}` },
-          { label: "🔴 ไม่ผ่าน / มีปัญหา", text: `ยังมีปัญหาอยู่${n}` },
+          { label: "ใช้งานได้แล้ว", text: `ใช้งานได้แล้ว${n}` },
+          { label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
         ];
       case "close_confirmation_request":
         return [
-          { label: "🟢 ยืนยันปิดเคส", text: `ยืนยันปิดเคส${n}` },
-          { label: "⏳ ยังไม่ปิด", text: "ยังไม่ปิด" },
-          { label: "🔴 ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
+          { label: "ยืนยันปิดเคส", text: `ยืนยันปิดเคส${n}` },
+          { label: "ยังไม่ปิด", text: "ยังไม่ปิด" },
+          { label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
+        ];
+      case "reopen_which_kind":
+        return [
+          { label: "อาการเดิมยังไม่หาย", text: `อาการเดิมยังไม่หาย${n}` },
+          { label: "เป็นปัญหาใหม่", text: "เป็นปัญหาใหม่" },
+          { label: "ใช้งานได้แล้ว", text: `ใช้งานได้แล้ว${n}` },
+        ];
+      case "reopen_confirmation_request":
+        return [
+          // Label ≤ 20 chars (LINE limit); the sent text keeps the full confirmation phrase.
+          { label: "เปิดเคสอีกครั้ง", text: `ยืนยันเปิดเคสอีกครั้ง${n}` },
+          { label: "ยกเลิก", text: "ยกเลิก" },
         ];
       default:
         return [];
+    }
+  }
+
+  /**
+   * Chips of the newest still-open question in this conversation: the
+   * delivery message (ticket RESOLVED) or the close question (ticket
+   * CUSTOMER_CONFIRMED), asked within the last 24 hours. Empty when the
+   * customer owes nothing.
+   */
+  private async pendingQuestionChips(conversationId: number, ticketId: number): Promise<NotificationQuickReply[]> {
+    try {
+      const { rows } = await pool.query<{ notification_type: CustomerNotificationType; ticket_number: string | null; status: string }>(
+        `SELECT n.notification_type, t.ticket_number, UPPER(t.status) AS status
+           FROM customer_notifications n
+           JOIN tickets t ON t.id = n.ticket_id
+          WHERE n.conversation_id = $1
+            AND n.ticket_id = $2
+            AND n.notification_type IN ('resolution_confirmation', 'resolution_nudge', 'close_confirmation_request')
+            AND n.created_at >= NOW() - INTERVAL '24 hours'
+            AND t.deleted_at IS NULL
+            AND UPPER(t.status) IN ('RESOLVED', 'CUSTOMER_CONFIRMED')
+          ORDER BY n.id DESC LIMIT 1`,
+        [conversationId, ticketId]
+      );
+      const row = rows[0];
+      if (!row) return [];
+      const type: CustomerNotificationType = row.status === "CUSTOMER_CONFIRMED" ? "close_confirmation_request" : "resolution_confirmation";
+      return CustomerNotificationService.defaultQuickReplies(type, row.ticket_number);
+    } catch {
+      return [];
     }
   }
 
@@ -580,10 +690,26 @@ export class CustomerNotificationService {
       return { sent: false, duplicate: true, reason: "ALREADY_SENT", body };
     }
 
-    const quickReplies =
+    let quickReplies =
       req.quickReplies === undefined || req.quickReplies === null
         ? CustomerNotificationService.defaultQuickReplies(req.notificationType, req.ticketNumber)
         : req.quickReplies;
+    // Sticky chips. LINE shows quick replies on the newest bubble only, so an
+    // acknowledgement or an SLA progress line pushed while the customer still
+    // owes an answer would wipe the buttons. Re-attach the pending question's
+    // chips to any message that carries none of its own.
+    // Only on messages that are about that same case (SLA progress line,
+    // reminder). Attaching them to the acknowledgement of a NEW report read as
+    // "did the fix work?" on a problem that was just filed (seen live
+    // 2026-09-08, Error 909 report).
+    if (
+      quickReplies.length === 0 &&
+      (req.quickReplies === undefined || req.quickReplies === null) &&
+      (req.notificationType === "progress_update" || req.notificationType === "resolution_nudge") &&
+      req.ticketId
+    ) {
+      quickReplies = await this.pendingQuestionChips(req.conversationId, Number(req.ticketId));
+    }
 
     let insertedMsgId: number | null = null;
     try {

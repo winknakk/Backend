@@ -20,24 +20,19 @@ export type ConfirmationIntent = "CONFIRMED" | "REJECTED" | "NONE";
  * rejection as a confirmation.
  */
 const REJECTION_MARKERS = [
+  // Ambiguity-question chip (two-step close, re-open path).
+  "อาการเดิมยังไม่หาย",
+  "อาการเดิม",
   "ยังไม่ได้",
   "ยังใช้ไม่ได้",
   "ยังใช้งานไม่ได้",
   "ไม่ได้อยู่",
   "ยังมีปัญหา",
   "ยังเหมือนเดิม",
-  "เหมือนเดิม",
-  "ไม่ได้เหมือนเดิม",
-  "ยังกดไม่ได้",
-  "กดไม่ได้",
   "ยังพัง",
   "ยังไม่หาย",
   "ยังเข้าไม่ได้",
   "ไม่หาย",
-  "ไม่ผ่าน",
-  "ยังไม่ผ่าน",
-  "เทสไม่ผ่าน",
-  "ทดสอบไม่ผ่าน",
   "still not",
   "still broken",
   "still failing",
@@ -47,8 +42,6 @@ const REJECTION_MARKERS = [
   "not fixed",
   "same problem",
   "same issue",
-  "fail",
-  "failed",
 ];
 
 const CONFIRMATION_MARKERS = [
@@ -60,13 +53,6 @@ const CONFIRMATION_MARKERS = [
   "หายแล้ว",
   "ปกติแล้ว",
   "เข้าได้แล้ว",
-  "ผ่าน",
-  "ผ่านแล้ว",
-  "ผ่านค่ะ",
-  "ผ่านครับ",
-  "ทดสอบผ่าน",
-  "เทสผ่าน",
-  "ok ผ่าน",
   "ปิดเคสได้",
   "ปิดเคสได้เลย",
   "ขอบคุณครับ ปิดเคส",
@@ -76,8 +62,6 @@ const CONFIRMATION_MARKERS = [
   "resolved",
   "fixed now",
   "all good",
-  "pass",
-  "passed",
   "you can close",
   "close the case",
   "close it",
@@ -99,39 +83,6 @@ export function detectConfirmationIntent(text: string): ConfirmationIntent {
   if (CONFIRMATION_MARKERS.some((m) => t.includes(normalize(m)))) return "CONFIRMED";
 
   return "NONE";
-}
-
-export type FailureScope = "SAME_BUG" | "NEW_BUG";
-
-/**
- * Distinguishes whether a customer's rejection relates to the original issue
- * (same bug) or introduces an entirely new symptom/feature out of scope (new bug).
- */
-export function evaluateFailureScope(text: string, subject?: string | null): FailureScope {
-  const t = normalize(text);
-
-  const newBugIndicators = [
-    "อันเดิมหายแล้วแต่",
-    "จุดเดิมได้แล้วแต่",
-    "แต่เจออีกจุด",
-    "แต่มีปัญหาใหม่",
-    "แต่พบปัญหาใหม่",
-    "อีกหน้า",
-    "หน้าอื่น",
-    "ฟังก์ชันอื่น",
-    "เมนูอื่น",
-    "คนละเรื่อง",
-    "new issue",
-    "another bug",
-    "different issue",
-    "different error",
-  ];
-
-  if (newBugIndicators.some((indicator) => t.includes(indicator))) {
-    return "NEW_BUG";
-  }
-
-  return "SAME_BUG";
 }
 
 // ---------------------------------------------------------------------------
@@ -182,15 +133,69 @@ const CONFIRM_CLOSE_RE = new RegExp(
 
 /** A short affirmative that only means "close it" when the close question was just asked. */
 const BARE_YES_RE = new RegExp(
-  `^\\s*(?:ยืนยัน|ใช่|ใช่เลย|ใช่ค่ะ|ใช่ครับ|ปิดเลย|ปิดได้เลย|ปิดได้|ปิดเคสได้เลย|ปิดเคสเลย|ผ่าน|ผ่านแล้ว|ผ่านค่ะ|ผ่านครับ|ตกลง|โอเค|ok|okay|yes|confirm|ได้เลย|ได้|เอาเลย|จัดไป|👍|✅)${TAIL}$`,
+  `^\\s*(?:ยืนยัน|ใช่|ใช่เลย|ใช่ค่ะ|ใช่ครับ|ปิดเลย|ปิดได้เลย|ปิดได้|ปิดเคสได้เลย|ปิดเคสเลย|ตกลง|โอเค|ok|okay|yes|confirm|ได้เลย|ได้|เอาเลย|จัดไป|👍|✅)${TAIL}$`,
   "i"
 );
 
 /** A refusal to close, meaningful only while the close question is pending. */
 const DECLINE_CLOSE_RE = new RegExp(
-  `^\\s*(?:ยังไม่ปิด|ยังไม่ต้องปิด|อย่าเพิ่งปิด|ไม่ปิด|ไม่ต้องปิด|ยังก่อน|ยังไม่|ยัง|เดี๋ยวก่อน|รอก่อน|รอแป๊บ|ขอเช็คก่อน|ขอลองก่อน|ขอดูก่อน|ขอทดสอบก่อน|ไม่ผ่าน|ยังไม่ผ่าน|ยกเลิก|ไม่ใช่|ไม่|cancel|not\\s+yet|no|nope|❌)${TAIL}$`,
+  `^\\s*(?:ยังไม่ปิด|ยังไม่ต้องปิด|อย่าเพิ่งปิด|ไม่ปิด|ไม่ต้องปิด|ยังก่อน|ยังไม่|ยัง|เดี๋ยวก่อน|รอก่อน|รอแป๊บ|ขอเช็คก่อน|ขอลองก่อน|ขอดูก่อน|ขอทดสอบก่อน|ยกเลิก|ไม่ใช่|ไม่|cancel|not\\s+yet|no|nope|❌)${TAIL}$`,
   "i"
 );
+
+// ---------------------------------------------------------------------------
+// Re-open path (operator decisions 2026-09-08)
+// ---------------------------------------------------------------------------
+
+/** "Another / new / different problem" — mirrors NEW_ISSUE_NET in the AI gate. */
+export const NEW_ISSUE_PATTERN =
+  /(?:มี)?อีก\s*(?:ปัญหา|เรื่อง|อัน|เคส|อย่าง)|เรื่องใหม่|ปัญหาใหม่|เคสใหม่|คนละเรื่อง|คนละปัญหา|คนละเคส|ไม่เกี่ยวกับเคส|นอกจากนี้|อีกระบบ|another (?:issue|problem|case)|new (?:issue|problem|case)|separate (?:issue|case)/i;
+
+export type ReopenScope =
+  /** The delivered fix did not work: same case, re-open it. */
+  | "SAME"
+  /** A different problem: leave the case alone, file a new one. */
+  | "NEW"
+  /** Both signals at once ("ใช้ได้แล้ว แต่…"): ask which. */
+  | "AMBIGUOUS"
+  | "NONE";
+
+/**
+ * What a negative-sounding answer to the delivery message is about.
+ *
+ * Deterministic tiers, no model: the chips decide outright, explicit
+ * new-issue wording wins over rejection words, and a message that praises
+ * the fix while complaining about something else is asked about rather than
+ * guessed. "อันเดิมใช้ได้แล้ว แต่หน้ารายงานจอขาว" used to read as CONFIRMED
+ * because of "ใช้ได้แล้ว".
+ */
+export function detectReopenScope(text: string): ReopenScope {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  const t = normalize(raw);
+  if (!t) return "NONE";
+  if (/^อาการเดิม/.test(raw) || t.includes("อาการเดิมยังไม่หาย")) return "SAME";
+  if (/^เป็นปัญหาใหม่/.test(raw)) return "NEW";
+  const hasNew = NEW_ISSUE_PATTERN.test(raw);
+  const hasReject = REJECTION_MARKERS.some((m) => t.includes(normalize(m)));
+  const hasConfirm = CONFIRMATION_MARKERS.some((m) => t.includes(normalize(m)));
+  if (hasNew) return "NEW";
+  if (hasConfirm && hasReject) return "AMBIGUOUS";
+  if (hasConfirm && /แต่|ส่วน|ทว่า|ยกเว้น|however|but /i.test(raw)) return "AMBIGUOUS";
+  if (hasReject) return "SAME";
+  return "NONE";
+}
+
+/** Explicit re-open confirmation chip: "ยืนยันเปิดเคสอีกครั้ง TCK-…". */
+const CONFIRM_REOPEN_RE = new RegExp(
+  `^\\s*(?:ยืนยัน\\s*เปิดเคส(?:อีกครั้ง|ใหม่|ซ้ำ)?|confirm\\s+reopen)${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  "i"
+);
+
+export function detectReopenConfirmation(text: string): { confirmed: boolean; ticketNumber: string | null } {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  const num = raw.match(TICKET_NUMBER_PATTERN);
+  return { confirmed: CONFIRM_REOPEN_RE.test(raw), ticketNumber: num ? num[0].toUpperCase() : null };
+}
 
 /**
  * Classifies a message against the close-confirmation protocol.
