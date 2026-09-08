@@ -1357,4 +1357,28 @@ export class PlaneService {
     };
   }
 
+  async appendCustomerFeedbackToPlane(ticketId: string, feedback: string): Promise<boolean> {
+    try {
+      const { ticket } = await this.dbAdapter.getTicketCompanyContext(ticketId);
+      if (!ticket) return false;
+      const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+      if (!planeIssueId || String(planeIssueId).startsWith("mock-")) return false;
+
+      const projectConfig = await this.getProjectConfigForTicket(ticket);
+      const resolvedPlaneIssueId = await this.resolvePlaneWorkItemId(ticketId, String(planeIssueId));
+      const issue = await this.apiClient.getWorkItem(projectConfig, resolvedPlaneIssueId).catch(() => null);
+      const existingHtml = (issue as any)?.description_html || "";
+      const feedbackHtml = `\n<hr/><h3>⚠️ Customer Re-Open Feedback</h3><p>${escapePlaneHtml(feedback)}</p><p><em>Reported via LINE OA at ${new Date().toISOString()}</em></p>`;
+
+      await this.apiClient.patchWorkItem(projectConfig, resolvedPlaneIssueId, {
+        description_html: `${existingHtml}${feedbackHtml}`,
+      });
+      return true;
+    } catch (err: any) {
+      console.warn("[PlaneService] Could not append customer feedback to Plane work item:", err?.message);
+      return false;
+    }
+  }
+
 }
+

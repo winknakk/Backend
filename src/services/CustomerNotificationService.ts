@@ -362,14 +362,14 @@ export class CustomerNotificationService {
       case "resolution_confirmation":
       case "resolution_nudge":
         return [
-          { label: "ใช้งานได้แล้ว", text: `ใช้งานได้แล้ว${n}` },
-          { label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
+          { label: "🟢 ผ่าน / ปิดเคส", text: `ใช้งานได้แล้ว${n}` },
+          { label: "🔴 ไม่ผ่าน / มีปัญหา", text: `ยังมีปัญหาอยู่${n}` },
         ];
       case "close_confirmation_request":
         return [
-          { label: "ยืนยันปิดเคส", text: `ยืนยันปิดเคส${n}` },
-          { label: "ยังไม่ปิด", text: "ยังไม่ปิด" },
-          { label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
+          { label: "🟢 ยืนยันปิดเคส", text: `ยืนยันปิดเคส${n}` },
+          { label: "⏳ ยังไม่ปิด", text: "ยังไม่ปิด" },
+          { label: "🔴 ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
         ];
       default:
         return [];

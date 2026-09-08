@@ -58,11 +58,15 @@ export const EnvSchema = z.object({
   // migrated with the evidence visible. Set to true once the live flow node
   // sends the header.
   STRICT_WEBHOOK_AUTH: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
-  // Opt-in for the demo customer accounts, which sign in with no password at
-  // all. Two routes used to do this unconditionally — any username containing
-  // "customer" was issued a real 24-hour portal token — so the capability is
-  // kept, but only where someone has deliberately asked for it. Production
-  // refuses it regardless of this flag; see validateEnv below.
+  // Vestigial. The two password-free customer login paths this enabled are
+  // GONE (ISSUE-056): `/api/v1/auth/customer-login` was deleted and the demo
+  // branch inside `/api/v1/auth/login` was removed, so no code reads this flag
+  // to grant anything any more.
+  //
+  // The variable is kept for two reasons: existing `.env` files still set it
+  // and must continue to parse, and the production boot guard below stays as
+  // defence in depth for anyone who sets it on a production host. Setting it
+  // true now enables nothing and is warned about at boot.
   ALLOW_DEMO_LOGIN: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   RATE_LIMIT_MAX: z.coerce.number().default(60),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
@@ -178,15 +182,25 @@ export const validateEnv = (): Env => {
       );
     }
 
-    // Demo login issues a portal token to anyone who asks for it. Refusing to
-    // boot is the only setting that cannot be undone by a stray environment
-    // variable on the production host.
+    // Kept after the demo paths were removed. It no longer defends a live
+    // capability, but a production host carrying this flag is carrying a stale
+    // and dangerous expectation, and refusing to boot says so unambiguously.
     if (env.ALLOW_DEMO_LOGIN) {
       throw new Error(
         "CONFIGURATION ERROR: ALLOW_DEMO_LOGIN must not be enabled in production. " +
           "It permits password-free sign-in to the customer portal."
       );
     }
+  }
+
+  // Outside production the flag is inert rather than fatal, so an existing
+  // developer .env keeps working — but silence would let someone believe demo
+  // login still exists.
+  if (env.ALLOW_DEMO_LOGIN && process.env.NODE_ENV !== "production") {
+    console.warn(
+      "⚠️  ALLOW_DEMO_LOGIN is set, but demo/email-only customer login no longer exists (ISSUE-056). " +
+        "The flag grants nothing; remove it from your .env."
+    );
   }
 
   return env;

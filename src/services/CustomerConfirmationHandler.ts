@@ -1,14 +1,16 @@
-import { pool } from "../adapters/postgres/PostgresAdapter";
+import { pool, PostgresAdapter } from "../adapters/postgres/PostgresAdapter";
 import { createLogger } from "../observability/logger";
 import {
   detectConfirmationIntent,
   detectCloseIntent,
+  evaluateFailureScope,
   TICKET_NUMBER_PATTERN,
 } from "../domain/ticket/CustomerConfirmation";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import type { TicketLifecycleStatus } from "../domain/ticket/TicketLifecycle";
 import { customerNotificationService } from "./CustomerNotificationService";
 import { doneEmailService } from "./UrgentAlertService";
+import { PlaneService } from "./planeService";
 
 const logger = createLogger("customer-confirmation");
 
@@ -70,6 +72,8 @@ const ROUTE_TO_CLOSED: Record<string, TicketLifecycleStatus[]> = {
  *   ปิดเคส with nothing open     → "ไม่มีเคสที่เปิดอยู่" at the edge, no AI turn
  */
 export class CustomerConfirmationHandler {
+  private readonly planeService = new PlaneService(new PostgresAdapter());
+
   /** Every non-terminal ticket of the conversation, newest activity first. */
   private async loadOpenTickets(conversationId: number): Promise<OpenTicket[]> {
     const { rows } = await pool.query<OpenTicket>(
@@ -228,6 +232,10 @@ export class CustomerConfirmationHandler {
     }
 
     await this.notify(input, ticket, "closed", closedEventId ? `ticket_event:${closedEventId}` : `ticket:${ticket.id}:closed`, { quickReplies: [] });
+    // Sync Close to Plane
+    void this.planeService.syncTicketStatusToPlane(String(ticket.id), "Close").catch((err) => {
+      logger.warn({ error: err.message, ticketId: ticket.id }, "Failed to sync Close to Plane");
+    });
     // Customer "Done" email (Gmail via the notification flow), originated here
     // because Plane's own webhook never arrives (ISSUE-070). Fire-and-forget.
     void doneEmailService.notifyClosed({ ticketId: ticket.id, closeEventId: closedEventId, correlationId: input.correlationId }).catch(() => {});
@@ -236,7 +244,7 @@ export class CustomerConfirmationHandler {
   }
 
   /** REOPENED → IN_PROGRESS: straight back into engineering hands (Plane → Re-Open). */
-  private async reopenTicket(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket): Promise<ConfirmationOutcome> {
+  private async reopenTicket(input: { conversationId: number; correlationId?: string; text?: string }, ticket: OpenTicket): Promise<ConfirmationOutcome> {
     const reopened = await ticketStateMachine.transition({
       ticketRef: ticket.id,
       to: "REOPENED",
@@ -260,6 +268,16 @@ export class CustomerConfirmationHandler {
       source: "customer_reply",
     });
     await this.notify(input, ticket, "reopened", reopened.eventId ? `ticket_event:${reopened.eventId}` : `ticket:${ticket.id}:reopened`, { quickReplies: [] });
+
+    // Sync Re-Open to Plane
+    void this.planeService.syncTicketStatusToPlane(String(ticket.id), "Re-Open").catch((err) => {
+      logger.warn({ error: err.message, ticketId: ticket.id }, "Failed to sync Re-Open status to Plane");
+    });
+    if (input.text) {
+      void this.planeService.appendCustomerFeedbackToPlane(String(ticket.id), input.text).catch(() => {});
+    }
+    void this.planeService.attachPendingImagesToOpenTicket(input.conversationId).catch(() => {});
+
     logger.info({ ticketId: ticket.id, conversationId: input.conversationId, correlationId: input.correlationId }, "Customer rejected resolution; ticket reopened");
     return { handled: true, ticketId: ticket.id, from: ticket.status, to: working.applied ? "IN_PROGRESS" : "REOPENED" };
   }
@@ -347,7 +365,14 @@ export class CustomerConfirmationHandler {
       // Positive, but nothing closes yet: ask the close question.
       return this.askClose(input, target);
     }
-    return this.reopenTicket(input, target);
+
+    const scope = evaluateFailureScope(text, target.subject);
+    if (scope === "NEW_BUG") {
+      logger.info({ ticketId: target.id, text }, "Customer reported a new bug out of scope of the resolved ticket");
+      return { handled: false, reason: "NEW_BUG_REPORTED" };
+    }
+
+    return this.reopenTicket({ ...input, text }, target);
   }
 }
 

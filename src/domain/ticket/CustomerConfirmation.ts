@@ -26,10 +26,18 @@ const REJECTION_MARKERS = [
   "ไม่ได้อยู่",
   "ยังมีปัญหา",
   "ยังเหมือนเดิม",
+  "เหมือนเดิม",
+  "ไม่ได้เหมือนเดิม",
+  "ยังกดไม่ได้",
+  "กดไม่ได้",
   "ยังพัง",
   "ยังไม่หาย",
   "ยังเข้าไม่ได้",
   "ไม่หาย",
+  "ไม่ผ่าน",
+  "ยังไม่ผ่าน",
+  "เทสไม่ผ่าน",
+  "ทดสอบไม่ผ่าน",
   "still not",
   "still broken",
   "still failing",
@@ -39,6 +47,8 @@ const REJECTION_MARKERS = [
   "not fixed",
   "same problem",
   "same issue",
+  "fail",
+  "failed",
 ];
 
 const CONFIRMATION_MARKERS = [
@@ -50,6 +60,13 @@ const CONFIRMATION_MARKERS = [
   "หายแล้ว",
   "ปกติแล้ว",
   "เข้าได้แล้ว",
+  "ผ่าน",
+  "ผ่านแล้ว",
+  "ผ่านค่ะ",
+  "ผ่านครับ",
+  "ทดสอบผ่าน",
+  "เทสผ่าน",
+  "ok ผ่าน",
   "ปิดเคสได้",
   "ปิดเคสได้เลย",
   "ขอบคุณครับ ปิดเคส",
@@ -59,6 +76,8 @@ const CONFIRMATION_MARKERS = [
   "resolved",
   "fixed now",
   "all good",
+  "pass",
+  "passed",
   "you can close",
   "close the case",
   "close it",
@@ -80,6 +99,39 @@ export function detectConfirmationIntent(text: string): ConfirmationIntent {
   if (CONFIRMATION_MARKERS.some((m) => t.includes(normalize(m)))) return "CONFIRMED";
 
   return "NONE";
+}
+
+export type FailureScope = "SAME_BUG" | "NEW_BUG";
+
+/**
+ * Distinguishes whether a customer's rejection relates to the original issue
+ * (same bug) or introduces an entirely new symptom/feature out of scope (new bug).
+ */
+export function evaluateFailureScope(text: string, subject?: string | null): FailureScope {
+  const t = normalize(text);
+
+  const newBugIndicators = [
+    "อันเดิมหายแล้วแต่",
+    "จุดเดิมได้แล้วแต่",
+    "แต่เจออีกจุด",
+    "แต่มีปัญหาใหม่",
+    "แต่พบปัญหาใหม่",
+    "อีกหน้า",
+    "หน้าอื่น",
+    "ฟังก์ชันอื่น",
+    "เมนูอื่น",
+    "คนละเรื่อง",
+    "new issue",
+    "another bug",
+    "different issue",
+    "different error",
+  ];
+
+  if (newBugIndicators.some((indicator) => t.includes(indicator))) {
+    return "NEW_BUG";
+  }
+
+  return "SAME_BUG";
 }
 
 // ---------------------------------------------------------------------------
@@ -130,13 +182,13 @@ const CONFIRM_CLOSE_RE = new RegExp(
 
 /** A short affirmative that only means "close it" when the close question was just asked. */
 const BARE_YES_RE = new RegExp(
-  `^\\s*(?:ยืนยัน|ใช่|ใช่เลย|ใช่ค่ะ|ใช่ครับ|ปิดเลย|ปิดได้เลย|ปิดได้|ปิดเคสได้เลย|ปิดเคสเลย|ตกลง|โอเค|ok|okay|yes|confirm|ได้เลย|ได้|เอาเลย|จัดไป|👍|✅)${TAIL}$`,
+  `^\\s*(?:ยืนยัน|ใช่|ใช่เลย|ใช่ค่ะ|ใช่ครับ|ปิดเลย|ปิดได้เลย|ปิดได้|ปิดเคสได้เลย|ปิดเคสเลย|ผ่าน|ผ่านแล้ว|ผ่านค่ะ|ผ่านครับ|ตกลง|โอเค|ok|okay|yes|confirm|ได้เลย|ได้|เอาเลย|จัดไป|👍|✅)${TAIL}$`,
   "i"
 );
 
 /** A refusal to close, meaningful only while the close question is pending. */
 const DECLINE_CLOSE_RE = new RegExp(
-  `^\\s*(?:ยังไม่ปิด|ยังไม่ต้องปิด|อย่าเพิ่งปิด|ไม่ปิด|ไม่ต้องปิด|ยังก่อน|ยังไม่|ยัง|เดี๋ยวก่อน|รอก่อน|รอแป๊บ|ขอเช็คก่อน|ขอลองก่อน|ขอดูก่อน|ขอทดสอบก่อน|ยกเลิก|ไม่ใช่|ไม่|cancel|not\\s+yet|no|nope|❌)${TAIL}$`,
+  `^\\s*(?:ยังไม่ปิด|ยังไม่ต้องปิด|อย่าเพิ่งปิด|ไม่ปิด|ไม่ต้องปิด|ยังก่อน|ยังไม่|ยัง|เดี๋ยวก่อน|รอก่อน|รอแป๊บ|ขอเช็คก่อน|ขอลองก่อน|ขอดูก่อน|ขอทดสอบก่อน|ไม่ผ่าน|ยังไม่ผ่าน|ยกเลิก|ไม่ใช่|ไม่|cancel|not\\s+yet|no|nope|❌)${TAIL}$`,
   "i"
 );
 

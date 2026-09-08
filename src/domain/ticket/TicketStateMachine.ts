@@ -136,6 +136,22 @@ export class TicketStateMachine {
       notify: customerNotificationFor(req.to),
     };
 
+    if (result.pushToPlane && req.actor !== "plane") {
+      const targetPlaneStatus = lifecycleToPlaneStatus(req.to);
+      pool.query(
+        `INSERT INTO outbox_events (event_type, payload, status, created_at)
+         VALUES ($1, $2, 'PENDING', NOW())`,
+        [
+          "PlaneWorkItemUpdateRequested",
+          JSON.stringify({
+            ticketId: ticket.id,
+            newStatus: targetPlaneStatus,
+            oldStatus: from,
+          }),
+        ]
+      ).catch((err) => logger.warn({ error: err.message, ticketId: ticket.id }, "Could not enqueue PlaneWorkItemUpdateRequested to outbox"));
+    }
+
     logger.info(
       {
         ticketId: ticket.id,
@@ -214,12 +230,14 @@ export class TicketStateMachine {
       case "open":
       case "in progress":
       case "started":
+      case "appsup test":
+      case "internal test":
         return "In Progress";
       case "test failed":
         return "Test Failed";
       case "waiting for customer":
       case "waiting customer":
-        return "Waiting for Customer";
+      case "customer test":
       case "delivery to customer":
       case "delivered":
         return "Delivery to Customer";
@@ -238,7 +256,7 @@ export class TicketStateMachine {
       case "canceled":
         return "Cancelled";
       default:
-        return null;
+        return String(planeStatus || "").trim() || null;
     }
   }
 

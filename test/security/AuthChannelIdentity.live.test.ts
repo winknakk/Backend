@@ -150,11 +150,13 @@ describe("customer auth resolves the identity of the channel being authenticated
     const src = fs.readFileSync(new URL("../../src/api/routes/auth.ts", import.meta.url), "utf8");
     const body = src.split("export async function resolveIdentityForProfile")[1] || src;
     assert.ok(!/cust_\$\{/.test(body), "no customer-proof path may invent a channel_ref");
-    assert.strictEqual(
-      (src.match(/NO_CHANNEL_IDENTITY/g) || []).length,
-      3,
-      "all three customer-proof paths must return the controlled refusal"
-    );
+    // Tied to the number of call sites rather than a fixed count: ISSUE-056
+    // deleted two of the three customer-proof paths, and this must keep
+    // asserting that whatever paths remain still refuse rather than invent.
+    const callSites = (src.match(/resolveIdentityForProfile\(\{/g) || []).length;
+    const refusals = (src.match(/NO_CHANNEL_IDENTITY/g) || []).length;
+    assert.ok(callSites > 0, "expected at least one channel-scoped resolution call site");
+    assert.strictEqual(refusals, callSites, `every resolver call site must refuse when no identity exists (${refusals}/${callSites})`);
     assert.ok(
       !/FROM identities WHERE profile_id::text = \$1::text LIMIT 1/.test(src.replace(/^\s*\*.*$/gm, "")),
       "no unscoped LIMIT 1 identity lookup may remain outside comments"

@@ -155,11 +155,17 @@ describe("issuance stamps a family on every customer-side token", () => {
       "../../src/api/routes/portal.ts",
       "../../src/api/routes/auth.ts",
     ];
+    // Counted against the number of tokens actually minted rather than a fixed
+    // number, so removing an issuance site (as ISSUE-056 did) cannot silently
+    // turn this into a weaker assertion.
+    let minted = 0;
     let stamped = 0;
     for (const f of files) {
       const src = fs.readFileSync(new URL(f, import.meta.url), "utf8");
+      minted += (src.match(/JwtUtil\.sign\(/g) || []).length;
       stamped += (src.match(/kind: "customer"|kind: isGuest \? "guest" : "customer"/g) || []).length;
     }
-    assert.strictEqual(stamped, 7, "all seven customer/guest issuance sites must stamp a family");
+    assert.ok(minted > 0, "expected at least one customer/guest token to be minted");
+    assert.strictEqual(stamped, minted, `every minted customer/guest token must stamp a family (${stamped}/${minted})`);
   });
 });
