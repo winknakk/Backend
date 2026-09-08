@@ -71,4 +71,27 @@ for (const chip of [...closeChips, ...deliveryChips]) {
 assert.equal(detectCloseIntent(`ยังมีปัญหาอยู่ ${N}`, true).kind, "NONE", "the reopen chip is a delivery answer, not a close-protocol word");
 assert.equal(detectConfirmationIntent("ยังไม่ปิด"), "NONE", "declining to close is not a rejection of the fix");
 
-console.log("Customer close-intent tests passed (two-step close protocol).");
+// --- 7. Re-open path (2026-09-08): scope classification and the re-open chip ---
+import { detectReopenScope, detectReopenConfirmation, NEW_ISSUE_PATTERN } from "./domain/ticket/CustomerConfirmation";
+assert.equal(detectReopenScope(`ยังมีปัญหาอยู่ ${N}`), "SAME", "the delivery chip is the same bug");
+assert.equal(detectReopenScope(`อาการเดิมยังไม่หาย ${N}`), "SAME", "the ambiguity chip picks the same bug");
+assert.equal(detectReopenScope("ยังเข้าไม่ได้เหมือนเดิมครับ ขึ้น error เดิม"), "SAME");
+assert.equal(detectReopenScope("เป็นปัญหาใหม่"), "NEW", "the ambiguity chip picks a new problem");
+assert.equal(detectReopenScope("มีอีกปัญหา UAT เรียกรายงานไม่ได้"), "NEW", "explicit new-issue wording wins");
+assert.equal(detectReopenScope("อันเดิมใช้ได้แล้ว แต่หน้ารายงานจอขาว"), "AMBIGUOUS", "praise plus a new complaint is asked about, not guessed");
+assert.equal(detectReopenScope("ใช้งานได้แล้วครับ ขอบคุณ"), "NONE", "a clean confirmation is not a re-open matter");
+assert.equal(detectReopenScope("ระบบล่มขึ้น Error 555"), "NONE");
+assert.equal(detectConfirmationIntent(`อาการเดิมยังไม่หาย ${N}`), "REJECTED", "the same-bug chip reads as a rejection");
+assert.ok(NEW_ISSUE_PATTERN.test("ยังมีอีกปัญหาระบบ Excise ล่ม"));
+assert.deepEqual(detectReopenConfirmation(`ยืนยันเปิดเคสอีกครั้ง ${N}`), { confirmed: true, ticketNumber: N });
+assert.deepEqual(detectReopenConfirmation("ยืนยันเปิดเคสอีกครั้งค่ะ"), { confirmed: true, ticketNumber: null });
+assert.equal(detectReopenConfirmation("ยืนยัน").confirmed, false, "a bare ยืนยัน is never a re-open");
+assert.equal(detectReopenConfirmation(`ยืนยันปิดเคส ${N}`).confirmed, false, "the close chip is not the re-open chip");
+const scopeChips = CustomerNotificationService.defaultQuickReplies("reopen_which_kind", N);
+assert.deepEqual(scopeChips.map((c) => c.text), [`อาการเดิมยังไม่หาย ${N}`, "เป็นปัญหาใหม่", `ใช้งานได้แล้ว ${N}`]);
+assert.ok(scopeChips.every((c) => c.label.length <= 20));
+const reopenChips = CustomerNotificationService.defaultQuickReplies("reopen_confirmation_request", N);
+assert.deepEqual(reopenChips.map((c) => c.text), [`ยืนยันเปิดเคสอีกครั้ง ${N}`, "ยกเลิก"]);
+assert.ok(reopenChips.every((c) => c.label.length <= 20), "LINE caps labels at 20 characters");
+
+console.log("Customer close-intent tests passed (two-step close + re-open protocol).");

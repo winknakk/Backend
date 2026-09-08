@@ -3,6 +3,7 @@ import path from "node:path";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config/env";
 import { createLogger } from "../../observability/logger";
+import { resolveProjectFilter } from "../../middleware/tenantScope";
 import { SLACadenceService } from "../../services/SLACadenceService";
 
 const logger = createLogger("sla-console");
@@ -80,6 +81,24 @@ export function registerSlaConsoleRoutes(fastify: FastifyInstance, cadence: SLAC
 
   fastify.get("/api/v1/admin/sla/projects", adminRouteOptions, async (_request, reply) => {
     return reply.send({ success: true, data: await cadence.listProjects() });
+  });
+
+  /**
+   * Product SLA Center page (read-only). Scope is validated by the tenant
+   * middleware: an operator session only ever sees the projects it may
+   * access, even when it asks for "all".
+   */
+  fastify.get("/api/v1/admin/sla/overview", adminRouteOptions, async (request, reply) => {
+    const requested = (request.query as any)?.projectId;
+    const filter = resolveProjectFilter(request, reply, requested);
+    if (!filter) return;
+    try {
+      const data = await cadence.getOverview(filter.projectIds);
+      return reply.send({ success: true, data });
+    } catch (err: any) {
+      logger.error({ error: err.message, requested }, "SLA overview failed");
+      return reply.code(500).send({ success: false, error: `SLA overview failed: ${err.message}` });
+    }
   });
 
   fastify.get("/api/v1/admin/sla/tickets/:ref", adminRouteOptions, async (request, reply) => {

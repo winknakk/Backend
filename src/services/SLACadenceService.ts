@@ -133,6 +133,8 @@ interface OpenTicketRow {
   status: string | null;
   priority: string | null;
   created_at: string;
+  /** COALESCE(last_reopened_at, created_at): where the cadence slots count from. */
+  cadence_anchor?: string | null;
   due_date: string | null;
   conversation_id: number | null;
   project_id: number | null;
@@ -317,7 +319,7 @@ export class SLACadenceService {
         }
         const priority = normalizePriority(t.priority);
         const rule = CADENCE_RULES[priority];
-        const createdAt = new Date(t.created_at);
+        const createdAt = new Date(t.cadence_anchor || t.created_at);
 
         if (rule.dev) {
           const slot = cadenceSlot(createdAt, now, rule.dev);
@@ -385,6 +387,8 @@ export class SLACadenceService {
   private async loadOpenTickets(): Promise<OpenTicketRow[]> {
     const { rows } = await pool.query<OpenTicketRow>(
       `SELECT t.id, t.ticket_number, t.subject, t.summary, t.status, t.priority, t.created_at, t.due_date,
+              -- A re-opened case restarts its reminder clock (operator decision 2026-09-08).
+              COALESCE(NULLIF(t.last_reopened_at::text, '')::timestamptz, t.created_at) AS cadence_anchor,
               t.conversation_id, t.project_id,
               p.name AS project_name,
               c.handled_by, c.takeover_state,
@@ -918,6 +922,185 @@ export class SLACadenceService {
       enriched.sort((a, b) => (a.due_date ? new Date(a.due_date).getTime() : Infinity) - (b.due_date ? new Date(b.due_date).getTime() : Infinity));
     }
     return { rows: enriched, total: enriched.length };
+  }
+
+  /**
+   * Everything the product's SLA Center page shows, in one round trip.
+   * `projectIds` null = unrestricted (workspace "All"); otherwise the tenant
+   * scope already validated by the route.
+   */
+  async getOverview(projectIds: number[] | null, now: Date = new Date()) {
+    const scoped = Array.isArray(projectIds) && projectIds.length > 0;
+    const scopeSql = scoped ? "AND t.project_id = ANY($1::int[])" : "";
+    const scopeParams: any[] = scoped ? [projectIds] : [];
+    const excludedParam = `$${scopeParams.length + 1}`;
+
+    // ---- open tickets (the SLA clock board) ----
+    const open = await pool.query(
+      `SELECT t.id, t.ticket_number, t.subject, t.status, t.priority, t.created_at, t.due_date,
+              t.response_due_at, t.first_response_at, t.project_id, p.name AS project_name,
+              t.plane_issue_id, t.plane_workspace_slug, t.plane_project_id, t.conversation_id,
+              LOWER(COALESCE(c.channel, '')) AS channel,
+              COALESCE(c.handled_by, 'ai') AS handled_by, COALESCE(c.takeover_state, 'none') AS takeover_state
+       FROM tickets t
+       LEFT JOIN projects p ON p.id = t.project_id
+       LEFT JOIN conversations c ON c.id = t.conversation_id
+       WHERE t.deleted_at IS NULL ${scopeSql}
+         AND LOWER(COALESCE(t.status, '')) <> ALL(${excludedParam}::text[])
+       ORDER BY t.due_date ASC NULLS LAST, t.id DESC
+       LIMIT 300`,
+      [...scopeParams, OPEN_STATUS_EXCLUDED]
+    );
+    const ids = open.rows.map((r: any) => r.id);
+    const claimRows = ids.length
+      ? (await pool.query(`SELECT ticket_id, kind, slot_key FROM sla_cadence_claims WHERE ticket_id = ANY($1::int[])`, [ids])).rows
+      : [];
+    const claimed = new Set(claimRows.map((r: any) => `${r.kind}:${r.slot_key}`));
+    const nextRun = this.nextRunAt();
+
+    const board = open.rows.map((r: any) => {
+      const priority = normalizePriority(r.priority);
+      const rule = CADENCE_RULES[priority];
+      const createdAt = new Date(r.created_at);
+      const due = r.due_date ? new Date(r.due_date) : null;
+      const responseDue = r.response_due_at ? new Date(r.response_due_at) : null;
+      const firstResponse = r.first_response_at ? new Date(r.first_response_at) : null;
+      const totalMs = due ? due.getTime() - createdAt.getTime() : null;
+      const remainingMs = due ? due.getTime() - now.getTime() : null;
+      const fraction = totalMs && remainingMs !== null ? remainingMs / totalMs : null;
+      const breached = remainingMs !== null && remainingMs < 0;
+      const atRisk = !breached && fraction !== null && fraction < 0.25;
+      const responseMet = firstResponse && responseDue ? firstResponse.getTime() <= responseDue.getTime()
+        : responseDue && now.getTime() > responseDue.getTime() ? false : null;
+      const aiOwned = String(r.handled_by).toLowerCase() === "ai" && String(r.takeover_state).toLowerCase() === "none";
+      let nextCustomerUpdateAt: string | null = null;
+      if (rule.user && r.conversation_id && aiOwned) {
+        const slot = cadenceSlot(createdAt, now, rule.user);
+        const key = `ticket:${r.id}:user:${slot}`;
+        const dueNow = slot >= 1 && !claimed.has(`user:${key}`) && this.isSlotFresh(createdAt, slot, rule.user, now);
+        nextCustomerUpdateAt = dueNow && nextRun ? nextRun.toISOString() : slotStartedAt(createdAt, slot + 1, rule.user).toISOString();
+      }
+      return {
+        id: r.id, ticketNumber: r.ticket_number, subject: r.subject, status: r.status, priority,
+        projectId: r.project_id, projectName: r.project_name, channel: r.channel || null,
+        handledBy: aiOwned ? "ai" : String(r.handled_by), createdAt, dueAt: due, responseDueAt: responseDue,
+        firstResponseAt: firstResponse, remainingMs, fraction, breached, atRisk, responseMet, nextCustomerUpdateAt,
+        plane: r.plane_issue_id ? { issueId: r.plane_issue_id, workspaceSlug: r.plane_workspace_slug, projectId: r.plane_project_id } : null,
+      };
+    });
+    board.sort((a, b) => (a.remainingMs ?? Infinity) - (b.remainingMs ?? Infinity));
+
+    // ---- resolved tickets: 7-day compliance + 14-day trend + avg resolution ----
+    const resolved = await pool.query(
+      `WITH res AS (
+         SELECT t.id, t.priority, t.created_at, t.due_date,
+                COALESCE(
+                  (SELECT MIN(e.created_at) FROM ticket_events e
+                    WHERE e.ticket_id = t.id AND e.event_type = 'STATUS_TRANSITION'
+                      AND e.payload->>'to' IN ('RESOLVED','CUSTOMER_CONFIRMED','CLOSED')),
+                  t.lifecycle_changed_at, t.updated_at) AS resolved_at
+         FROM tickets t
+         WHERE t.deleted_at IS NULL ${scopeSql}
+           AND LOWER(COALESCE(t.status, '')) IN ('resolved','customer_confirmed','closed')
+       )
+       SELECT id, priority, created_at, due_date, resolved_at FROM res
+       WHERE resolved_at >= NOW() - INTERVAL '30 days'`,
+      scopeParams
+    );
+    const dayKey = (d: Date) => { const b = new Date(d.getTime() + 7 * 3_600_000); return `${b.getUTCFullYear()}-${String(b.getUTCMonth() + 1).padStart(2, "0")}-${String(b.getUTCDate()).padStart(2, "0")}`; };
+    const trendMap = new Map<string, { onTime: number; late: number }>();
+    for (let i = 13; i >= 0; i--) trendMap.set(dayKey(new Date(now.getTime() - i * 86_400_000)), { onTime: 0, late: 0 });
+    let resolved7 = 0, onTime7 = 0;
+    const byPriority: Record<string, { count: number; totalHours: number }> = {};
+    for (const r of resolved.rows as any[]) {
+      const resolvedAt = new Date(r.resolved_at);
+      const due = r.due_date ? new Date(r.due_date) : null;
+      const onTime = !due || resolvedAt.getTime() <= due.getTime();
+      const ageDays = (now.getTime() - resolvedAt.getTime()) / 86_400_000;
+      const key = dayKey(resolvedAt);
+      if (trendMap.has(key)) { const t = trendMap.get(key)!; if (onTime) t.onTime += 1; else t.late += 1; }
+      if (ageDays <= 7) { resolved7 += 1; if (onTime) onTime7 += 1; }
+      const pr = normalizePriority(r.priority);
+      byPriority[pr] = byPriority[pr] || { count: 0, totalHours: 0 };
+      byPriority[pr].count += 1;
+      byPriority[pr].totalHours += (resolvedAt.getTime() - new Date(r.created_at).getTime()) / 3_600_000;
+    }
+    const responseWindow = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE t.first_response_at IS NOT NULL AND t.first_response_at <= t.response_due_at)::int AS met
+       FROM tickets t
+       WHERE t.deleted_at IS NULL ${scopeSql}
+         AND t.response_due_at IS NOT NULL AND t.created_at >= NOW() - INTERVAL '7 days'`,
+      scopeParams
+    );
+    const rw = responseWindow.rows[0] || { total: 0, met: 0 };
+
+    // ---- policy matrix ----
+    const policyRows = scoped && projectIds!.length === 1
+      ? (await pool.query(
+          `SELECT priority, priority_name, response_hours, resolve_hours, service_window
+           FROM project_sla_policies WHERE project_id = $1`,
+          [projectIds![0]]
+        )).rows
+      : [];
+    const DEFAULTS: Record<string, { response: number; resolve: number }> = {
+      Urgent: { response: 0.25, resolve: 4 }, High: { response: 0.5, resolve: 8 }, Medium: { response: 2, resolve: 48 },
+      Low: { response: 24, resolve: 120 }, None: { response: 48, resolve: 999 },
+    };
+    const policies = (["Urgent", "High", "Medium", "Low", "None"] as const).map((level) => {
+      const row = (policyRows as any[]).find((p) => normalizePriority(p.priority) === level);
+      const rule = CADENCE_RULES[level];
+      return {
+        priority: level,
+        responseHours: row ? Number(row.response_hours) : DEFAULTS[level].response,
+        resolveHours: row ? Number(row.resolve_hours) : DEFAULTS[level].resolve,
+        businessDays: level === "Medium" || level === "Low" || level === "None",
+        source: row ? "project" : "default",
+        devReminder: rule.dev, customerUpdate: rule.user,
+      };
+    });
+
+    // ---- recent notification feed ----
+    const feed = await pool.query(
+      `SELECT * FROM (
+         SELECT 'dev_reminder'::text AS kind, COALESCE(c.sent_at, c.created_at) AS at, t.ticket_number, t.priority, c.slot_key AS ref, c.status
+         FROM sla_cadence_claims c JOIN tickets t ON t.id = c.ticket_id WHERE c.kind = 'dev' AND t.deleted_at IS NULL ${scopeSql}
+         UNION ALL
+         SELECT 'customer_update', COALESCE(n.sent_at, n.created_at), t.ticket_number, t.priority, n.idempotency_key, n.status
+         FROM customer_notifications n JOIN tickets t ON t.id = n.ticket_id
+         WHERE n.notification_type = 'progress_update' AND t.deleted_at IS NULL ${scopeSql}
+         UNION ALL
+         SELECT CASE o.event_type WHEN 'PlaneUrgentDevEmailClaimed' THEN 'urgent_email'
+                                  WHEN 'PlaneDoneEmailNotificationClaimed' THEN 'done_email' ELSE 'reminder_email' END,
+                o.created_at, t.ticket_number, t.priority, COALESCE(o.payload->>'reminderKey', o.payload->>'eventId'), o.status
+         FROM outbox_events o JOIN tickets t ON t.id::text = o.aggregate_id
+         WHERE o.aggregate_type = 'Ticket' AND t.deleted_at IS NULL ${scopeSql}
+           AND o.event_type IN ('PlaneUrgentDevEmailClaimed','PlaneDoneEmailNotificationClaimed','SlaDevReminderEmailClaimed')
+       ) f ORDER BY at DESC LIMIT 20`,
+      scopeParams
+    );
+
+    return {
+      serverNow: now,
+      scope: scoped ? projectIds : "all",
+      kpis: {
+        open: board.length,
+        withinSla: board.filter((b) => !b.breached && !b.atRisk).length,
+        atRisk: board.filter((b) => b.atRisk).length,
+        breached: board.filter((b) => b.breached).length,
+        responseMet7d: rw.total ? { met: rw.met, total: rw.total, rate: rw.met / rw.total } : null,
+        resolvedOnTime7d: resolved7 ? { met: onTime7, total: resolved7, rate: onTime7 / resolved7 } : null,
+      },
+      board,
+      policies,
+      trend: Array.from(trendMap.entries()).map(([day, v]) => ({ day, ...v })),
+      resolutionByPriority: Object.entries(byPriority).map(([priority, v]) => ({ priority, count: v.count, avgHours: v.totalHours / v.count })),
+      recent: feed.rows,
+      engine: {
+        enabled: config.SLA_CADENCE_ENABLED, running: this.timer !== null, intervalMs: this.intervalMs,
+        lastRunAt: this.lastRunAt, nextRunAt: nextRun, lastRunError: this.lastRunError,
+      },
+    };
   }
 
   /** Projects that actually own tickets — populates the picker's project filter. */
