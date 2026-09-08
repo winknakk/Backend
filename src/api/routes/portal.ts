@@ -374,6 +374,7 @@ export function registerPortalRoutes(
         {
           profileId: p.profileId,
           identityId: p.subject,
+          kind: "customer",
           role: "customer",
           projectId: String(targetProjectId),
           companyId: String(proj.company_id || "1"),

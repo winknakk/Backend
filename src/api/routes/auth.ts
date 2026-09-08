@@ -13,6 +13,59 @@ import { createLogger } from "../../observability/logger";
 
 const logger = createLogger("auth-routes");
 
+/**
+ * The identity a profile uses on one specific channel.
+ *
+ * A profile may hold several identities — a LINE user id, a WebChat guest uuid,
+ * and so on. Authentication has to resolve the one belonging to the channel
+ * being authenticated; anything else is a different person's handle on a
+ * different transport.
+ *
+ * This replaces three copies of
+ *
+ *   SELECT channel_ref, org_id FROM identities WHERE profile_id::text = $1 LIMIT 1
+ *
+ * which had no channel predicate and no ORDER BY, so the row returned was
+ * whatever the planner produced first. For a profile with both a LINE and a
+ * WebChat identity it returned the LINE `channel_ref`, which was then signed
+ * into a WebChat proof as `customerId`. The handshake looks that value up as
+ * `findByChannelAndRef("WebChat", ref)`; the unique key is
+ * `(channel, channel_ref)`, so the LINE row does not satisfy it, no identity is
+ * found, and the gateway creates a **new profile and a new WebChat identity**.
+ * An authentication bug was therefore able to mint duplicate customer records.
+ *
+ * Channel comparison is case-insensitive to match `PostgresIdentityRepository`
+ * and the data, which stores `'line'` lower-case and `'WebChat'` mixed-case.
+ *
+ * Returns null when the profile has no identity on that channel. Callers must
+ * treat that as a refusal — never as licence to invent a `channel_ref`.
+ */
+export async function resolveIdentityForProfile(params: {
+  profileId: string | number;
+  channel: string;
+}): Promise<{ identityId: number; channelRef: string; orgId: string | null } | null> {
+  const { rows } = await pool.query(
+    `SELECT id, channel_ref, org_id
+       FROM identities
+      WHERE profile_id::text = $1::text
+        AND LOWER(channel) = LOWER($2)
+      ORDER BY updated_at DESC NULLS LAST, id DESC
+      LIMIT 1`,
+    [String(params.profileId), params.channel]
+  );
+  if (rows.length === 0) return null;
+  return { identityId: Number(rows[0].id), channelRef: rows[0].channel_ref, orgId: rows[0].org_id ?? null };
+}
+
+/**
+ * The channel a customer portal proof is redeemed on.
+ *
+ * Every proof this file mints is exchanged at the WebChat handshake, which
+ * resolves it with `findByChannelAndRef("WebChat", …)`. Naming it here keeps
+ * the lookup and the consumer from drifting apart.
+ */
+export const CUSTOMER_PROOF_CHANNEL = "WebChat";
+
 const LoginSchema = z.object({
   username: z.string(),
   password: z.string(),
@@ -400,15 +453,30 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       return reply.status(401).send({ error: "Invalid customer account" });
     }
 
-    const identRes = await pool.query(
-      "SELECT channel_ref FROM identities WHERE profile_id::text = $1::text LIMIT 1",
-      [String(customerProfile.id)]
-    );
-    const channelRef = identRes.rows[0]?.channel_ref || `cust_${customerProfile.id}`;
+    const identity = await resolveIdentityForProfile({
+      profileId: customerProfile.id,
+      channel: CUSTOMER_PROOF_CHANNEL,
+    });
+    if (!identity) {
+      // No WebChat identity for this profile. Synthesising one here used to
+      // hand the handshake a channel_ref it could not find, which made it
+      // create a second profile for the same person.
+      logger.warn(
+        { profileId: customerProfile.id, channel: CUSTOMER_PROOF_CHANNEL },
+        "Customer login refused: profile has no identity on the requested channel"
+      );
+      return reply.status(409).send({
+        error: "Conflict",
+        code: "NO_CHANNEL_IDENTITY",
+        message: "This account has no WebChat identity. It must be provisioned before signing in.",
+      });
+    }
+    const channelRef = identity.channelRef;
 
     const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
     const jwtSecret = getWebchatJwtSecret();
     const proofToken = JwtUtil.sign({
+      kind: "customer",
       customerId: channelRef,
       name: customerProfile.name,
       email: customerProfile.email,
@@ -457,14 +525,26 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       );
       if (profRes.rows.length > 0) {
         const customerProfile = profRes.rows[0];
-        const identRes = await pool.query(
-          "SELECT channel_ref FROM identities WHERE profile_id::text = $1::text LIMIT 1",
-          [String(customerProfile.id)]
-        );
-        const channelRef = identRes.rows[0]?.channel_ref || `cust_${customerProfile.id}`;
+        const identity = await resolveIdentityForProfile({
+          profileId: customerProfile.id,
+          channel: CUSTOMER_PROOF_CHANNEL,
+        });
+        if (!identity) {
+          logger.warn(
+            { profileId: customerProfile.id, channel: CUSTOMER_PROOF_CHANNEL },
+            "Demo customer login refused: profile has no identity on the requested channel"
+          );
+          return reply.status(409).send({
+            error: "Conflict",
+            code: "NO_CHANNEL_IDENTITY",
+            message: "This account has no WebChat identity. It must be provisioned before signing in.",
+          });
+        }
+        const channelRef = identity.channelRef;
         const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
         const jwtSecret = getWebchatJwtSecret();
         const proofToken = JwtUtil.sign({
+          kind: "customer",
           customerId: channelRef,
           name: customerProfile.name,
           email: customerProfile.email,
@@ -509,12 +589,25 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
         [cleanUser]
       );
       const customerProfile = profRes.rows[0];
-      const identRes = await pool.query(
-        "SELECT channel_ref, org_id FROM identities WHERE profile_id::text = $1::text LIMIT 1",
-        [String(customerProfile?.id || operator.id)]
-      );
-      const channelRef = identRes.rows[0]?.channel_ref || `cust_${customerProfile?.id || operator.id}`;
-      const orgId = identRes.rows[0]?.org_id || "org_excise";
+      const identity = await resolveIdentityForProfile({
+        profileId: customerProfile?.id || operator.id,
+        channel: CUSTOMER_PROOF_CHANNEL,
+      });
+      if (!identity) {
+        logger.warn(
+          { profileId: customerProfile?.id || operator.id, channel: CUSTOMER_PROOF_CHANNEL },
+          "Customer login refused: profile has no identity on the requested channel"
+        );
+        return reply.status(409).send({
+          error: "Conflict",
+          code: "NO_CHANNEL_IDENTITY",
+          message: "This account has no WebChat identity. It must be provisioned before signing in.",
+        });
+      }
+      const channelRef = identity.channelRef;
+      // The identity's own org, not a guessed default: a wrong org here would
+      // scope the session to the wrong tenant.
+      const orgId = identity.orgId || "org_excise";
 
       const projRes = await pool.query(
         "SELECT project_id FROM profile_projects WHERE profile_id::text = $1::text",
@@ -525,6 +618,7 @@ export async function registerAuthRoutes(fastify: FastifyInstance) {
       const { getWebchatJwtSecret } = await import("../../middleware/customerAuth");
       const jwtSecret = getWebchatJwtSecret();
       const proofToken = JwtUtil.sign({
+        kind: "customer",
         customerId: channelRef,
         name: customerProfile?.name || 'คุณวิน (ลูกค้า)',
         email: operator.email,

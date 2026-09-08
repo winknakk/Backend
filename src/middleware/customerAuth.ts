@@ -60,6 +60,27 @@ export async function customerAuthHook(request: FastifyRequest, reply: FastifyRe
     return;
   }
 
+  // Refuse the other direction of role confusion: an operator or service
+  // credential is not a customer credential, however valid its signature.
+  // Both families are signed with the same SESSION_SECRET, so the signature
+  // alone cannot tell them apart — only the family can.
+  //
+  // A missing `kind` is still accepted here, and only here: customer tokens
+  // predating the claim are already sitting in browsers, and this hook
+  // independently requires role "customer", a profileId and a concrete
+  // projectId, then confines the principal to that single project. Absent
+  // family therefore never widens anything on this path.
+  const tokenKind = (decoded as any).kind;
+  if (tokenKind === "operator" || tokenKind === "service") {
+    logger.warn({ kind: tokenKind, url: request.url }, "Operator-side credential refused on a customer portal route");
+    reply.status(403).send({
+      error: "Forbidden",
+      code: "CUSTOMER_CREDENTIAL_REQUIRED",
+      message: "A valid customer credential is required",
+    });
+    return;
+  }
+
   // Refuse guests with 403 GUEST_NOT_PERMITTED - load-bearing rule
   if (decoded.role === "guest") {
     logger.warn({ identityId: decoded.identityId, profileId: decoded.profileId }, "Guest refused on customer portal");

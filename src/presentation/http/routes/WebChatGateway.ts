@@ -410,6 +410,10 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         {
           identityId: identity.id,
           channelRef,
+          // Explicit token family. Without it these tokens verified at the
+          // operator boundary as a principal with no kind and no scope, which
+          // tenantScope read as unrestricted (ISSUE-057).
+          kind: isGuest ? "guest" : "customer",
           role: isGuest ? "guest" : "customer",
           projectId: String(authoritativeProjectId),
           companyId: String(authoritativeCompanyId),
@@ -435,6 +439,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         companyId: String(authoritativeCompanyId),
         projectId: String(authoritativeProjectId),
         channelRef,
+        kind: isGuest ? "guest" : "customer",
         role: isGuest ? "guest" : "customer"
       }, jwtSecret, 3600); // 1 hour expiration
 
@@ -944,6 +949,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
                 identityId: resolvedIdentityId || identityId,
                 profileId: joinedProfileId,
                 channelRef,
+                kind: "customer",
                 role: "customer",
                 projectId: newProjectId,
                 companyId: newCompanyId,

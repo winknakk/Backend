@@ -86,10 +86,35 @@ export class SessionTokenService {
   }
 
   /**
-   * Returns the principal for a valid, unexpired token, or null. Never throws
-   * on malformed input — callers treat null as "not authenticated".
+   * The token families this service is the door for.
+   *
+   * Customer and guest credentials are signed by `JwtUtil` with
+   * `getWebchatJwtSecret()` — which returns the *same* `SESSION_SECRET` this
+   * service signs operator sessions with. Their signatures therefore verify
+   * here, and before this list existed that was the whole check: a customer or
+   * guest token was returned as a principal whose `kind` was `undefined` and
+   * whose `orgId`/`projectIds` were both null, which `resolveTenantScope` read
+   * as UNRESTRICTED. An anonymous WebChat visitor could call every operator and
+   * admin route (ISSUE-057, reproduced live at `GET /api/admin/conversations`
+   * returning 200 for a guest token).
+   *
+   * `issue()` has always stamped `kind`, and it is only ever called with
+   * operator principals, so requiring one of these locks out nothing that was
+   * legitimately issued here.
    */
-  verify(token: string): AuthPrincipal | null {
+  private static readonly OPERATOR_SIDE_KINDS: readonly PrincipalKind[] = ["operator", "service"];
+
+  /**
+   * Returns the principal for a valid, unexpired token of an accepted family,
+   * or null. Never throws on malformed input — callers treat null as
+   * "not authenticated".
+   *
+   * `allow` names the families the caller is a door for. It defaults to the
+   * operator side; pass an explicit list to authenticate a different class.
+   * A token whose `kind` is missing, unrecognised, or outside `allow` is
+   * rejected — absence of a family is never treated as permission.
+   */
+  verify(token: string, opts?: { allow?: readonly PrincipalKind[] }): AuthPrincipal | null {
     if (!token || typeof token !== "string") return null;
 
     const parts = token.split(".");
@@ -109,6 +134,13 @@ export class SessionTokenService {
     }
 
     if (typeof payload.exp !== "number" || payload.exp <= Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+
+    // Fail closed on the token family. A valid signature proves the token was
+    // minted with this secret; it does not say what the token is *for*.
+    const allow = opts?.allow ?? SessionTokenService.OPERATOR_SIDE_KINDS;
+    if (typeof payload.kind !== "string" || !allow.includes(payload.kind)) {
       return null;
     }
 
