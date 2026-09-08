@@ -25,6 +25,7 @@ import { TakeoverManager } from "../../../human-takeover/TakeoverManager";
 import { S3MediaStorageService } from "../../../media/services/S3MediaStorageService";
 import { adminSocketRegistry } from "../../../api/AdminSocketRegistry";
 import { projectResolver, normalizeJoinCode } from "../../../domain/project/ProjectResolver";
+import { findOrCreateWebChatGuestIdentity } from "../../../infrastructure/db/guestIdentityProvisioning";
 
 const logger = createLogger("WebChatGateway");
 
@@ -275,26 +276,14 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         }
 
         if (!identity) {
-          // Dynamic Guest compilation
-          const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM profiles");
-          const nextProfileId = String(nextProfileIdRes.rows[0].next_id);
-
-          const guestProfile = new Profile({
-            id: nextProfileId,
-            companyId: String(authoritativeCompanyId),
-            name: `Guest_${channelRef.slice(0, 8)}`
-          });
-          await profileRepo.save(guestProfile);
-
-          const nextIdentId = await nextSequenceId(pool, "identities");
-
-          identity = new Identity({
-            id: nextIdentId,
-            profileId: nextProfileId,
-            channel: "WebChat",
-            channelRef
-          });
-          await identityRepo.save(identity);
+          // Provisioning a first-time guest is a race: two concurrent
+          // handshakes for the same channel_ref both saw "not found" here and
+          // then collided, one dying on uq_identities_channel_ref while the
+          // profile insert silently overwrote the other guest's row
+          // (ISSUE-063). The database arbitrates it now — see
+          // findOrCreateWebChatGuestIdentity.
+          const provisioned = await findOrCreateWebChatGuestIdentity(channelRef, authoritativeCompanyId);
+          identity = provisioned.identity;
         }
       } else {
         // Logged-in Customer Resolution
