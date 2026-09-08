@@ -18,6 +18,7 @@ import { TakeoverManager } from "../../human-takeover/TakeoverManager";
 import { ConversationMemoryService } from "../../memory/ConversationMemoryService";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
 import { S3MediaStorageService } from "../../media/services/S3MediaStorageService";
+import { createLogger } from "../../observability/logger";
 
 export interface AdminRouteDependencies {
   metricAggregator: MetricAggregator;
@@ -26,7 +27,22 @@ export interface AdminRouteDependencies {
   trafficSplitter: TrafficSplitter;
   dbAdapter: DatabaseAdapter;
   takeoverManager?: TakeoverManager;
+  /**
+   * Emits the canonical `takeover_started` event on `webchat:outbound`.
+   *
+   * Supplied by server.ts so the console shares the internal takeover path's
+   * emitter and its publishOutbound instance, rather than this module growing a
+   * second implementation of the same event (ISSUE-064).
+   */
+  publishTakeoverStarted?: (input: {
+    conversationId: string;
+    state: "PENDING_HUMAN" | "ACTIVE_HUMAN";
+    reasonCode?: string;
+    recipientId?: string;
+  }) => Promise<void>;
 }
+
+const logger = createLogger("admin-routes");
 
 export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminRouteDependencies) {
   const lineProfileCache = new Map<string, {
@@ -367,6 +383,23 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
     // 8. POST /api/admin/conversations/:id/takeover
     fastify.post("/api/admin/conversations/:id/takeover", async (request, reply) => {
       const params = request.params as any;
+
+      // Read before writing so a repeat can be told apart from a real
+      // transition. Without this the customer would be notified again every
+      // time an operator re-opened a conversation they already held.
+      let wasAlreadyActive = false;
+      if (deps.takeoverManager) {
+        try {
+          const prior = await deps.takeoverManager.getTakeoverState(params.id);
+          wasAlreadyActive = prior?.status === "ACTIVE_HUMAN";
+        } catch (err: any) {
+          // An unreadable prior state must not block the takeover itself. The
+          // cost of guessing wrong is one duplicate notice, which the client
+          // collapses anyway; refusing the takeover would be far worse.
+          logger.warn({ error: err.message, conversationId: params.id }, "Could not read prior takeover state");
+        }
+      }
+
       const result = await humanReplyService.takeover(params.id);
       let takeoverState;
       if (deps.takeoverManager) {
@@ -378,6 +411,27 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
           leaseDurationMs
         );
       }
+
+      // Tell the customer an operator has joined. This route changed the state
+      // and answered 200 while publishing nothing, so the customer's socket
+      // never heard about it (ISSUE-064) — a live Redis subscriber saw zero
+      // messages across a takeover and its release.
+      //
+      // Only a real ACTIVE_AI -> ACTIVE_HUMAN transition is announced, and the
+      // publish never affects the response: an outbound failure must not turn a
+      // completed takeover into an error for the operator.
+      if (!wasAlreadyActive && deps.publishTakeoverStarted) {
+        try {
+          await deps.publishTakeoverStarted({
+            conversationId: String(params.id),
+            state: "ACTIVE_HUMAN",
+            reasonCode: "OPERATOR_TAKEOVER",
+          });
+        } catch (err: any) {
+          logger.error({ error: err.message, conversationId: params.id }, "Takeover succeeded but the customer notice failed to publish");
+        }
+      }
+
       return reply.code(200).send({
         ...result,
         takeover_status: takeoverState?.status || "ACTIVE_HUMAN",

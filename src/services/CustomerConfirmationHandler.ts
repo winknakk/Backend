@@ -518,9 +518,41 @@ export class CustomerConfirmationHandler {
       const trimmed = text.trim();
       const trivial = trimmed.length < 8 || /^(?:ขอบคุณ|โอเค|ok|okay|รับทราบ|ครับ|ค่ะ|คับ|จ้า|👍|✅)/i.test(trimmed);
       if (fresh && !trivial) {
-        await this.saveFeedback(input, fresh, trimmed, fresh.reopened_count ?? null);
-        await this.notify(input, fresh, "reopen_feedback_saved", this.eventKey(input, "feedback"), { quickReplies: [] });
-        return { handled: true, ticketId: fresh.id, reason: "REOPEN_FEEDBACK_SAVED" };
+        // A screenshot may be waiting for a case ("ได้รับรูปแล้ว รบกวนอธิบาย…"):
+        // this feedback is that description, so the image goes to the same
+        // case too. Seen live 2026-09-08: "เป็นรูปของเคส TCK-… ครับ" was saved
+        // as feedback while the picture stayed unattached.
+        let attachedImages = 0;
+        try {
+          const pending = await pool.query(
+            `SELECT 1 FROM message_attachments ma JOIN messages m ON m.id = ma.message_id
+              WHERE m.conversation_id = $1::integer
+                AND ma.metadata->>'awaitingCaseConfirm' = 'true'
+                AND COALESCE(ma.metadata->>'planeIssueId', '') = ''
+                AND ma.created_at >= NOW() - INTERVAL '30 minutes'
+              LIMIT 1`,
+            [input.conversationId]
+          );
+          if (pending.rows.length > 0 && fresh.ticket_number) {
+            const { PlaneService } = await import("./planeService");
+            const { AdapterFactory } = await import("../adapters/AdapterFactory");
+            const planeService = new PlaneService(AdapterFactory.getAdapter());
+            const r = await planeService.attachPendingImagesToTicketNumber(input.conversationId, fresh.ticket_number);
+            attachedImages = r.attached;
+            await pool.query(
+              `UPDATE message_attachments ma SET metadata = COALESCE(ma.metadata, '{}'::jsonb) || '{"awaitingCaseConfirm": false}'::jsonb
+                 FROM messages m WHERE m.id = ma.message_id AND m.conversation_id = $1::integer AND ma.metadata->>'awaitingCaseConfirm' = 'true'`,
+              [input.conversationId]
+            ).catch(() => {});
+          }
+        } catch (imgErr: any) {
+          logger.warn({ ticketId: fresh.id, error: imgErr?.message }, "Could not attach the pending screenshot to the re-opened case");
+        }
+        // "เป็นรูปของเคส …" is not a symptom; save only real descriptions.
+        const isJustImageLabel = /^\s*(?:เป็น)?รูป(?:ของ|เคส|นี้)/.test(trimmed) && trimmed.replace(TICKET_NUMBER_PATTERN, "").length < 40;
+        if (!isJustImageLabel) await this.saveFeedback(input, fresh, trimmed, fresh.reopened_count ?? null);
+        await this.notify(input, fresh, attachedImages > 0 ? "image_attached" : "reopen_feedback_saved", this.eventKey(input, "feedback"), { quickReplies: [] });
+        return { handled: true, ticketId: fresh.id, reason: attachedImages > 0 ? "REOPEN_IMAGE_ATTACHED" : "REOPEN_FEEDBACK_SAVED" };
       }
     }
 

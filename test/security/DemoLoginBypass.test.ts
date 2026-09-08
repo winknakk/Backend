@@ -39,8 +39,44 @@ describe("demo login is off unless asked for", () => {
     assert.throws(() => EnvSchema.shape.ALLOW_DEMO_LOGIN.parse("1"));
   });
 
-  it("ships disabled in this build", () => {
-    assert.strictEqual(config.ALLOW_DEMO_LOGIN, false, "the checked-in default must never be enabled");
+  /**
+   * Replaced the assertion `config.ALLOW_DEMO_LOGIN === false`.
+   *
+   * That read the *running environment* — it failed on any machine whose .env
+   * happened to set the flag, and it would have passed on a production host
+   * that merely forgot to set it. What matters now is a property of the code:
+   * the password-free paths are gone (ISSUE-056), so email-only sign-in is
+   * impossible whatever the flag says and whatever NODE_ENV is.
+   */
+  it("the password-free login paths no longer exist in the source", async () => {
+    const fs = await import("fs");
+    const auth = fs.readFileSync(new URL("../../src/api/routes/auth.ts", import.meta.url), "utf8");
+
+    // Strip comments: the removal is documented in prose that names the flag.
+    const code = auth
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+
+    assert.ok(
+      !/ALLOW_DEMO_LOGIN/.test(code),
+      "no executable path may consult ALLOW_DEMO_LOGIN — the capability is removed, not gated"
+    );
+    assert.ok(
+      !/customer-login/.test(code),
+      "the email-only /api/v1/auth/customer-login route must not be registered"
+    );
+    assert.ok(
+      !/cleanUser\.includes\("customer"\)/.test(code),
+      "the substring-matched demo branch must not exist"
+    );
+  });
+
+  it("the flag itself still parses so existing .env files keep booting", () => {
+    // Kept deliberately: removing the variable would break every developer
+    // environment that still sets it. It simply grants nothing now.
+    assert.strictEqual(typeof config.ALLOW_DEMO_LOGIN, "boolean");
   });
 });
 

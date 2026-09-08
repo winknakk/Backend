@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { z } from "zod";
-import { randomUUID, createHash } from "crypto";
+import { randomUUID } from "crypto";
 import path from "path";
 import { JwtUtil } from "../../../shared/jwt";
 import { pool } from "../../../adapters/postgres/PostgresAdapter";
@@ -24,6 +24,8 @@ import { getWebchatJwtSecret } from "../../../middleware/customerAuth";
 import { TakeoverManager } from "../../../human-takeover/TakeoverManager";
 import { S3MediaStorageService } from "../../../media/services/S3MediaStorageService";
 import { adminSocketRegistry } from "../../../api/AdminSocketRegistry";
+import { projectResolver, normalizeJoinCode } from "../../../domain/project/ProjectResolver";
+import { findOrCreateWebChatGuestIdentity } from "../../../infrastructure/db/guestIdentityProvisioning";
 
 const logger = createLogger("WebChatGateway");
 
@@ -274,26 +276,14 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         }
 
         if (!identity) {
-          // Dynamic Guest compilation
-          const nextProfileIdRes = await pool.query("SELECT COALESCE(MAX(CASE WHEN id::text ~ '^[0-9]+$' THEN id::bigint ELSE 0 END), 0) + 1 AS next_id FROM profiles");
-          const nextProfileId = String(nextProfileIdRes.rows[0].next_id);
-
-          const guestProfile = new Profile({
-            id: nextProfileId,
-            companyId: String(authoritativeCompanyId),
-            name: `Guest_${channelRef.slice(0, 8)}`
-          });
-          await profileRepo.save(guestProfile);
-
-          const nextIdentId = await nextSequenceId(pool, "identities");
-
-          identity = new Identity({
-            id: nextIdentId,
-            profileId: nextProfileId,
-            channel: "WebChat",
-            channelRef
-          });
-          await identityRepo.save(identity);
+          // Provisioning a first-time guest is a race: two concurrent
+          // handshakes for the same channel_ref both saw "not found" here and
+          // then collided, one dying on uq_identities_channel_ref while the
+          // profile insert silently overwrote the other guest's row
+          // (ISSUE-063). The database arbitrates it now — see
+          // findOrCreateWebChatGuestIdentity.
+          const provisioned = await findOrCreateWebChatGuestIdentity(channelRef, authoritativeCompanyId);
+          identity = provisioned.identity;
         }
       } else {
         // Logged-in Customer Resolution
@@ -410,6 +400,10 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         {
           identityId: identity.id,
           channelRef,
+          // Explicit token family. Without it these tokens verified at the
+          // operator boundary as a principal with no kind and no scope, which
+          // tenantScope read as unrestricted (ISSUE-057).
+          kind: isGuest ? "guest" : "customer",
           role: isGuest ? "guest" : "customer",
           projectId: String(authoritativeProjectId),
           companyId: String(authoritativeCompanyId),
@@ -435,6 +429,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         companyId: String(authoritativeCompanyId),
         projectId: String(authoritativeProjectId),
         channelRef,
+        kind: isGuest ? "guest" : "customer",
         role: isGuest ? "guest" : "customer"
       }, jwtSecret, 3600); // 1 hour expiration
 
@@ -820,27 +815,103 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         }
         activeConnections.get(room)!.add(socket);
 
-        // Check if message is a project join code (format TX-XXXX-XXXX, or the 4-char hint)
+        // Project join code.
+        //
+        // This used to run its own matcher, and it authenticated the wrong
+        // thing entirely (ISSUE-058):
+        //
+        //   const codeHash = createHash("sha256").update(text.toUpperCase())...
+        //   WHERE (pjc.code_digest = $1 OR UPPER(pjc.code_hint) = UPPER($2))
+        //   [codeHash, text.slice(-4).toUpperCase()]
+        //
+        // Codes are stored as HMAC-SHA256 over the pepper, so that plain
+        // SHA-256 could never match a stored digest — which left the second
+        // half of the OR as the only branch that ever fired. `code_hint` is a
+        // VARCHAR(4) holding the *publicly displayed* hint, so typing four
+        // characters was the whole of the authentication, and the trigger
+        // regex invited exactly that by admitting `[A-Z0-9]{4,6}`.
+        //
+        // Redemption now goes through ProjectResolver, the same authority LINE
+        // uses: HMAC + pepper over the normalised full code, digest-only
+        // matching, the code's own organization enforced by the join, status,
+        // expiry, and channel enablement — with failure reasons that do not
+        // reveal whether a code exists.
         const trimmedText = rawText;
-        const isJoinCodePattern = /^TX-[A-Z0-9]+-[A-Z0-9]+$/i.test(trimmedText) || /^[A-Z0-9]{4,6}$/i.test(trimmedText);
+        const normalizedCandidate = normalizeJoinCode(trimmedText);
+        // A bare hint is not merely rejected downstream, it is never attempted:
+        // no real code normalises to fewer than six characters.
+        const isJoinCodePattern =
+          /^TX-[A-Z0-9-]+$/i.test(trimmedText.trim()) ||
+          (normalizedCandidate.length >= 6 && normalizedCandidate.length <= 32 && /^[A-Z0-9-\s]+$/i.test(trimmedText.trim()));
+
         if (isJoinCodePattern) {
-          const codeHash = createHash("sha256").update(trimmedText.toUpperCase()).digest("hex");
-          const codeRes = await pool.query(
-            `SELECT pjc.project_id, p.name as project_name, p.company_id, c.name as company_name
-             FROM project_join_codes pjc
-             JOIN projects p ON p.id = pjc.project_id
-             LEFT JOIN companies c ON c.id = p.company_id
-             WHERE (pjc.code_digest = $1 OR UPPER(pjc.code_hint) = UPPER($2))
-               AND pjc.status = 'active'
-             LIMIT 1`,
-            [codeHash, trimmedText.slice(-4).toUpperCase()]
-          );
-          if (codeRes.rows.length > 0) {
-            const row = codeRes.rows[0];
-            const newProjectId = String(row.project_id);
-            const newCompanyId = String(row.company_id || companyId);
-            const projName = row.project_name;
-            const compName = row.company_name;
+          const attemptKey = String(identityId || channelRef || "anonymous");
+          if (isJoinCodeLockedOut(attemptKey)) {
+            logger.warn({ attemptKey, conversationId }, "Join code attempt refused: too many failed attempts");
+            socket.send(JSON.stringify({
+              event: "message",
+              data: {
+                id: randomUUID(),
+                role: "ai",
+                content: "มีการลองรหัสผิดหลายครั้งเกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้งค่ะ",
+                createdAt: new Date().toISOString(),
+                attachments: []
+              }
+            }));
+            return;
+          }
+
+          // The code itself is never logged, here or anywhere below.
+          const resolution = await projectResolver.resolveByJoinCode(trimmedText, { channel: "webchat" });
+
+          if (!resolution.ok || !resolution.project) {
+            recordJoinCodeFailure(attemptKey);
+            logger.warn(
+              { attemptKey, conversationId, failure: resolution.failure },
+              "Join code redemption refused"
+            );
+            // Fall through to normal chat handling: an unrecognised code is
+            // just a message. The customer is told nothing that distinguishes
+            // "no such code" from "expired" or "wrong project".
+          } else {
+            clearJoinCodeFailures(attemptKey);
+
+            // Consume the code and re-check its state in the same statement, so
+            // a code revoked or expired between resolution and redemption
+            // cannot still be spent, and concurrent redemptions cannot lose an
+            // increment. (`project_join_codes` has no max_uses column, so there
+            // is no configured cap to enforce — see the impact analysis.)
+            const consumed = await pool.query(
+              `UPDATE project_join_codes
+                  SET usage_count = usage_count + 1, last_used_at = NOW()
+                WHERE id = $1
+                  AND status = 'active'
+                  AND (expires_at IS NULL OR expires_at > NOW())
+              RETURNING id, usage_count`,
+              [resolution.project.joinCodeId]
+            );
+            if (consumed.rowCount === 0) {
+              recordJoinCodeFailure(attemptKey);
+              logger.warn(
+                { attemptKey, joinCodeId: resolution.project.joinCodeId },
+                "Join code became unusable between resolution and redemption"
+              );
+              return;
+            }
+
+            const newProjectId = String(resolution.project.projectId);
+            // Server-authoritative: taken from the project the code belongs to,
+            // never from the client or from the guest's current company.
+            const compRes = await pool.query("SELECT company_id FROM projects WHERE id = $1 LIMIT 1", [
+              resolution.project.projectId,
+            ]);
+            const newCompanyId = String(compRes.rows[0]?.company_id ?? companyId);
+            const projName = resolution.project.projectName;
+            const compName = resolution.project.companyName;
+            // The code's own organization. The previous branch read `row.org_id`
+            // from a query that never selected it, so every redemption silently
+            // wrote 'org_default'.
+            const row = { org_id: resolution.project.orgId };
 
             // Hoisted: the token signed below must carry this. Scoping it to the
             // block meant the fresh token went out without a profileId, and
@@ -944,6 +1015,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
                 identityId: resolvedIdentityId || identityId,
                 profileId: joinedProfileId,
                 channelRef,
+                kind: "customer",
                 role: "customer",
                 projectId: newProjectId,
                 companyId: newCompanyId,
@@ -1226,6 +1298,53 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
  * Skips the optional skipSocket parameter to avoid echoing.
  * Also deduplicates by message id per socket using a bounded Set to eliminate duplicate delivery.
  */
+/**
+ * Failed join-code attempts, per identity.
+ *
+ * A join code is a shared secret with a small alphabet, so an unlimited number
+ * of guesses against the socket would be a practical brute force even with the
+ * hint matching removed. There is no attempt column in `project_join_codes`
+ * and no lockout table in the schema, and adding a migration for this was out
+ * of scope, so the counter lives beside the other process-local state in this
+ * file (`wsTickets`, `activeConnections`).
+ *
+ * Consequence, stated rather than hidden: the window is per process, so it does
+ * not survive a restart and does not span replicas. Moving it to Redis is the
+ * durable fix and is noted in the impact analysis.
+ */
+const JOIN_CODE_MAX_FAILURES = 5;
+const JOIN_CODE_LOCKOUT_MS = 15 * 60 * 1000;
+const joinCodeFailures = new Map<string, { count: number; firstAt: number }>();
+
+function isJoinCodeLockedOut(key: string): boolean {
+  const entry = joinCodeFailures.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.firstAt > JOIN_CODE_LOCKOUT_MS) {
+    joinCodeFailures.delete(key);
+    return false;
+  }
+  return entry.count >= JOIN_CODE_MAX_FAILURES;
+}
+
+function recordJoinCodeFailure(key: string): void {
+  const now = Date.now();
+  const entry = joinCodeFailures.get(key);
+  if (!entry || now - entry.firstAt > JOIN_CODE_LOCKOUT_MS) {
+    joinCodeFailures.set(key, { count: 1, firstAt: now });
+    return;
+  }
+  entry.count += 1;
+}
+
+function clearJoinCodeFailures(key: string): void {
+  joinCodeFailures.delete(key);
+}
+
+/** Test seam: lets the security suite reset the window without a restart. */
+export function __resetJoinCodeFailures(): void {
+  joinCodeFailures.clear();
+}
+
 export function broadcastToRooms(rooms: string[], payload: any, skipSocket?: any) {
   const targetSockets = new Set<any>();
   for (const room of rooms) {

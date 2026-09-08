@@ -31,6 +31,13 @@ declare module "fastify" {
 
 const UNRESTRICTED: TenantScope = { unrestricted: true, orgId: null, projectIds: [] };
 
+/**
+ * The scope a principal gets when it presents no scope and has not earned an
+ * unrestricted one: access to nothing. `unrestricted: false` with an empty
+ * project list makes every downstream filter match zero rows.
+ */
+const DENY_ALL: TenantScope = { unrestricted: false, orgId: null, projectIds: [] };
+
 /** Short-lived cache so org-wide scope does not cost a query per request. */
 const scopeCache = new Map<string, { scope: TenantScope; expiresAt: number }>();
 const SCOPE_TTL_MS = 30_000;
@@ -47,8 +54,23 @@ async function projectIdsForOrg(orgId: string): Promise<number[]> {
 export async function resolveTenantScope(principal: AuthPrincipal): Promise<TenantScope> {
   // orgId null means "not confined to an organization" — service callers and
   // super_admin only, both of which are set server-side at login.
+  //
+  // The family is checked as well as the claims. Absent scope used to be
+  // sufficient on its own, so any principal that reached here with both fields
+  // null was handed every project in every organization. A customer or guest
+  // token verified under the shared SESSION_SECRET produced exactly that shape
+  // — no kind, no orgId, no projectIds — and so authenticated as an
+  // unrestricted operator (ISSUE-057). Missing scope now means *no* scope for
+  // anyone who is not explicitly operator-side.
   if (principal.orgId === null && principal.projectIds === null) {
-    return UNRESTRICTED;
+    if (principal.kind === "service" || principal.kind === "operator") {
+      return UNRESTRICTED;
+    }
+    logger.warn(
+      { kind: principal.kind, subject: principal.subject, role: principal.role },
+      "Refused unrestricted scope to a principal that is not operator-side"
+    );
+    return DENY_ALL;
   }
 
   // Explicit per-project grants (operator_project_access) come from the
