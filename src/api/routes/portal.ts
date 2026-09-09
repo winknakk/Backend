@@ -143,22 +143,15 @@ export function registerPortalRoutes(
     let projectId: string = query?.projectId ? String(query.projectId) : "";
 
     if (!projectId || projectId === "undefined") {
-      try {
-        const convRes = await pool.query(
-          `SELECT project_id FROM conversations 
-           WHERE (identity_id::text = $1 OR identity_id IN (SELECT id FROM identities WHERE profile_id::text = $2))
-             AND status = 'open' 
-           ORDER BY id DESC LIMIT 1`,
-          [p.subject, p.profileId]
-        );
-        if (convRes.rows.length > 0 && convRes.rows[0].project_id) {
-          projectId = String(convRes.rows[0].project_id);
-        } else {
-          projectId = String(p.projectIds[0]);
-        }
-      } catch {
-        projectId = String(p.projectIds[0]);
-      }
+      // The principal's project, not "whichever conversation is newest".
+      //
+      // This used to fall back to `SELECT project_id FROM conversations ...
+      // ORDER BY id DESC LIMIT 1`, unscoped by project, so a customer holding
+      // two projects saw the ticket list of whichever project they had most
+      // recently opened a conversation in — including right after switching
+      // away from it. The sidebar must follow the same current project as the
+      // chat, and the token is what carries it.
+      projectId = String(p.projectIds[0]);
     }
 
     // The project the browser asked for is honoured only if the principal
@@ -347,19 +340,21 @@ export function registerPortalRoutes(
     }
 
     try {
-      let currentActiveProjectId = String(p.projectIds?.[0] || "1");
-      try {
-        const convRes = await pool.query(
-          `SELECT project_id FROM conversations 
-           WHERE (identity_id::text = $1 OR identity_id IN (SELECT id FROM identities WHERE profile_id::text = $2))
-             AND status = 'open' 
-           ORDER BY id DESC LIMIT 1`,
-          [p.subject, p.profileId]
-        );
-        if (convRes.rows.length > 0 && convRes.rows[0].project_id) {
-          currentActiveProjectId = String(convRes.rows[0].project_id);
-        }
-      } catch {}
+      // The authenticated principal is the authority on which project is current.
+      //
+      // This used to overwrite the token's project with the project of the
+      // customer's most recently created open conversation
+      // (`ORDER BY id DESC LIMIT 1`, unscoped by project). A customer holding
+      // more than one project therefore had "current project" decided by
+      // whichever conversation happened to be newest: after chatting in project
+      // B, switching back to A still reported B, so the portal relabelled itself
+      // to B and re-selected it — the switch appeared to do nothing, or to lag
+      // one step behind.
+      //
+      // `customerAuth` puts exactly one concrete project on the principal, and
+      // switch-project reissues the token, so the token already carries the
+      // answer.
+      const currentActiveProjectId = String(p.projectIds?.[0] || "1");
 
       const res = await pool.query(
         `SELECT DISTINCT p.id, p.name, p.company_id, c.name as company_name, p.org_id
@@ -415,24 +410,46 @@ export function registerPortalRoutes(
 
       const proj = projRes.rows[0];
 
-      await pool.query(
-        `INSERT INTO profile_projects (profile_id, project_id, created_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (profile_id, project_id) DO NOTHING`,
-        [parseInt(p.profileId, 10), targetProjectId]
+      // Switching SELECTS among projects the customer already holds. It does not
+      // grant one.
+      //
+      // This used to `INSERT INTO profile_projects ... ON CONFLICT DO NOTHING`
+      // for whatever project id was posted, with no membership check at all, and
+      // then hand back a customer token scoped to it. Since
+      // `GET /api/portal/projects` authorises from that same table, a customer
+      // could name any existing project, be granted it, and see it appear in
+      // their own project list — self-service access.
+      //
+      // Membership is still granted by the paths that actually prove
+      // entitlement: join-code redemption in WebChatGateway and LINE onboarding.
+      const member = await pool.query(
+        `SELECT 1 FROM profile_projects WHERE profile_id::text = $1::text AND project_id = $2 LIMIT 1`,
+        [p.profileId, targetProjectId]
       );
+      if (member.rowCount === 0) {
+        // Same shape as a project that does not exist: do not disclose which
+        // projects are real to someone who cannot use them.
+        return reply.code(404).send({ error: "Not Found", message: "Project not found" });
+      }
 
       if (proj.company_id) {
         await pool.query("UPDATE profiles SET company_id = $1 WHERE id::text = $2", [proj.company_id, p.profileId]);
       }
 
-      await pool.query(
-        `UPDATE conversations 
-         SET project_id = $1, org_id = $2
-         WHERE (identity_id::text = $3 OR identity_id IN (SELECT id FROM identities WHERE profile_id::text = $4))
-           AND status = 'open'`,
-        [targetProjectId, proj.org_id || "org_default", p.subject, p.profileId]
-      );
+      // The conversation is NOT moved.
+      //
+      // There used to be an `UPDATE conversations SET project_id = ...` over
+      // every open conversation of this customer. Messages belong to a
+      // conversation and the conversation is the project boundary, so that
+      // statement dragged the whole transcript into the newly selected project
+      // and retroactively relabelled history — which is exactly why the previous
+      // project's messages kept appearing after a switch. They had genuinely
+      // become the new project's messages.
+      //
+      // Each project keeps its own conversation. The WebChat gateway already
+      // resolves `findActiveByIdentity(identityId, projectId)` and opens or
+      // creates the conversation for the selected project on demand, so nothing
+      // needs to be rewritten here.
 
       const jwtSecret = process.env.SESSION_SECRET || process.env.JWT_SECRET || "ticketx-fallback-session-secret";
       const newToken = JwtUtil.sign(
