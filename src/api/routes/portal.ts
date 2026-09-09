@@ -8,6 +8,7 @@ import { TicketStateMachine } from "../../domain/ticket/TicketStateMachine";
 import { isLifecycleStatus, TicketLifecycleStatus } from "../../domain/ticket/TicketLifecycle";
 import { randomUUID } from "node:crypto";
 import { JwtUtil } from "../../shared/jwt";
+import { broadcastWebChatOutbound } from "../../presentation/http/routes/WebChatGateway";
 import { z } from "zod";
 
 const CreatePortalTicketSchema = z.object({
@@ -99,6 +100,28 @@ export function registerPortalRoutes(
         }
       } catch {}
     }
+
+    // Broadcast realtime ticket_created event to customer
+    try {
+      broadcastWebChatOutbound({
+        event: "ticket_created",
+        data: {
+          ticketId: (result.data as any)?.id || ticketNumber,
+          ticketNumber,
+          conversationId: convId,
+          projectId: parseInt(authoritativeProjectId, 10),
+          status: "NEW",
+          subject: body.subject,
+          summary: body.summary,
+          priority: body.priority,
+          severity: body.severity,
+          dueDate: slaInfo.dueDate,
+          createdAt: new Date().toISOString(),
+        },
+        conversationId: convId,
+        recipientId: authoritativeCustomerId,
+      });
+    } catch {}
 
     return reply.code(201).send({
       success: true,
@@ -220,6 +243,23 @@ export function registerPortalRoutes(
         message: result.reason || "Transition not permitted",
       });
     }
+
+    // Broadcast realtime ticket_updated event to customer
+    try {
+      broadcastWebChatOutbound({
+        event: "ticket_updated",
+        data: {
+          ticketId: match.id,
+          ticketNumber: match.ticket_number,
+          projectId: match.project_id || (projectId ? parseInt(projectId, 10) : undefined),
+          from: result.from,
+          to: result.to,
+          status: result.to,
+          updatedAt: new Date().toISOString(),
+        },
+        recipientId: p.subject,
+      });
+    } catch {}
 
     return reply.code(200).send({
       success: true,

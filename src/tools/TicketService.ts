@@ -11,6 +11,7 @@ import { DatabaseAdapter } from "../adapters/types";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { mapPlanePriorityToTicketPriority } from "../services/planeWebhookService";
 import { customerNotificationService } from "../services/CustomerNotificationService";
+import { broadcastWebChatOutbound } from "../presentation/http/routes/WebChatGateway";
 
 export class TicketService {
   private dbAdapter: DatabaseAdapter;
@@ -185,6 +186,27 @@ export class TicketService {
         .catch((err: any) =>
           console.error("Failed to send ticket_created notification:", err.message)
         );
+
+      // Realtime WebChat broadcast for active customer sidebar / state updates
+      try {
+        broadcastWebChatOutbound({
+          event: "ticket_created",
+          data: {
+            ticketId: ticket.id,
+            ticketNumber,
+            conversationId: ticket.conversationId,
+            projectId: parseInt(String(input.projectId), 10) || undefined,
+            status: ticket.status,
+            subject: ticket.subject,
+            summary: ticket.summary,
+            priority: ticket.priority,
+            severity: ticket.severity,
+            dueDate: dueDate.toISOString(),
+            createdAt: startDate.toISOString(),
+          },
+          conversationId: ticket.conversationId,
+        });
+      } catch {}
 
       return {
         success: true,
