@@ -161,7 +161,32 @@ export function registerPortalRoutes(
       }
     }
 
-    const tickets = await deps.dbAdapter.listAllTickets(undefined, projectId, undefined, undefined, tenantCtx);
+    // The project the browser asked for is honoured only if the principal
+    // actually holds it. `buildProjectBoundary` already confines the query to
+    // `tenantCtx.allowedProjectIds`, so a foreign id could only ever return
+    // nothing — but narrowing here keeps the authorization decision in the
+    // route rather than relying on a downstream side effect.
+    if (!p.projectIds.map(String).includes(String(projectId))) {
+      projectId = String(p.projectIds[0]);
+    }
+
+    // Scoped to the authenticated customer, not merely to the project.
+    //
+    // This used to pass `undefined` as the profile filter while the detail route
+    // two handlers below passed `profileId`. The list was therefore
+    // project-wide: a customer saw every ticket in the project, including other
+    // customers'. TCK-2026-11249 belongs to conversation 99961 -> identity
+    // 100108 (channel `line`) -> profile line_f822b3c11e1343a68b210b29, and it
+    // was being listed to an unrelated WebChat customer in project 101.
+    //
+    // The same mismatch produced the "visible but not found" report: tapping one
+    // of those foreign rows called the correctly scoped detail route, which
+    // could not find it and returned 404 -> "ไม่พบรายการตั๋วที่คุณค้นหา". The
+    // detail route was right; the list was wrong, so the list is what changes.
+    //
+    // `listAllTickets` applies the ownership chain the platform already defines:
+    // ticket -> conversation -> identity -> profile.
+    const tickets = await deps.dbAdapter.listAllTickets(undefined, projectId, p.profileId, undefined, tenantCtx);
     return reply.code(200).send({
       success: true,
       projectId,
