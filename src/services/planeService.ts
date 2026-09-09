@@ -535,6 +535,33 @@ export function selectPlaneTerminalState(states: PlaneStateSummary[]): PlaneStat
   );
 }
 
+/** Plane label attached when the customer re-opens a case. */
+export const PLANE_REOPEN_LABEL = "Re-Open";
+
+/**
+ * The block prepended to the work item description at re-open. `marker` is
+ * the round-specific text used to keep the write idempotent. Pure.
+ */
+export function buildPlaneReopenBlockHtml(meta: {
+  ticketNumber?: string | null;
+  reopenedCount?: number | null;
+  feedback?: string | null;
+  now?: Date;
+}): { html: string; marker: string } {
+  const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const round = Number(meta.reopenedCount) > 0 ? Number(meta.reopenedCount) : 1;
+  const marker = `\u{1F501} Re-Open #${round}`;
+  // dd/mm/yyyy hh:mm in Bangkok time (Gregorian year; th-TH short style prints a 2-digit Buddhist year).
+  const when = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Bangkok", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })
+    .format(meta.now || new Date())
+    .replace(",", "");
+  const suffix = meta.ticketNumber ? ` (${esc(String(meta.ticketNumber))})` : "";
+  const feedback = String(meta.feedback || "").replace(/\s+/g, " ").trim();
+  const feedbackHtml = feedback ? `<p>อาการที่ลูกค้าแจ้ง: ${esc(feedback)}</p>` : "";
+  const html = `<p><strong>${marker} · ${esc(when)} · ลูกค้าแจ้งว่าอาการเดิมยังไม่หาย${suffix}</strong></p>${feedbackHtml}<hr>`;
+  return { html, marker };
+}
+
 export function selectPlaneBacklogState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
   const candidates = states.filter((state) => state.id);
   return (
@@ -817,23 +844,28 @@ export class PlaneService {
     };
   }
 
-  async getOrCreatePlaneLabel(labelName: string, color = "#6366f1"): Promise<string | undefined> {
+  /**
+   * Resolves (or creates) a label id. `projectConfig` scopes the lookup to the
+   * ticket's own Plane project; without it the env default project is used
+   * (pre-2026-09-09 behaviour). The cache is keyed per project.
+   */
+  async getOrCreatePlaneLabel(labelName: string, color = "#6366f1", projectConfig?: PlaneProjectConfig): Promise<string | undefined> {
     const trimmed = labelName.trim();
     if (!trimmed) return undefined;
 
-    const cacheKey = trimmed.toLowerCase();
+    const effectiveConfig: PlaneProjectConfig = projectConfig || {
+      workspaceSlug: config.PLANE_WORKSPACE_SLUG || "ask-natapohn",
+      planeProjectId: config.PLANE_PROJECT_ID || "4e840554-dc75-4e39-b87d-db31d8bcc1c9",
+      apiBaseUrl: config.PLANE_API_URL || "https://projects.oneweb.tech",
+      credentialRef: config.PLANE_API_KEY || "plane_api_mock",
+    };
+    const cacheKey = `${effectiveConfig.planeProjectId}:${trimmed.toLowerCase()}`;
     if (this.labelCache.has(cacheKey)) {
       return this.labelCache.get(cacheKey);
     }
 
     try {
-      const defaultProjectConfig: PlaneProjectConfig = {
-        workspaceSlug: config.PLANE_WORKSPACE_SLUG || "ask-natapohn",
-        planeProjectId: config.PLANE_PROJECT_ID || "4e840554-dc75-4e39-b87d-db31d8bcc1c9",
-        apiBaseUrl: config.PLANE_API_URL || "https://projects.oneweb.tech",
-        credentialRef: config.PLANE_API_KEY || "plane_api_mock",
-      };
-      const projectBaseUrl = this.apiClient.getProjectBaseUrl(defaultProjectConfig);
+      const projectBaseUrl = this.apiClient.getProjectBaseUrl(effectiveConfig);
       const requestHeaders = {
         "Content-Type": "application/json",
         "X-API-Key": config.PLANE_API_KEY || "",
@@ -849,7 +881,7 @@ export class PlaneService {
 
       for (const lbl of labels) {
         if (lbl.id && lbl.name) {
-          this.labelCache.set(lbl.name.trim().toLowerCase(), String(lbl.id));
+          this.labelCache.set(`${effectiveConfig.planeProjectId}:${lbl.name.trim().toLowerCase()}`, String(lbl.id));
         }
       }
 
@@ -1325,6 +1357,53 @@ export class PlaneService {
       return true;
     } catch (err: any) {
       console.warn(`[PlaneService] Could not add customer feedback comment for ticket ${ticketId}: ${err?.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Marks the linked work item as re-opened where the engineer looks first:
+   * a "Re-Open" label and a block at the top of the description saying which
+   * round this is, when, and what the customer reported. State is NOT touched
+   * here (the outbox pushes Re-Open). Never throws; false = nothing written.
+   */
+  async markWorkItemReopened(
+    ticketId: string | number,
+    meta: { ticketNumber?: string | null; reopenedCount?: number | null; feedback?: string | null } = {}
+  ): Promise<boolean> {
+    try {
+      const { ticket } = await this.dbAdapter.getTicketCompanyContext(String(ticketId));
+      if (!ticket) return false;
+      const planeIssueId = ticket.planeIssueId || ticket.plane_issue_id;
+      if (!planeIssueId || String(planeIssueId).startsWith("mock-")) return false;
+      const projectConfig = await this.getProjectConfigForTicket(ticket);
+      const resolvedId = await this.resolvePlaneWorkItemId(String(ticketId), String(planeIssueId));
+
+      const workItem = await this.apiClient.getWorkItem(projectConfig, resolvedId);
+      const currentDescription = String(workItem?.description_html || "");
+      const existingLabels: string[] = Array.isArray(workItem?.labels)
+        ? workItem.labels.map((l: any) => String(l?.id ?? l)).filter(Boolean)
+        : [];
+
+      const block = buildPlaneReopenBlockHtml({
+        ticketNumber: meta.ticketNumber || ticket.ticket_number || ticket.ticketNumber || null,
+        reopenedCount: meta.reopenedCount ?? null,
+        feedback: meta.feedback ?? null,
+      });
+      const payload: Record<string, unknown> = {};
+      if (!currentDescription.includes(block.marker)) {
+        payload.description_html = `${block.html}${currentDescription}`;
+      }
+      const labelId = await this.getOrCreatePlaneLabel(PLANE_REOPEN_LABEL, "#f97316", projectConfig);
+      if (labelId && !existingLabels.includes(labelId)) {
+        payload.labels = [...existingLabels, labelId];
+      }
+      if (Object.keys(payload).length === 0) return false;
+
+      await this.apiClient.patchWorkItem(projectConfig, resolvedId, payload);
+      return true;
+    } catch (err: any) {
+      console.warn(`[PlaneService] Could not mark work item reopened for ticket ${ticketId}: ${err?.message}`);
       return false;
     }
   }

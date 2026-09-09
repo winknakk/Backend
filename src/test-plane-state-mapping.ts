@@ -12,6 +12,7 @@ import {
   selectPlaneReopenState,
   selectPlaneDeliveryState,
   selectPlaneTriagedState,
+  buildPlaneReopenBlockHtml,
 } from "./services/planeService";
 
 // --- 1. Plane name -> canonical label (what applyPlaneStatus receives) ---
@@ -109,5 +110,17 @@ assert.equal(pickLegacy("WAITING_CUSTOMER"), "In Progress", "no Waiting state ->
 assert.equal(selectPlaneReopenState(legacy as any)?.name, "Backlog");
 assert.equal(selectPlaneDeliveryState(legacy as any)?.name, "Done");
 assert.equal(selectPlaneTriagedState(excise as any)?.name, "Triaged");
+
+// --- 5. Re-open block prepended to the Plane description (pure) ---
+const blk = buildPlaneReopenBlockHtml({ ticketNumber: "TCK-2026-11249", reopenedCount: 2, feedback: "เปิดหน้าเว็บ <แล้ว> ขึ้น 414", now: new Date("2026-09-09T07:07:39Z") });
+assert.equal(blk.marker, "\u{1F501} Re-Open #2");
+assert.ok(blk.html.startsWith("<p><strong>\u{1F501} Re-Open #2 · "), "round header first");
+assert.ok(blk.html.includes("09/09/2026 14:07"), "Bangkok local time, Gregorian year");
+assert.ok(blk.html.includes("(TCK-2026-11249)"));
+assert.ok(blk.html.includes("อาการที่ลูกค้าแจ้ง: เปิดหน้าเว็บ &lt;แล้ว&gt; ขึ้น 414"), "feedback escaped");
+assert.ok(blk.html.endsWith("<hr>"));
+const blk0 = buildPlaneReopenBlockHtml({ reopenedCount: null, feedback: null });
+assert.equal(blk0.marker, "\u{1F501} Re-Open #1", "missing count -> round 1");
+assert.ok(!blk0.html.includes("อาการที่ลูกค้าแจ้ง"), "no feedback line without feedback");
 
 console.log("Plane state mapping tests passed (Excise vocabulary + legacy fallbacks).");

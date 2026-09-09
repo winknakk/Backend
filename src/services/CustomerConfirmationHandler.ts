@@ -330,6 +330,18 @@ export class CustomerConfirmationHandler {
     const count = Number(countRow?.rows?.[0]?.reopened_count || 1);
 
     if (feedback) await this.saveFeedback(input, ticket, feedback, count);
+    // Plane: "Re-Open" label + a round header on top of the description so the
+    // engineer sees this is the same bug coming back. Never blocks the reply.
+    void (async () => {
+      try {
+        const { PlaneService } = await import("./planeService");
+        const { AdapterFactory } = await import("../adapters/AdapterFactory");
+        const planeService = new PlaneService(AdapterFactory.getAdapter());
+        await planeService.markWorkItemReopened(ticket.id, { ticketNumber: ticket.ticket_number, reopenedCount: count, feedback });
+      } catch (err: any) {
+        logger.warn({ ticketId: ticket.id, error: err?.message }, "Plane reopen marking failed");
+      }
+    })();
 
     // No escalation ladder (operator decision 2026-09-08): the case keeps its
     // priority and its original SLA; the round number only appears in the
@@ -347,7 +359,7 @@ export class CustomerConfirmationHandler {
   private feedbackFrom(text: string): string | null {
     const stripped = String(text || "")
       .replace(TICKET_NUMBER_PATTERN, "")
-      .replace(/ยังมีปัญหาอยู่|อาการเดิมยังไม่หาย|อาการเดิม|ยังมีปัญหา|ยังไม่หาย|ครับ|ค่ะ|คับ|นะคะ|นะครับ/g, "")
+      .replace(/ยังมีปัญหาอยู่|อาการเดิมยังไม่หาย|(?:เป็น)?(?:ปัญหา|เรื่อง|อัน)เดิม|อาการเดิม|ยังมีปัญหา|ยังไม่หาย|ครับ|ค่ะ|คับ|นะคะ|นะครับ/g, "")
       .replace(/\s+/g, " ")
       .trim();
     return stripped.length >= 6 ? String(text).trim() : null;
