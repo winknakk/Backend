@@ -58,11 +58,15 @@ export interface SendRequest {
   projectId?: number | null;
   orgId?: string | null;
   correlationId?: string | null;
-  /** Optional case subject, shown when asking which case an image belongs to. */
+  /**
+   * Optional case subject: the "เรื่อง" bullet of progress / delivery
+   * messages, and the case named when asking which case an image belongs to.
+   */
   subject?: string | null;
   /**
-   * Extra plain-Thai sentence appended to the body (progress_update: the
-   * translated status and the target time). Never internal vocabulary.
+   * Extra plain-Thai text merged into the body. For progress_update it is the
+   * pre-formatted bullet lines (status, target time, reported-at) built by the
+   * SLA cadence engine. Never internal vocabulary.
    */
   detail?: string | null;
   /**
@@ -153,11 +157,13 @@ export class CustomerNotificationService {
   ] as const;
 
   /**
-   * SLA progress reports ("รายงานความคืบหน้า User" cadence). Each variant
-   * states the case number and promises nothing beyond "still being worked
-   * on"; the caller appends the translated status and target time via
-   * SendRequest.detail. Seeded from the slot key so a re-run of the same slot
-   * (which the idempotency index already blocks) could never differ.
+   * SLA progress reports ("รายงานความคืบหน้า User" cadence), laid out as a
+   * one-line opener, a bullet block and a one-line closer (operator decision
+   * 2026-09-09: a status update is scanned, not read). The opener states the
+   * case number and promises nothing beyond "still being worked on"; the
+   * bullet lines (status, target time, reported-at) come from the SLA cadence
+   * engine via SendRequest.detail. Seeded from the slot key so a re-run of the
+   * same slot (which the idempotency index already blocks) could never differ.
    */
   private static readonly PROGRESS_VARIANTS = [
     "อัปเดตความคืบหน้าเคส {ticket} ให้นะคะ",
@@ -184,13 +190,33 @@ export class CustomerNotificationService {
    * that ever changes.
    */
 
-  /** Engineering set Delivery to Customer: ask the customer to test. */
+  /**
+   * Engineering set Delivery to Customer: same opener / bullets / closer
+   * layout as the progress report. The opener names the case and says the
+   * fix is done; the bullets carry the subject, the state the customer is in
+   * (waiting on their test); the ask ("try it, tap a chip") is the closing
+   * paragraph, as a sentence, right above the chips (operator decision
+   * 2026-09-09: an instruction reads naturally as prose, not as a bullet).
+   */
   private static readonly DELIVERY_VARIANTS = [
-    "ทีมงานแก้ไขเคส {ticket}{about} เรียบร้อยแล้วค่ะ รบกวนลองใช้งานดูอีกครั้งนะคะ ถ้าใช้ได้แล้วแตะ 'ใช้งานได้แล้ว' หรือถ้ายังติดอยู่แตะ 'ยังมีปัญหาอยู่' ข้างล่างนี้ได้เลยค่ะ",
-    "แอดมินได้รับแจ้งจากทีมงานว่าเคส {ticket}{about} แก้ไขเสร็จแล้วค่ะ รบกวนช่วยทดสอบหน่อยนะคะ แล้วแตะบอกผลข้างล่างนี้ได้เลยค่ะ",
-    "เคส {ticket}{about} ทีมงานแก้ไขเสร็จแล้วนะคะ ลองเข้าใช้งานดูอีกครั้งได้เลยค่ะ เรียบร้อยดีไหมคะ แตะบอกแอดมินข้างล่างนี้ได้เลย",
-    "อัปเดตค่ะ เคส {ticket}{about} ทางทีมแก้ไขให้เรียบร้อยแล้ว รบกวนลองทดสอบดูนะคะ ใช้ได้แล้วหรือยังติดตรงไหน แตะบอกได้เลยค่ะ",
-    "ข่าวดีค่ะ เคส {ticket}{about} แก้ไขเสร็จเรียบร้อยแล้วนะคะ รบกวนลองใช้งานดูสักครู่ แล้วแตะบอกผลข้างล่างนี้ให้แอดมินหน่อยค่ะ",
+    "ทีมงานแก้ไขเคส {ticket} เรียบร้อยแล้วค่ะ",
+    "แอดมินได้รับแจ้งจากทีมงานว่าเคส {ticket} แก้ไขเสร็จแล้วค่ะ",
+    "เคส {ticket} ที่แจ้งไว้ ทีมงานแก้ไขเสร็จแล้วนะคะ",
+    "อัปเดตค่ะ เคส {ticket} ทางทีมแก้ไขให้เรียบร้อยแล้วนะคะ",
+    "ข่าวดีค่ะ เคส {ticket} แก้ไขเสร็จเรียบร้อยแล้วนะคะ",
+  ] as const;
+
+  /** Status bullet of the delivery message (fixed: the customer scans this). */
+  private static readonly DELIVERY_STATUS_LINE = "แก้ไขสำเร็จ";
+  /** The ask, opening the closing paragraph; a seeded closer follows it. */
+  private static readonly DELIVERY_NEXT_LINE =
+    "ลองเข้าใช้งานอีกครั้ง แล้วแตะ 'ใช้งานได้แล้ว' หรือ 'ยังมีปัญหาอยู่' ข้างล่างนี้ได้เลยค่ะ";
+
+  /** Closing line for delivery messages; seeded with a different stride than the opener. */
+  private static readonly DELIVERY_CLOSERS = [
+    "ขอบคุณที่รอนะคะ",
+    "แอดมินรอฟังผลอยู่นะคะ",
+    "ถ้ายังติดตรงไหนบอกแอดมินได้เลยค่ะ",
   ] as const;
 
   /** Customer said it works (or asked to close): confirm before closing. */
@@ -317,6 +343,26 @@ export class CustomerNotificationService {
     return variants[(Number(m[1]) + offset) % variants.length];
   }
 
+  /**
+   * Opener, blank line, "• label: value" bullets, blank line, closer. LINE
+   * text messages render "\n" and "•" as-is (no markup of any kind, so bold
+   * is not an option there); the WebChat views render with pre-wrap. Blank
+   * or missing values are dropped rather than shown as an empty bullet.
+   */
+  private static layout(opener: string, bullets: Array<[label: string, value: string | null | undefined]>, closer: string): string {
+    const lines = bullets
+      .map(([label, value]) => [label, String(value || "").trim()] as const)
+      .filter(([, value]) => value.length > 0)
+      .map(([label, value]) => `• ${label}: ${value}`);
+    return [opener, lines.join("\n"), closer].filter((part) => part.length > 0).join("\n\n");
+  }
+
+  /** The "เรื่อง" bullet value: the subject, cut with an ellipsis past 80 characters. */
+  private static subjectLine(subject?: string | null): string {
+    const raw = String(subject || "").trim();
+    return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+  }
+
   /** Wording is deliberately conservative — see rule 2 above. */
   private body(type: CustomerNotificationType, ticketNumber?: string | null, seed?: string | null, subject?: string | null, detail?: string | null): string {
     switch (type) {
@@ -328,10 +374,15 @@ export class CustomerNotificationService {
           .replace("{ticket}", ticketNumber ? ticketNumber : "ที่แจ้งไว้");
         // 5 openers × 4 closers with different strides → 20 distinct pairs before any repeat.
         const closer = CustomerNotificationService.pickRotating(CustomerNotificationService.PROGRESS_CLOSERS, seed, 1);
-        const extra = String(detail || "").trim();
-        return extra
-          ? `${opener} ${extra} ${closer}`
-          : `${opener} ทีมงานยังดำเนินการอยู่ค่ะ ${closer}`;
+        // `detail` is the pre-formatted bullet block from the SLA cadence
+        // engine ("• สถานะ: …\n• คาดว่าเรียบร้อย: …\n• แจ้งเมื่อ: …"); a caller
+        // without one still gets a status line, never a bare opener.
+        const about = CustomerNotificationService.subjectLine(subject);
+        const lines = [
+          ...(about ? [`• เรื่อง: ${about}`] : []),
+          String(detail || "").trim() || "• สถานะ: ทีมงานยังดำเนินการอยู่ค่ะ",
+        ];
+        return [opener, lines.join("\n"), closer].join("\n\n");
       }
       case "acknowledgement":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_VARIANTS, seed);
@@ -376,8 +427,20 @@ export class CustomerNotificationService {
         return ticketNumber
           ? `สร้างเคส #${ticketNumber} ให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ`
           : "สร้างเคสให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ";
-      case "resolution_confirmation":
-        return this.fill(CustomerNotificationService.DELIVERY_VARIANTS, seed, ticketNumber, subject);
+      case "resolution_confirmation": {
+        // 5 openers × 3 closers with different strides → 15 pairs; the bullets are fixed.
+        const opener = CustomerNotificationService.pickRotating(CustomerNotificationService.DELIVERY_VARIANTS, seed)
+          .replace("{ticket}", ticketNumber ? ticketNumber : "ที่แจ้งไว้");
+        const closer = CustomerNotificationService.pickRotating(CustomerNotificationService.DELIVERY_CLOSERS, seed, 1);
+        return CustomerNotificationService.layout(
+          opener,
+          [
+            ["เรื่อง", CustomerNotificationService.subjectLine(subject)],
+            ["สถานะ", CustomerNotificationService.DELIVERY_STATUS_LINE],
+          ],
+          `${CustomerNotificationService.DELIVERY_NEXT_LINE} ${closer}`
+        );
+      }
       case "close_confirmation_request":
         return this.fill(CustomerNotificationService.CLOSE_QUESTION_VARIANTS, seed, ticketNumber, subject);
       case "closed":

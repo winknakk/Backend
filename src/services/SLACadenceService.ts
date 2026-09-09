@@ -90,23 +90,25 @@ const ADVISORY_LOCK_KEY = "ticketx:sla_cadence";
 /** Plain-Thai status wording — same semantics as the reply prompt's table. */
 function thaiStatus(status: string | null | undefined): string {
   switch (String(status || "").trim().toUpperCase()) {
+    // Short labels: they sit on a "• สถานะ:" bullet the customer scans
+    // (operator decision 2026-09-09), so no trailing explanation.
     case "NEW":
     case "OPEN":
     case "BACKLOG":
     case "TODO":
-      return "รับเรื่องไว้แล้ว อยู่ในคิวรอดำเนินการ";
+      return "รับเรื่องแล้ว รอดำเนินการ";
     case "TRIAGED":
-      return "ตรวจสอบเบื้องต้นแล้ว กำลังจัดคิวให้ทีมที่รับผิดชอบ";
+      return "ตรวจสอบเบื้องต้นแล้ว";
     case "IN_PROGRESS":
-      return "ทีมงานกำลังเร่งดำเนินการแก้ไขอยู่";
+      return "กำลังแก้ไข";
     case "REOPENED":
-      return "กลับมาเปิดเคสให้อีกครั้ง ทีมงานกำลังตรวจสอบซ้ำ";
+      return "เปิดเคสอีกครั้ง กำลังตรวจสอบซ้ำ";
     case "WAITING_CUSTOMER":
-      return "รอข้อมูลเพิ่มเติมจากทางลูกค้า";
+      return "รอข้อมูลเพิ่มเติมจากคุณ";
     case "WAITING_INTERNAL":
-      return "รอทีมภายในตรวจสอบอยู่";
+      return "รอทีมภายในตรวจสอบ";
     default:
-      return "อยู่ระหว่างดำเนินการ";
+      return "กำลังดำเนินการ";
   }
 }
 
@@ -672,9 +674,18 @@ export class SLACadenceService {
     const slotKey = slotKeyOverride || `ticket:${t.id}:user:${slot}`;
     const due = t.due_date ? new Date(t.due_date) : null;
     const dueAhead = due && !isNaN(due.getTime()) && due.getTime() > now.getTime();
-    const detail = dueAhead
-      ? `ตอนนี้${thaiStatus(t.status)} คาดว่าจะเรียบร้อยภายใน${thaiWhen(due as Date, now)} ค่ะ`
-      : `ตอนนี้${thaiStatus(t.status)} ทีมงานกำลังเร่งดำเนินการให้โดยเร็วที่สุดค่ะ`;
+    // Bullet lines of the progress report (the "เรื่อง" line is added by the
+    // notification service from `subject`). Layout decision 2026-09-09: the
+    // customer scans for the status and the target time, so each is its own
+    // line instead of one long sentence.
+    const created = t.created_at ? new Date(t.created_at) : null;
+    const detail = [
+      `• สถานะ: ${thaiStatus(t.status)}`,
+      dueAhead
+        ? `• คาดว่าเรียบร้อย: ${thaiWhen(due as Date, now)}`
+        : "• คาดว่าเรียบร้อย: ทีมงานกำลังเร่งดำเนินการให้โดยเร็วที่สุดค่ะ",
+      ...(created && !isNaN(created.getTime()) ? [`• แจ้งเมื่อ: ${thaiWhen(created, now)}`] : []),
+    ].join("\n");
     if (this.effectiveDryRun()) {
       logger.info({ ticketNumber: t.ticket_number, slot, slotKey, conversationId: t.conversation_id, detail }, "[dry-run] would send customer progress report");
       return true;
@@ -689,6 +700,7 @@ export class SLACadenceService {
         idempotencyKey: slotKey,
         ticketId: t.id,
         ticketNumber: t.ticket_number,
+        subject: t.subject ?? null,
         projectId: t.project_id ?? null,
         correlationId: slotKey,
         detail,
