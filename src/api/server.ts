@@ -497,7 +497,14 @@ fastify.addHook("onRequest", async (request, reply) => {
   // shared cache can serve one origin's CORS headers to another.
   reply.header("Vary", "Origin");
 
-  if (origin && allowedOrigins.has(origin)) {
+  const isLocalDevOrigin =
+    config.NODE_ENV !== "production" &&
+    origin &&
+    /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
+  const isAllowed = Boolean(origin && (allowedOrigins.has(origin) || isLocalDevOrigin));
+
+  if (origin && isAllowed) {
     reply.header("Access-Control-Allow-Origin", origin);
     reply.header("Access-Control-Allow-Credentials", "true");
     reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
@@ -513,7 +520,7 @@ fastify.addHook("onRequest", async (request, reply) => {
   if (request.method === "OPTIONS") {
     // A preflight from an unlisted origin gets no CORS headers, so the browser
     // blocks the real request regardless of the status code returned here.
-    return reply.code(origin && allowedOrigins.has(origin) ? 204 : 403).send();
+    return reply.code(isAllowed ? 204 : 403).send();
   }
 });
 

@@ -37,4 +37,53 @@ export class PostgresMessageRepository implements IMessageRepository {
     // Return sorted in chronological order (oldest to newest)
     return rows.reverse().map(r => MessageMapper.toDomain(r));
   }
+
+  /**
+   * One page of a conversation, newest-first internally, returned oldest-first.
+   *
+   * `findRecentByConversationId` can only ever return the newest N, so anything
+   * older than that window was unreachable by any client — a conversation with
+   * 135 rows served 50 and no way to ask for the rest.
+   *
+   * The cursor is a keyset on `(created_at, id)`, the exact tuple the ORDER BY
+   * uses. An `id`-only cursor would be wrong here: the leading sort key is
+   * `created_at`, so a row whose timestamp does not follow its id (a backfill,
+   * an imported transcript) could be skipped or served twice while paging.
+   *
+   * `limit + 1` rows are read so `hasMore` is known without a second COUNT over
+   * the conversation.
+   */
+  async findPageByConversationId(
+    conversationId: string,
+    limit: number,
+    beforeId?: number
+  ): Promise<{ messages: Message[]; hasMore: boolean; nextCursor: string | null }> {
+    const params: unknown[] = [parseInt(conversationId, 10)];
+    let cursorClause = "";
+    if (beforeId !== undefined && Number.isFinite(beforeId)) {
+      params.push(beforeId);
+      cursorClause = `
+         AND (created_at, id) < (SELECT created_at, id FROM messages WHERE id = $${params.length})`;
+    }
+    params.push(limit + 1);
+
+    const { rows } = await pool.query(
+      `SELECT * FROM messages
+        WHERE conversation_id = $1${cursorClause}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $${params.length}`,
+      params
+    );
+
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+    // Oldest row of this page: the cursor a caller passes back as `before`.
+    const nextCursor = page.length > 0 ? String(page[page.length - 1].id) : null;
+
+    return {
+      messages: page.reverse().map((r) => MessageMapper.toDomain(r)),
+      hasMore,
+      nextCursor,
+    };
+  }
 }

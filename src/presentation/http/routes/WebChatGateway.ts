@@ -180,29 +180,39 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           const outEvent = payload.event || (payload.type === "takeover_started" ? "takeover_started" : "message");
           const resolvedId = payload.id || (payload.messageId ? String(payload.messageId) : undefined) || randomUUID();
           const resolvedExternalId = payload.externalId || (payload.messageId ? String(payload.messageId) : undefined) || (payload.id ? String(payload.id) : undefined);
-          const msgPayload = outEvent === "message" ? {
-            event: "message",
-            data: {
-              id: resolvedId,
-              externalId: resolvedExternalId,
-              role: payload.role || "ai",
-              content: payload.text || payload.content || "",
-              createdAt: payload.sentAt || new Date().toISOString(),
-              attachments: payload.attachments || [],
-              actions: Array.isArray(payload.actions) ? payload.actions : undefined
-            }
-          } : {
-            event: outEvent,
-            data: {
-              conversation_id: String(payload.data?.conversation_id || payload.data?.conversationId || payload.conversationId || ""),
-              conversationId: String(payload.data?.conversationId || payload.data?.conversation_id || payload.conversationId || ""),
-              state: String(payload.data?.state || payload.data?.status || payload.state || payload.status || "PENDING_HUMAN"),
-              status: String(payload.data?.status || payload.data?.state || payload.status || payload.state || "PENDING_HUMAN"),
-              reason: String(payload.data?.reason || payload.reason || "ai_escalation"),
-              reasonCode: String(payload.data?.reasonCode || payload.reasonCode || "AI_ESCALATED_HUMAN"),
-              sentAt: payload.sentAt || payload.data?.sentAt || new Date().toISOString()
-            }
-          };
+          let msgPayload: any;
+          if (outEvent === "ticket_created" || outEvent === "ticket_updated") {
+            msgPayload = {
+              event: outEvent,
+              data: payload.data || payload
+            };
+          } else if (outEvent === "message") {
+            msgPayload = {
+              event: "message",
+              data: {
+                id: resolvedId,
+                externalId: resolvedExternalId,
+                role: payload.role || "ai",
+                content: payload.text || payload.content || "",
+                createdAt: payload.sentAt || new Date().toISOString(),
+                attachments: payload.attachments || [],
+                actions: Array.isArray(payload.actions) ? payload.actions : undefined
+              }
+            };
+          } else {
+            msgPayload = {
+              event: outEvent,
+              data: {
+                conversation_id: String(payload.data?.conversation_id || payload.data?.conversationId || payload.conversationId || ""),
+                conversationId: String(payload.data?.conversationId || payload.data?.conversation_id || payload.conversationId || ""),
+                state: String(payload.data?.state || payload.data?.status || payload.state || payload.status || "PENDING_HUMAN"),
+                status: String(payload.data?.status || payload.data?.state || payload.status || payload.state || "PENDING_HUMAN"),
+                reason: String(payload.data?.reason || payload.reason || "ai_escalation"),
+                reasonCode: String(payload.data?.reasonCode || payload.reasonCode || "AI_ESCALATED_HUMAN"),
+                sentAt: payload.sentAt || payload.data?.sentAt || new Date().toISOString()
+              }
+            };
+          }
 
           const targetRooms: string[] = [];
           if (payload.conversationId) {
@@ -493,7 +503,28 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         return reply.code(200).send({ conversationId: null, messages: [] });
       }
 
-      const messages = await messageRepo.findRecentByConversationId(activeConv.id, 50);
+      // Paging contract.
+      //
+      // This used to be a hardcoded `findRecentByConversationId(id, 50)` with no
+      // query parameters at all, so a conversation with more than 50 messages
+      // silently lost the rest: conversation 1210 held 135 rows, the API served
+      // 50, and nothing could ask for an older page.
+      //
+      // `before` is a keyset cursor (the oldest id of the page just received),
+      // not an offset, so pages stay stable while new messages arrive at the
+      // other end of the conversation. Absent parameters reproduce the previous
+      // behaviour exactly: the newest 50, oldest-first.
+      const query = (request.query || {}) as Record<string, unknown>;
+      const requestedLimit = parseInt(String(query.limit ?? ""), 10);
+      const limit = Number.isFinite(requestedLimit)
+        ? Math.min(Math.max(requestedLimit, 1), 200)
+        : 50;
+      const requestedBefore = parseInt(String(query.before ?? ""), 10);
+      const before =
+        Number.isFinite(requestedBefore) && requestedBefore > 0 ? requestedBefore : undefined;
+
+      const page = await messageRepo.findPageByConversationId(activeConv.id, limit, before);
+      const messages = page.messages;
 
       // Hydrate attachments
       const messagesWithAttachments = await Promise.all(
@@ -504,6 +535,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           );
           return {
             id: m.id,
+            externalId: (m as any).externalId || m.id,
             role: m.role,
             content: m.content,
             createdAt: m.createdAt,
@@ -519,7 +551,13 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
       return reply.code(200).send({
         conversationId: activeConv.id,
-        messages: messagesWithAttachments
+        messages: messagesWithAttachments,
+        // Additive: existing clients read only `conversationId` and `messages`.
+        // `nextCursor` is the oldest id in this page — pass it back as `before`
+        // to fetch the page before it. `hasMore` is false at the true start of
+        // the conversation.
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor
       });
     } catch (err: any) {
       logger.error({ error: err.message }, "Failed to retrieve messages");
@@ -1269,8 +1307,27 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           }
         };
 
-        // Broadcast to customer rooms (conversation + recipient) exactly once per socket
-        broadcastToRooms([room, recipientRoom], clientMsgPayload, socket);
+        // Broadcast to customer rooms (conversation + recipient) exactly once per socket.
+        //
+        // The sender is deliberately NOT skipped. This payload is the only
+        // acknowledgement the customer gets that their message was actually
+        // accepted and persisted: it carries the real `messages.id` alongside
+        // the `externalId` the client generated, which is exactly what the
+        // portal reconciles against.
+        //
+        // The portal keeps its optimistic bubble `pending` after a successful
+        // send on purpose (`OPTIMISTIC_SETTLED` in chatStore.ts) so that
+        // `findOptimisticTwin` can settle it to `delivered` when this echo
+        // arrives. Passing `socket` as `skipSocket` here made the sender the one
+        // socket that never received it, so its own bubble stayed `pending` —
+        // rendered at `opacity-70` — until a refresh reloaded history. A send
+        // that reaches the server looked identical to one that did not.
+        //
+        // Re-delivery is safe: `_deliveredMessageIds` gives each socket the
+        // payload once across both rooms, and the store keys the settled bubble
+        // by `externalId`, so a repeat is dropped by identity rather than by
+        // content.
+        broadcastToRooms([room, recipientRoom], clientMsgPayload);
 
         // 6. If human takeover is active: notify operator in console and DO NOT enqueue to BullMQ / PromptX!
         if (isHumanTakeover) {
@@ -1537,6 +1594,8 @@ function broadcastToRoom(room: string, payload: any, skipSocket?: any) {
  * when PromptX replies), ensuring delivery even when Redis is down or unavailable.
  */
 export function broadcastWebChatOutbound(payload: {
+  event?: string;
+  data?: any;
   conversationId?: string | number;
   recipientId?: string;
   text?: string;
@@ -1549,10 +1608,14 @@ export function broadcastWebChatOutbound(payload: {
   attachments?: any[];
   actions?: any[];
 }) {
+  const eventName = payload.event || "message";
   const resolvedId = payload.id || (payload.messageId ? String(payload.messageId) : undefined) || randomUUID();
   const resolvedExternalId = payload.externalId || (payload.messageId ? String(payload.messageId) : undefined) || (payload.id ? String(payload.id) : undefined);
-  const msgPayload = {
-    event: "message",
+  const msgPayload = payload.data ? {
+    event: eventName,
+    data: payload.data
+  } : {
+    event: eventName,
     data: {
       id: resolvedId,
       externalId: resolvedExternalId,
