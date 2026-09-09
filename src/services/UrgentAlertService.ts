@@ -196,15 +196,12 @@ export class DoneEmailService {
  * reminder branch (`ticketx.sla_dev_reminder` with `reminder.kind = "reopen"`)
  * so the flow needs no new branch — its formatter renders the re-open
  * subject/body from `kind`. Once per reopen cycle (claim kind `reopen`,
- * slot = reopened_count). When escalated, the fallback (manager) address is
- * added to the recipients.
+ * slot = reopened_count).
  */
 export class ReopenAlertService {
   async notifyReopened(input: {
     ticketId: number;
     feedback?: string | null;
-    escalated?: boolean;
-    takeover?: boolean;
     correlationId?: string;
   }): Promise<{ sent: boolean; reason?: string }> {
     try {
@@ -229,7 +226,6 @@ export class ReopenAlertService {
       let devEmails: string[] = Array.isArray(t.dev_emails) ? t.dev_emails.map((v: unknown) => String(v).trim()).filter(valid) : [];
       if (!devEmails.length && valid(t.legacy_dev_email)) devEmails = [String(t.legacy_dev_email).trim()];
       if (!devEmails.length && valid(fallback)) devEmails = [fallback];
-      if (input.escalated && valid(fallback)) devEmails = Array.from(new Set([...devEmails, fallback]));
       if (!devEmails.length) return { sent: false, reason: "NO_RECIPIENT" };
 
       const count = Number(t.reopened_count || 1);
@@ -244,11 +240,7 @@ export class ReopenAlertService {
       if (!claim.rows.length) return { sent: false, reason: "ALREADY_SENT" };
       const claimId = claim.rows[0].id;
 
-      const label = input.takeover
-        ? `ลูกค้าแจ้งว่ายังมีปัญหา รอบที่ ${count} - ส่งต่อให้เจ้าหน้าที่ดูแล`
-        : input.escalated
-          ? `ลูกค้าแจ้งว่ายังมีปัญหา รอบที่ ${count} - ยกระดับความสำคัญ`
-          : `ลูกค้าแจ้งว่ายังมีปัญหา รอบที่ ${count}`;
+      const label = `ลูกค้าแจ้งว่ายังมีปัญหา รอบที่ ${count}`;
       try {
         await axios.post(
           url,
@@ -270,15 +262,15 @@ export class ReopenAlertService {
               repeat_label: label,
               slot: count,
               reopened_count: count,
-              escalated: Boolean(input.escalated),
-              takeover: Boolean(input.takeover),
+              escalated: false,
+              takeover: false,
               plane_issue_id: t.plane_issue_id || null,
             },
           },
           { headers: { "Content-Type": "application/json" }, timeout: 45_000 }
         );
         await pool.query(`UPDATE sla_cadence_claims SET status = 'sent', sent_at = NOW() WHERE id = $1`, [claimId]).catch(() => {});
-        logger.info({ ticketNumber: t.ticket_number, count, escalated: input.escalated }, "Re-open alert posted to the notification flow");
+        logger.info({ ticketNumber: t.ticket_number, count }, "Re-open alert posted to the notification flow");
         return { sent: true };
       } catch (err: any) {
         const code = String(err?.code || "");

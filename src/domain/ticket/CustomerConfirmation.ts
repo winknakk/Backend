@@ -169,19 +169,33 @@ export type ReopenScope =
  * guessed. "อันเดิมใช้ได้แล้ว แต่หน้ารายงานจอขาว" used to read as CONFIRMED
  * because of "ใช้ได้แล้ว".
  */
+/** Explicit "same problem" wording — the chip, or the customer's own words. */
+export const SAME_ISSUE_PATTERN =
+  /^(?:เป็น)?(?:ปัญหา|อาการ|เรื่อง)เดิม|ปัญหาเดิม|อาการเดิม|เรื่องเดิม|ยังเหมือนเดิม|เหมือนเดิมเลย|error\s*เดิม|same (?:bug|issue|problem|error)/i;
+
+/**
+ * SAME and NEW need the customer's own words for it (the chips carry them).
+ * A bare complaint ("ยังมีปัญหาอยู่", "ยังไม่ผ่าน") is NONE here and the
+ * handler asks which it is (operator decision 2026-09-08: always ask). A
+ * message that praises the fix while complaining about something else
+ * ("อันเดิมใช้ได้แล้ว แต่หน้ารายงานจอขาว") is AMBIGUOUS and is asked the same way.
+ */
 export function detectReopenScope(text: string): ReopenScope {
   const raw = String(text || "").replace(/\s+/g, " ").trim();
   const t = normalize(raw);
   if (!t) return "NONE";
-  if (/^อาการเดิม/.test(raw) || t.includes("อาการเดิมยังไม่หาย")) return "SAME";
-  if (/^เป็นปัญหาใหม่/.test(raw)) return "NEW";
-  const hasNew = NEW_ISSUE_PATTERN.test(raw);
+  const hasNew = NEW_ISSUE_PATTERN.test(raw) || /^(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(raw);
+  const hasSame = SAME_ISSUE_PATTERN.test(raw);
+  if (hasNew && !hasSame) return "NEW";
+  if (hasSame && !hasNew) return "SAME";
+  if (hasNew && hasSame) return "AMBIGUOUS";
   const hasReject = REJECTION_MARKERS.some((m) => t.includes(normalize(m)));
-  const hasConfirm = CONFIRMATION_MARKERS.some((m) => t.includes(normalize(m)));
-  if (hasNew) return "NEW";
+  // Confirmation words are looked for only outside the rejection phrases:
+  // "ไม่ผ่านค่ะ" contains "ผ่านค่ะ" and must not read as praise + complaint.
+  const tSansReject = REJECTION_MARKERS.reduce((s, m) => s.split(normalize(m)).join(" "), t);
+  const hasConfirm = CONFIRMATION_MARKERS.some((m) => tSansReject.includes(normalize(m)));
   if (hasConfirm && hasReject) return "AMBIGUOUS";
   if (hasConfirm && /แต่|ส่วน|ทว่า|ยกเว้น|however|but /i.test(raw)) return "AMBIGUOUS";
-  if (hasReject) return "SAME";
   return "NONE";
 }
 

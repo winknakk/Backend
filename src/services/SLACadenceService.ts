@@ -153,6 +153,10 @@ export interface CadenceRunResult {
   awaitingEvaluated: number;
   nudgesSent: number;
   autoClosed: number;
+  /** Failed customer pushes re-sent this pass (transport errors only). */
+  notificationsRetried?: number;
+  /** "ขอเวลาเพิ่ม" notices sent in the last 30 min before a resolution target. */
+  dueWarningsSent?: number;
   skippedLocked: boolean;
 }
 
@@ -213,6 +217,7 @@ export interface SLACadenceOptions {
 
 export class SLACadenceService {
   private timer: NodeJS.Timeout | null = null;
+  private stopped = false;
   private isProcessing = false;
   private readonly webhookUrl: string | null;
   private readonly fallbackDevEmail: string;
@@ -226,6 +231,10 @@ export class SLACadenceService {
   private intervalMs = 900_000;
   private startedAt: Date | null = null;
   private lastTickAt: Date | null = null;
+  /** When the one-shot timer fires next and why ("interval" safety tick or a
+   *  ticket's slot "boundary"). */
+  private nextWakeAt: Date | null = null;
+  private nextWakeReason: "interval" | "boundary" | null = null;
   private lastRunAt: Date | null = null;
   private lastRunDurationMs: number | null = null;
   private lastRunResult: CadenceRunResult | null = null;
@@ -247,28 +256,85 @@ export class SLACadenceService {
     this.catchUpGraceMs = this.catchUpGraceMinutes * 60_000;
   }
 
-  /** Periodic evaluation. Default 15 minutes — finer than the shortest (1 h) interval. */
+  /**
+   * Boundary-aware evaluation loop.
+   *
+   * The engine wakes at whichever comes first: the next slot boundary of any
+   * open ticket (so an hourly Urgent reminder goes out at the hour, not up to
+   * 15 minutes later) or the safety interval (default 15 minutes) that covers
+   * tickets created or re-opened between wake-ups and any clock drift.
+   */
   startMonitor(intervalMs = 900_000): void {
     if (this.timer) return;
+    this.stopped = false;
     this.intervalMs = intervalMs;
     this.startedAt = new Date();
     this.lastTickAt = this.startedAt;
     logger.info(
       { intervalMs, webhookConfigured: Boolean(this.webhookUrl), lookbackDays: this.lookbackDays },
-      "Starting SLA cadence engine"
+      "Starting SLA cadence engine (boundary-aware)"
     );
-    this.timer = setInterval(() => {
+    void this.scheduleNextWake();
+  }
+
+  /** Seconds after a slot boundary before the engine wakes for it — lets the
+   *  ticket's own clock settle (DB timestamps, business-day rounding). */
+  private static readonly BOUNDARY_SETTLE_MS = 5_000;
+
+  private async scheduleNextWake(): Promise<void> {
+    if (this.stopped) return;
+    const now = new Date();
+    const intervalTick = new Date((this.lastTickAt ?? now).getTime() + this.intervalMs);
+    let wakeAt = intervalTick;
+    let reason: "interval" | "boundary" = "interval";
+    try {
+      const boundary = await this.earliestUpcomingBoundary(now);
+      if (boundary) {
+        const candidate = new Date(boundary.getTime() + SLACadenceService.BOUNDARY_SETTLE_MS);
+        if (candidate.getTime() < wakeAt.getTime()) { wakeAt = candidate; reason = "boundary"; }
+      }
+    } catch (err: any) {
+      logger.warn({ error: err.message }, "SLA cadence could not compute the next slot boundary; using the interval tick");
+    }
+    if (this.stopped) return;
+    const delay = Math.max(1_000, wakeAt.getTime() - Date.now());
+    this.nextWakeAt = new Date(Date.now() + delay);
+    this.nextWakeReason = reason;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
       this.lastTickAt = new Date();
-      this.evaluateOpenTickets().catch((err: any) =>
-        logger.error({ error: err.message }, "SLA cadence evaluation failed")
-      );
-    }, intervalMs);
+      this.evaluateOpenTickets()
+        .catch((err: any) => logger.error({ error: err.message }, "SLA cadence evaluation failed"))
+        .finally(() => void this.scheduleNextWake());
+    }, delay);
+  }
+
+  /**
+   * The earliest future slot boundary across open tickets that have a cadence
+   * rule (dev reminder, or customer report while the AI still owns the chat).
+   */
+  private async earliestUpcomingBoundary(now: Date): Promise<Date | null> {
+    const tickets = await this.loadOpenTickets();
+    let earliest: Date | null = null;
+    const consider = (d: Date) => { if (d.getTime() > now.getTime() && (!earliest || d.getTime() < earliest.getTime())) earliest = d; };
+    for (const t of tickets) {
+      const rule = CADENCE_RULES[normalizePriority(t.priority)];
+      const anchor = new Date(t.cadence_anchor || t.created_at);
+      if (rule.dev) consider(slotStartedAt(anchor, cadenceSlot(anchor, now, rule.dev) + 1, rule.dev));
+      if (rule.user && t.conversation_id) consider(slotStartedAt(anchor, cadenceSlot(anchor, now, rule.user) + 1, rule.user));
+    }
+    return earliest;
   }
 
   /** When the timer will fire next (null while the engine is stopped). */
   nextRunAt(): Date | null {
-    if (!this.timer || !this.lastTickAt) return null;
-    return new Date(this.lastTickAt.getTime() + this.intervalMs);
+    if (!this.timer) return null;
+    return this.nextWakeAt;
+  }
+
+  /** Why the next wake-up is scheduled ("boundary" = a ticket's slot, "interval" = safety tick). */
+  nextRunReason(): "interval" | "boundary" | null {
+    return this.timer ? this.nextWakeReason : null;
   }
 
   private effectiveDryRun(): boolean {
@@ -276,9 +342,12 @@ export class SLACadenceService {
   }
 
   stopMonitor(): void {
+    this.stopped = true;
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
+      this.nextWakeAt = null;
+      this.nextWakeReason = null;
       logger.info("SLA cadence engine stopped");
     }
   }
@@ -319,6 +388,8 @@ export class SLACadenceService {
         }
         const priority = normalizePriority(t.priority);
         const rule = CADENCE_RULES[priority];
+        // A re-opened case restarts its clocks (same priority), so the
+        // reminder slots count from the reopen, not from creation.
         const createdAt = new Date(t.cadence_anchor || t.created_at);
 
         if (rule.dev) {
@@ -336,10 +407,28 @@ export class SLACadenceService {
             if (sent) { result.userUpdatesSent += 1; sends += 1; }
           }
         }
+
+        // Last 30 minutes before the resolution target and still not done:
+        // apologise to the customer and ask for more time, once per target
+        // (operator decision 2026-09-08).
+        if (t.conversation_id && t.due_date && sends < this.maxSendsPerRun) {
+          const sent = await this.sendDueExtensionNotice(t, now);
+          if (sent) { result.dueWarningsSent = (result.dueWarningsSent || 0) + 1; sends += 1; }
+        }
       }
 
       // Second pass: tickets delivered to the customer and still unanswered.
       await this.runResolutionFollowUps(now, result, this.maxSendsPerRun - sends);
+
+      // Third pass: customer messages whose LINE push failed on transport
+      // (timeout / 5xx) are re-sent — a lost delivery question otherwise
+      // stalls the whole close protocol (2026-09-08, TCK-2026-31409).
+      if (!this.effectiveDryRun()) {
+        result.notificationsRetried = await customerNotificationService.retryFailed({ maxAgeMinutes: 180, limit: 10 }).catch((err) => {
+          logger.warn({ error: err.message }, "Failed-notification retry pass errored");
+          return 0;
+        });
+      }
       return result;
     } catch (err: any) {
       this.lastRunError = String(err?.message || err);
@@ -387,8 +476,10 @@ export class SLACadenceService {
   private async loadOpenTickets(): Promise<OpenTicketRow[]> {
     const { rows } = await pool.query<OpenTicketRow>(
       `SELECT t.id, t.ticket_number, t.subject, t.summary, t.status, t.priority, t.created_at, t.due_date,
-              -- A re-opened case restarts its reminder clock (operator decision 2026-09-08).
-              COALESCE(NULLIF(t.last_reopened_at::text, '')::timestamptz, t.created_at) AS cadence_anchor,
+              -- Slots count from creation even after a re-open: the original SLA
+              -- stands (operator decision 2026-09-08, final). Kept as a column so
+              -- every consumer reads one anchor.
+              t.created_at AS cadence_anchor,
               t.conversation_id, t.project_id,
               p.name AS project_name,
               c.handled_by, c.takeover_state,
@@ -420,7 +511,7 @@ export class SLACadenceService {
    * this slot was already taken — by this process, another instance, or an
    * earlier retry. Claiming BEFORE sending is what makes concurrency safe.
    */
-  private async claimSlot(ticketId: number, kind: "dev" | "user" | "nudge" | "autoclose", slotKey: string, channel: string): Promise<number | null> {
+  private async claimSlot(ticketId: number, kind: "dev" | "user" | "nudge" | "autoclose" | "duewarn", slotKey: string, channel: string): Promise<number | null> {
     const { rows } = await pool.query<{ id: number }>(
       `INSERT INTO sla_cadence_claims (ticket_id, kind, slot_key, channel, status, created_at)
        VALUES ($1, $2, $3, $4, 'pending', NOW())
@@ -521,6 +612,51 @@ export class SLACadenceService {
         { ticketNumber: t.ticket_number, slot, error: err.message, code: err.code, status: err.response?.status, slotReleased: neverSent },
         "SLA dev reminder POST did not complete"
       );
+      return false;
+    }
+  }
+
+  /** How long before the resolution target the extension notice goes out. */
+  private static readonly DUE_WARNING_MINUTES = 30;
+
+  /**
+   * "ขอเวลาเพิ่ม" to the customer inside the last DUE_WARNING_MINUTES before
+   * due_date, while the case is still open. Idempotent per target (the slot
+   * key carries the due timestamp), so a re-opened case whose target is
+   * unchanged is not warned twice, and a case whose target moves is.
+   */
+  private async sendDueExtensionNotice(t: OpenTicketRow, now: Date): Promise<boolean> {
+    const due = t.due_date ? new Date(t.due_date) : null;
+    if (!due || isNaN(due.getTime())) return false;
+    const remainingMs = due.getTime() - now.getTime();
+    if (remainingMs <= 0 || remainingMs > SLACadenceService.DUE_WARNING_MINUTES * 60_000) return false;
+    const handledBy = String(t.handled_by || "ai").toLowerCase();
+    const takeover = String(t.takeover_state || "none").toLowerCase();
+    if (handledBy !== "ai" || takeover !== "none") return false;
+    const slotKey = `ticket:${t.id}:duewarn:${due.getTime()}`;
+    if (this.effectiveDryRun()) {
+      logger.info({ ticketNumber: t.ticket_number, slotKey, dueAt: due.toISOString() }, "[dry-run] would send due-extension notice");
+      return true;
+    }
+    const logId = await this.claimSlot(t.id, "duewarn", slotKey, "line");
+    if (logId === null) return false;
+    try {
+      const res = await customerNotificationService.send({
+        conversationId: Number(t.conversation_id),
+        notificationType: "due_extension_notice",
+        idempotencyKey: slotKey,
+        ticketId: t.id,
+        ticketNumber: t.ticket_number,
+        projectId: t.project_id ?? null,
+        correlationId: slotKey,
+        quickReplies: [],
+      });
+      await this.finishSlot(logId, res.sent ? "sent" : "skipped");
+      if (res.sent) logger.info({ ticketNumber: t.ticket_number, dueAt: due.toISOString() }, "Due-extension notice sent to customer");
+      return res.sent;
+    } catch (err: any) {
+      await this.releaseSlot(logId);
+      logger.error({ ticketNumber: t.ticket_number, error: err.message }, "Due-extension notice failed; slot released for retry");
       return false;
     }
   }
@@ -750,6 +886,7 @@ export class SLACadenceService {
       startedAt: this.startedAt,
       lastTickAt: this.lastTickAt,
       nextRunAt: this.nextRunAt(),
+      nextRunReason: this.nextRunReason(),
       lastRunAt: this.lastRunAt,
       lastRunDurationMs: this.lastRunDurationMs,
       lastRunResult: this.lastRunResult,
@@ -775,6 +912,7 @@ export class SLACadenceService {
     }
     this.manualRun = true;
     const result = await this.evaluateOpenTickets(new Date(), opts);
+    if (this.timer) void this.scheduleNextWake();
     return { ...result, alreadyRunning: false };
   }
 
@@ -1124,8 +1262,8 @@ export class SLACadenceService {
     const status = mode === "closed" ? "CLOSED" : "CANCELLED";
     const { rows } = await pool.query(
       `UPDATE tickets
-       SET status = $2,
-           cancellation_reason = CASE WHEN $2 = 'CANCELLED' THEN COALESCE($3, cancellation_reason) ELSE cancellation_reason END,
+       SET status = $2::text,
+           cancellation_reason = CASE WHEN $2::text = 'CANCELLED' THEN COALESCE($3::text, cancellation_reason) ELSE cancellation_reason END,
            lifecycle_changed_at = NOW(), updated_at = NOW()
        WHERE id = $1
        RETURNING id, ticket_number, status`,
@@ -1134,6 +1272,46 @@ export class SLACadenceService {
     await this.audit(t.id, "SLA_CONSOLE_CLOSE_TICKET", { from: t.status, to: status, reason: reason || null });
     logger.warn({ ticketId: t.id, ticketNumber: t.ticket_number, from: t.status, to: status }, "SLA console changed a ticket status");
     return { ok: true as const, ticket: rows[0], previousStatus: t.status };
+  }
+
+  /**
+   * Test helper: moves the case to RESOLVED through the ticket state machine
+   * exactly as a Plane "Delivery to Customer" state change would, and sends
+   * the customer the same "please test the fix" LINE message with its chips.
+   * Nothing here is a shortcut: the transition is recorded in ticket_events
+   * and the notification is idempotent on that event.
+   */
+  async deliverToCustomer(ref: string) {
+    const t = await this.loadTicketByRef(ref);
+    if (!t) return { ok: false as const, reason: "TICKET_NOT_FOUND" };
+    const result = await ticketStateMachine.applyPlaneStatus(t.id, "Delivery to Customer", { source: "sla_console" });
+    if (!result.applied) {
+      return { ok: false as const, reason: result.code || "NOT_APPLIED", detail: result.reason || null, previousStatus: t.status };
+    }
+    let notified = false;
+    let notifyError: string | null = null;
+    if (result.notify === "resolution_confirmation_request" && t.conversation_id) {
+      try {
+        const sent = await customerNotificationService.send({
+          conversationId: Number(t.conversation_id),
+          notificationType: "resolution_confirmation",
+          idempotencyKey: result.eventId ? `ticket_event:${result.eventId}` : `ticket:${t.id}:resolved`,
+          ticketId: t.id,
+          ticketNumber: t.ticket_number,
+          subject: t.subject ?? null,
+          projectId: t.project_id ?? null,
+          orgId: t.org_id ?? null,
+          correlationId: t.plane_issue_id ?? null,
+        });
+        notified = sent.sent;
+        if (!sent.sent) notifyError = sent.reason || null;
+      } catch (err: any) {
+        notifyError = String(err?.message || err);
+      }
+    }
+    await this.audit(t.id, "SLA_CONSOLE_DELIVER_TICKET", { from: t.status, to: result.to ?? "RESOLVED", eventId: result.eventId ?? null, notified, notifyError });
+    logger.warn({ ticketId: t.id, ticketNumber: t.ticket_number, from: t.status, notified }, "SLA console delivered a ticket to the customer");
+    return { ok: true as const, ticket: { id: t.id, ticket_number: t.ticket_number, status: result.to ?? "RESOLVED" }, previousStatus: t.status, notified, notifyError, eventId: result.eventId ?? null };
   }
 
   private describeCadence(
@@ -1152,12 +1330,13 @@ export class SLACadenceService {
     const claimed = claimedKeys.has(slotKey);
     const nextRun = this.nextRunAt();
 
-    // Align a wall-clock target to the engine's tick grid.
+    // The engine wakes at the earliest slot boundary (plus a short settle
+    // delay), so a future boundary is delivered at the boundary itself; a
+    // boundary already behind the scheduled wake is delivered on that wake.
     const alignToTick = (target: Date): Date | null => {
       if (!nextRun) return null;
       if (nextRun.getTime() >= target.getTime()) return nextRun;
-      const steps = Math.ceil((target.getTime() - nextRun.getTime()) / this.intervalMs);
-      return new Date(nextRun.getTime() + steps * this.intervalMs);
+      return new Date(target.getTime() + SLACadenceService.BOUNDARY_SETTLE_MS);
     };
 
     let phase: string;
@@ -1257,7 +1436,7 @@ export class SLACadenceService {
       { key: "ai_owned", ok: aiOwned, label: "AI ดูแลอยู่ (ไม่มี human รับช่วง)", detail: `handled_by=${t.handled_by || "ai"}, takeover=${t.takeover_state || "none"}` },
       { key: "dev_recipients", ok: devEmails.length > 0, label: "มีอีเมลทีม Dev ปลายทาง", detail: devEmails.join(", ") || "ไม่พบ" },
       { key: "webhook", ok: webhookConfigured, label: "ตั้ง SLA_NOTIFICATION_FLOW_WEBHOOK_URL แล้ว (เมลเตือน Dev)", detail: webhookConfigured ? "ตั้งแล้ว" : "ยังไม่ตั้ง — เมลเตือนซ้ำจะถูกข้าม" },
-      { key: "engine", ok: this.timer !== null, label: "เครื่องยนต์กำลังเดิน", detail: this.timer ? `ทุก ${Math.round(this.intervalMs / 60000)} นาที` : "ปิดอยู่ (SLA_CADENCE_ENABLED=false หรือยังไม่ start)" },
+      { key: "engine", ok: this.timer !== null, label: "เครื่องยนต์กำลังเดิน", detail: this.timer ? `ตื่นตรงรอบของแต่ละเคส + ตรวจซ้ำทุก ${Math.round(this.intervalMs / 60000)} นาที` : "ปิดอยู่ (SLA_CADENCE_ENABLED=false หรือยังไม่ start)" },
     ];
     const devEligible = isOpen && withinLookback && Boolean(rule.dev) && devEmails.length > 0 && webhookConfigured;
     const userEligible = isOpen && withinLookback && Boolean(rule.user) && hasConversation && aiOwned;

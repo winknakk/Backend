@@ -37,7 +37,7 @@ export type CustomerNotificationType =
   | "reopened_by_team"
   | "reopen_too_old"
   | "reopen_confirmation_request"
-  | "reopen_escalated";
+  | "due_extension_notice";
 
 /** LINE quick-reply chip (message action): the tap sends `text` as the customer. */
 export interface NotificationQuickReply {
@@ -194,7 +194,7 @@ export class CustomerNotificationService {
   private static readonly CLOSE_QUESTION_VARIANTS = [
     "ดีใจด้วยนะคะที่ใช้งานได้แล้ว 🎉 ต้องการปิดเคส {ticket}{about} เลยไหมคะ แตะ 'ยืนยันปิดเคส' ได้เลยค่ะ",
     "ขอบคุณที่แจ้งนะคะ แอดมินขอยืนยันอีกครั้งค่ะ ปิดเคส {ticket}{about} ได้เลยใช่ไหมคะ",
-    "รับทราบค่ะ ถ้าเรียบร้อยดีแล้ว แตะ 'ยืนยันปิดเคส' เพื่อปิดเคส {ticket}{about} ได้เลยนะคะ หรือถ้ายังมีอะไรติดอยู่แตะ 'ยังมีปัญหาอยู่' ค่ะ",
+    "รับทราบค่ะ ถ้าเรียบร้อยดีแล้ว แตะ 'ยืนยันปิดเคส' เพื่อปิดเคส {ticket}{about} ได้เลยนะคะ หรือถ้าอยากลองใช้งานเพิ่มก่อน แตะ 'ยังไม่ปิด' ได้ค่ะ",
     "ต้องการปิดเคส {ticket}{about} ใช่ไหมคะ ถ้าใช่แตะ 'ยืนยันปิดเคส' ข้างล่างนี้ได้เลยค่ะ",
   ] as const;
 
@@ -204,22 +204,22 @@ export class CustomerNotificationService {
     "ปิดเคส {ticket} แล้วค่ะ ขอบคุณมากนะคะ ถ้าเจอปัญหาเดิมอีกทักมาบอกได้เลย แอดมินเปิดเคสให้ใหม่ได้ค่ะ",
   ] as const;
 
+  /** Same problem confirmed: the case goes back to engineering, nothing is asked. */
   private static readonly REOPENED_VARIANTS = [
-    "รับทราบค่ะ แอดมินเปิดเคส {ticket} ให้ทีมงานตรวจสอบอีกครั้งแล้วนะคะ ขออภัยที่ยังไม่เรียบร้อยค่ะ",
     "ขออภัยด้วยนะคะ แอดมินส่งเคส {ticket} กลับให้ทีมงานดูซ้ำแล้วค่ะ มีความคืบหน้าจะรีบแจ้งนะคะ",
-    "เปิดเคส {ticket} ขึ้นมาตรวจสอบอีกครั้งแล้วค่ะ ทีมงานกำลังดูให้อยู่นะคะ ขอบคุณที่แจ้งค่ะ",
+    "รับทราบค่ะ ส่งเคส {ticket} กลับให้ทีมงานตรวจสอบอีกครั้งแล้วนะคะ ขออภัยที่ยังไม่เรียบร้อยค่ะ เดี๋ยวแอดมินตามให้ค่ะ",
+    "ขออภัยที่ยังติดอยู่นะคะ เคส {ticket} แอดมินเปิดกลับให้ทีมงานดูต่อแล้วค่ะ มีอัปเดตเมื่อไหร่จะรีบมาบอกนะคะ",
+    "แอดมินแจ้งทีมงานให้กลับมาดูเคส {ticket} อีกรอบแล้วค่ะ ขออภัยในความไม่สะดวกนะคะ คืบหน้ายังไงจะรีบแจ้งค่ะ",
   ] as const;
 
-  /** Appended to the re-open line: the next message / screenshot goes to the engineer. */
-  private static readonly REOPEN_ASK_VARIANTS = [
-    "รบกวนบอกอาการที่ยังเจอ หรือส่งรูปหน้าจอมาได้เลยนะคะ แอดมินจะแนบให้ทีมงานทันทีค่ะ",
-    "ถ้าสะดวก ช่วยเล่าอาการที่ยังติดอยู่ หรือส่งรูปมาได้เลยค่ะ จะส่งต่อให้ทีมงานดูทันทีนะคะ",
-  ] as const;
+  /** Reserved (the re-open line no longer asks for symptoms — operator decision 2026-09-08). */
+  private static readonly REOPEN_ASK_VARIANTS = [] as const;
 
-  /** "ใช้ได้แล้ว แต่…" — ask before touching any case. */
+  /** After "ยังมีปัญหาอยู่": same problem or a new one? Two chips decide. */
   private static readonly REOPEN_WHICH_KIND_VARIANTS = [
-    "ขอถามให้ชัดก่อนนะคะ เป็นอาการเดิมของเคส {ticket}{about} ที่ยังไม่หาย หรือเป็นปัญหาใหม่คนละเรื่องคะ แตะเลือกข้างล่างนี้ได้เลยค่ะ",
-    "เพื่อให้ส่งต่อถูกที่ ขอเช็คนิดนึงค่ะ ยังเป็นอาการเดิมของเคส {ticket}{about} หรือเป็นปัญหาใหม่คะ แตะเลือกได้เลยค่ะ",
+    "ขออภัยด้วยนะคะ รบกวนแจ้งว่าเป็นปัญหาเดิมของเคส {ticket} หรือเป็นปัญหาใหม่ ที่ปุ่มข้างล่างนี้ได้เลยค่ะ",
+    "ขออภัยที่ยังไม่เรียบร้อยนะคะ ขอเช็คนิดนึงค่ะ เป็นอาการเดิมของเคส {ticket} หรือเป็นปัญหาใหม่คะ แตะเลือกข้างล่างนี้ได้เลย",
+    "รับทราบค่ะ ขออภัยด้วยนะคะ เพื่อส่งต่อให้ถูกทีม รบกวนบอกหน่อยค่ะว่าเป็นปัญหาเดิมของเคส {ticket} หรือปัญหาใหม่ แตะปุ่มข้างล่างนี้ได้เลยค่ะ",
   ] as const;
 
   private static readonly REOPEN_FEEDBACK_SAVED_VARIANTS = [
@@ -227,9 +227,23 @@ export class CustomerNotificationService {
     "รับไว้แล้วค่ะ ส่งต่อให้ทีมงานในเคส {ticket} เรียบร้อยนะคะ",
   ] as const;
 
+  /** New problem: the delivered case is closed as done, and intake starts over. */
   private static readonly REOPEN_NEW_ISSUE_PROMPT_VARIANTS = [
-    "รับทราบค่ะ เคส {ticket} ยังเปิดรอไว้เหมือนเดิมนะคะ ส่วนปัญหาใหม่ เล่าอาการมาได้เลยค่ะ แอดมินจะเปิดเคสใหม่ให้",
-    "โอเคค่ะ ถ้าเป็นคนละเรื่อง แอดมินจะเปิดเป็นเคสใหม่ให้นะคะ เล่าอาการที่เจอมาได้เลยค่ะ เคส {ticket} ยังอยู่เหมือนเดิม",
+    "รับทราบค่ะ แอดมินปิดเคส {ticket} ให้เรียบร้อยแล้วนะคะ ส่วนปัญหาใหม่ รบกวนเล่าอาการที่เจอมาได้เลยค่ะ ส่งรูปหน้าจอมาด้วยก็ได้นะคะ",
+    "โอเคค่ะ เคส {ticket} แอดมินปิดให้แล้วนะคะ ปัญหาใหม่เล่ามาได้เลยค่ะ เจอตรงไหน ขึ้นข้อความอะไร แอดมินจะเปิดเคสให้ใหม่ค่ะ",
+    "เรียบร้อยค่ะ ปิดเคส {ticket} ให้แล้วนะคะ แล้วปัญหาใหม่เป็นแบบไหนคะ พิมพ์อาการหรือส่งรูปมาได้เลย เดี๋ยวแอดมินดูให้ค่ะ",
+  ] as const;
+
+  /**
+   * 30 minutes before the resolution target of a case that is still being
+   * worked on: apologise and ask for patience, once per target. Never a
+   * promise about when it will be done.
+   */
+  private static readonly DUE_EXTENSION_VARIANTS = [
+    "ขออภัยด้วยนะคะ เคส {ticket} ทีมงานยังแก้ไขไม่เสร็จตามเวลาที่แจ้งไว้ค่ะ ขอเวลาเพิ่มอีกสักหน่อยนะคะ แอดมินกำลังเร่งให้อยู่ค่ะ",
+    "แอดมินขออภัยนะคะ เคส {ticket} ใกล้ถึงเวลาที่แจ้งไว้แล้วแต่ทีมงานยังต้องใช้เวลาเพิ่มอีกนิดค่ะ กำลังเร่งดำเนินการให้ มีอะไรคืบหน้าจะรีบแจ้งนะคะ",
+    "ต้องขออภัยจริง ๆ ค่ะ เคส {ticket} อาจใช้เวลานานกว่าที่แจ้งไว้นะคะ ทีมงานยังเร่งแก้อยู่ค่ะ ขอเวลาเพิ่มอีกสักครู่นะคะ",
+    "เคส {ticket} ขออภัยนะคะที่ยังไม่เรียบร้อยตามกำหนด ทีมงานยังดำเนินการต่อเนื่องอยู่ค่ะ ขอเวลาอีกสักหน่อย เสร็จเมื่อไหร่แอดมินแจ้งทันทีค่ะ",
   ] as const;
 
   /** Engineering set Re-Open in Plane on a case the customer already confirmed. */
@@ -247,10 +261,6 @@ export class CustomerNotificationService {
   private static readonly REOPEN_QUESTION_VARIANTS = [
     "ต้องการเปิดเคส {ticket}{about} อีกครั้งใช่ไหมคะ แตะ 'เปิดเคสอีกครั้ง' ได้เลยค่ะ",
     "ขอยืนยันก่อนนะคะ จะเปิดเคส {ticket}{about} กลับมาให้ทีมงานดูอีกครั้งใช่ไหมคะ แตะ 'เปิดเคสอีกครั้ง' ได้เลยค่ะ",
-  ] as const;
-
-  private static readonly REOPEN_ESCALATED_VARIANTS = [
-    "เคส {ticket} กลับมามีปัญหาหลายรอบแล้ว แอดมินส่งให้เจ้าหน้าที่ดูแลโดยตรงนะคะ จะติดต่อกลับโดยเร็วค่ะ ขออภัยในความไม่สะดวกค่ะ",
   ] as const;
 
   /** "ยังไม่ปิด" — leave the case waiting, without nagging. */
@@ -370,10 +380,9 @@ export class CustomerNotificationService {
       case "closed":
         return this.fill(CustomerNotificationService.CLOSED_VARIANTS, seed, ticketNumber, null);
       case "reopened":
-        // detail = "" suppresses the ask (a re-open that already carried the symptoms).
-        return `${this.fill(CustomerNotificationService.REOPENED_VARIANTS, seed, ticketNumber, null)}${
-          detail === "" ? "" : ` ${CustomerNotificationService.pickVariant(CustomerNotificationService.REOPEN_ASK_VARIANTS, `${seed}:ask`)}`
-        }`;
+        return this.fill(CustomerNotificationService.REOPENED_VARIANTS, seed, ticketNumber, null);
+      case "due_extension_notice":
+        return this.fill(CustomerNotificationService.DUE_EXTENSION_VARIANTS, seed, ticketNumber, null);
       case "reopen_which_kind":
         return this.fill(CustomerNotificationService.REOPEN_WHICH_KIND_VARIANTS, seed, ticketNumber, subject);
       case "reopen_feedback_saved":
@@ -386,8 +395,6 @@ export class CustomerNotificationService {
         return this.fill(CustomerNotificationService.REOPEN_TOO_OLD_VARIANTS, seed, ticketNumber, null).replace("{days}", String(detail || "7"));
       case "reopen_confirmation_request":
         return this.fill(CustomerNotificationService.REOPEN_QUESTION_VARIANTS, seed, ticketNumber, subject);
-      case "reopen_escalated":
-        return this.fill(CustomerNotificationService.REOPEN_ESCALATED_VARIANTS, seed, ticketNumber, null);
       case "close_declined":
         return this.fill(CustomerNotificationService.CLOSE_DECLINED_VARIANTS, seed, ticketNumber, null);
       case "close_no_open_case":
@@ -434,16 +441,16 @@ export class CustomerNotificationService {
           { label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
         ];
       case "close_confirmation_request":
+        // No "ยังมีปัญหาอยู่" here: the customer has just said it works, so
+        // asking again reads as a repeat (operator decision 2026-09-08).
         return [
           { label: "ยืนยันปิดเคส", text: `ยืนยันปิดเคส${n}` },
           { label: "ยังไม่ปิด", text: "ยังไม่ปิด" },
-          { label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่${n}` },
         ];
       case "reopen_which_kind":
         return [
-          { label: "อาการเดิมยังไม่หาย", text: `อาการเดิมยังไม่หาย${n}` },
-          { label: "เป็นปัญหาใหม่", text: "เป็นปัญหาใหม่" },
-          { label: "ใช้งานได้แล้ว", text: `ใช้งานได้แล้ว${n}` },
+          { label: "ปัญหาเดิม", text: `ปัญหาเดิม${n}` },
+          { label: "ปัญหาใหม่", text: `ปัญหาใหม่${n}` },
         ];
       case "reopen_confirmation_request":
         return [
@@ -527,7 +534,12 @@ export class CustomerNotificationService {
          (conversation_id, ticket_id, project_id, org_id, notification_type,
           idempotency_key, channel, recipient_ref, status, body, correlation_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)
-       ON CONFLICT (notification_type, idempotency_key) DO NOTHING
+       -- A row that FAILED to deliver may be claimed again (2026-09-08: a LINE
+       -- push timed out and the delivery question was silently lost for good).
+       -- Sent / pending rows still block, so at-most-once delivery holds.
+       ON CONFLICT (notification_type, idempotency_key) DO UPDATE
+         SET status = 'pending', error_message = NULL, updated_at = NOW()
+         WHERE customer_notifications.status = 'failed'
        RETURNING id`,
       [
         req.conversationId,
@@ -576,11 +588,83 @@ export class CustomerNotificationService {
       };
     }
 
-    await axios.post(
-      "https://api.line.me/v2/bot/message/push",
-      { to: recipientRef, messages: [message] },
-      { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, timeout: 10000 }
+    // Two attempts with a 15 s budget each: a 10 s single shot lost a delivery
+    // question to a slow LINE response (2026-09-08). Only transport-level
+    // failures are retried; a 4xx is a bad message and is reported as such.
+    let lastErr: any;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await axios.post(
+          "https://api.line.me/v2/bot/message/push",
+          { to: recipientRef, messages: [message] },
+          { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, timeout: 15000 }
+        );
+        return;
+      } catch (err: any) {
+        lastErr = err;
+        const status = Number(err?.response?.status || 0);
+        // LINE answered 400 "Failed to send messages" twice today for a
+        // payload its validate endpoint accepts and a later identical push
+        // delivered — so a 400 gets one retry too; only a 401/403 (token)
+        // is final.
+        const transient = !status || status >= 500 || status === 429 || status === 400;
+        if (!transient || attempt === 2) throw err;
+        logger.warn({ attempt, error: err.message }, "LINE push failed transiently; retrying once");
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    throw lastErr;
+  }
+
+  /**
+   * Re-sends notifications whose delivery failed (transport errors only —
+   * a 4xx means the message itself was rejected and is left for a human).
+   * Called by the SLA cadence engine on every pass; the stored body is
+   * pushed as-is with the type's default chips, so the customer sees exactly
+   * what was intended. Returns how many were sent.
+   */
+  async retryFailed(opts: { maxAgeMinutes?: number; limit?: number } = {}): Promise<number> {
+    const maxAge = opts.maxAgeMinutes ?? 180;
+    const limit = opts.limit ?? 10;
+    const { rows } = await pool.query<{
+      id: number; conversation_id: number; ticket_id: number | null; notification_type: CustomerNotificationType;
+      recipient_ref: string; channel: string; body: string; error_message: string | null; ticket_number: string | null;
+    }>(
+      `SELECT n.id, n.conversation_id, n.ticket_id, n.notification_type, n.recipient_ref, n.channel, n.body, n.error_message,
+              t.ticket_number
+         FROM customer_notifications n
+         LEFT JOIN tickets t ON t.id = n.ticket_id
+        WHERE n.status = 'failed'
+          AND n.created_at >= NOW() - ($1::int * INTERVAL '1 minute')
+          -- Token / permission errors are final; everything else (timeouts,
+          -- 5xx, LINE's transient 400 "Failed to send messages") is retried
+          -- up to three times, counted in the error text.
+          AND COALESCE(n.error_message, '') NOT ILIKE '%status code 401%'
+          AND COALESCE(n.error_message, '') NOT ILIKE '%status code 403%'
+          AND COALESCE(n.error_message, '') NOT ILIKE '[retry 3]%'
+          AND n.notification_type NOT IN ('acknowledgement', 'acknowledgement_action', 'greeting', 'thanks')
+        ORDER BY n.id ASC
+        LIMIT $2`,
+      [maxAge, limit]
     );
+    let sent = 0;
+    for (const row of rows) {
+      if (row.channel !== "line" || !row.recipient_ref) continue;
+      try {
+        await this.pushLine(row.recipient_ref, row.body, CustomerNotificationService.defaultQuickReplies(row.notification_type, row.ticket_number));
+        await this.markSent(row.id);
+        await this.appendToConversation(row.conversation_id, row.body);
+        sent += 1;
+        logger.info({ notificationId: row.id, type: row.notification_type, ticketNumber: row.ticket_number }, "Failed customer notification re-sent");
+      } catch (err: any) {
+        const prev = /^\[retry (\d+)\]/.exec(String(row.error_message || ""));
+        const attempt = prev ? Number(prev[1]) + 1 : 1;
+        const detail = err?.response?.data ? ` ${JSON.stringify(err.response.data).slice(0, 200)}` : "";
+        await this.markFailed(row.id, `[retry ${attempt}] ${err.message}${detail}`);
+        logger.warn({ notificationId: row.id, attempt, error: err.message }, "Retry of failed customer notification failed again");
+      }
+    }
+    return sent;
   }
 
   /**
@@ -691,7 +775,11 @@ export class CustomerNotificationService {
       );
       return { sent: true, body };
     } catch (err: any) {
-      await this.markFailed(claimId, err.message);
+      // LINE explains a 4xx in the response body ("invalid property",
+      // "The request body has N error(s)"); keep it, or a 400 is undiagnosable.
+      const detail = err?.response?.data ? ` ${JSON.stringify(err.response.data).slice(0, 300)}` : "";
+      const errorText = `${err.message}${detail}`;
+      await this.markFailed(claimId, errorText);
       await traceRecorder.record({
         correlationId: req.correlationId || `notify-${claimId}`,
         component: "notification",
@@ -699,7 +787,7 @@ export class CustomerNotificationService {
         status: "failed",
         conversationId: req.conversationId,
         ticketId: req.ticketId ?? null,
-        errorMessage: err.message,
+        errorMessage: errorText,
       });
       // Still record what we intended to say, so the thread is not silently
       // missing a turn the customer may or may not have received.

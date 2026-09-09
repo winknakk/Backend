@@ -619,41 +619,11 @@ export function registerLineWebhookRoutes(
                       return;
                     }
 
-                    // Re-open feedback window (2026-09-08): a screenshot sent
-                    // within REOPEN_FEEDBACK_WINDOW_MINUTES of the customer's
-                    // "ยังมีปัญหาอยู่" belongs to that case — attach it to the
-                    // Plane work item at once instead of asking what it is for.
-                    if (config.REOPEN_FEEDBACK_WINDOW_MINUTES > 0) {
-                      const fresh = await pool.query(
-                        `SELECT ticket_number FROM tickets
-                          WHERE conversation_id = $1::integer
-                            AND deleted_at IS NULL
-                            AND UPPER(COALESCE(status, '')) = 'REOPENED'
-                            AND last_reopened_at >= NOW() - ($2::int * INTERVAL '1 minute')
-                          ORDER BY last_reopened_at DESC LIMIT 1`,
-                        [convId, config.REOPEN_FEEDBACK_WINDOW_MINUTES]
-                      );
-                      const reopenedNumber = fresh.rows[0]?.ticket_number ? String(fresh.rows[0].ticket_number) : null;
-                      if (reopenedNumber) {
-                        const { PlaneService } = await import("../../services/planeService");
-                        const { AdapterFactory } = await import("../../adapters/AdapterFactory");
-                        const planeService = new PlaneService(AdapterFactory.getAdapter());
-                        const r = await planeService.attachPendingImagesToTicketNumber(Number(convId), reopenedNumber);
-                        await customerNotificationService.send({
-                          conversationId: Number(convId),
-                          notificationType: r.attached > 0 ? "image_attached" : "image_need_context",
-                          ticketNumber: r.attached > 0 ? reopenedNumber : null,
-                          idempotencyKey: webhookEventId || `image-${imageId}`,
-                          projectId: decision.projectId ?? null,
-                          correlationId: webhookEventId,
-                          quickReplies: [],
-                        });
-                        if (r.attached > 0) {
-                          logger.info({ convId, ticketNumber: reopenedNumber, attached: r.attached }, "Screenshot attached to the re-opened case");
-                          return;
-                        }
-                      }
-                    }
+                    // A screenshot is never attached on a guess, not even
+                    // right after a re-open (operator decision 2026-09-08: it
+                    // may be a new problem). The customer's next line names
+                    // the case or describes the symptom; the confirmation
+                    // handler / pending-image logic attach it then.
 
                     // Standalone image: mark attachment so if customer replies with a ticket number or explanation,
                     // we can attach it deterministically.

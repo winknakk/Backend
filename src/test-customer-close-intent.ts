@@ -58,7 +58,7 @@ assert.equal(lifecycleToPlaneStatus("CLOSED"), "Close");
 
 // --- 6. Chips: never a bare "ยืนยัน", always the case number ---
 const closeChips = CustomerNotificationService.defaultQuickReplies("close_confirmation_request", N);
-assert.deepEqual(closeChips.map((c) => c.text), [`ยืนยันปิดเคส ${N}`, "ยังไม่ปิด", `ยังมีปัญหาอยู่ ${N}`]);
+assert.deepEqual(closeChips.map((c) => c.text), [`ยืนยันปิดเคส ${N}`, "ยังไม่ปิด"], "no repeat 'still broken' chip on the close question");
 assert.ok(closeChips.every((c) => c.label.length <= 20), "LINE caps quick-reply labels at 20 characters");
 const deliveryChips = CustomerNotificationService.defaultQuickReplies("resolution_confirmation", N);
 assert.deepEqual(deliveryChips.map((c) => c.text), [`ใช้งานได้แล้ว ${N}`, `ยังมีปัญหาอยู่ ${N}`]);
@@ -73,23 +73,26 @@ assert.equal(detectConfirmationIntent("ยังไม่ปิด"), "NONE", "d
 
 // --- 7. Re-open path (2026-09-08): scope classification and the re-open chip ---
 import { detectReopenScope, detectReopenConfirmation, NEW_ISSUE_PATTERN } from "./domain/ticket/CustomerConfirmation";
-assert.equal(detectReopenScope(`ยังมีปัญหาอยู่ ${N}`), "SAME", "the delivery chip is the same bug");
-assert.equal(detectReopenScope(`อาการเดิมยังไม่หาย ${N}`), "SAME", "the ambiguity chip picks the same bug");
-assert.equal(detectReopenScope("ยังเข้าไม่ได้เหมือนเดิมครับ ขึ้น error เดิม"), "SAME");
-assert.equal(detectReopenScope("เป็นปัญหาใหม่"), "NEW", "the ambiguity chip picks a new problem");
+assert.equal(detectReopenScope(`ยังมีปัญหาอยู่ ${N}`), "NONE", "the delivery chip alone says nothing about scope — the handler asks");
+assert.equal(detectReopenScope(`ปัญหาเดิม ${N}`), "SAME", "the scope chip: same problem");
+assert.equal(detectReopenScope(`ปัญหาใหม่ ${N}`), "NEW", "the scope chip: new problem");
+assert.equal(detectReopenScope("เรื่องเดิมครับ ยังเข้าไม่ได้ ขึ้น error เดิม"), "SAME");
 assert.equal(detectReopenScope("มีอีกปัญหา UAT เรียกรายงานไม่ได้"), "NEW", "explicit new-issue wording wins");
 assert.equal(detectReopenScope("อันเดิมใช้ได้แล้ว แต่หน้ารายงานจอขาว"), "AMBIGUOUS", "praise plus a new complaint is asked about, not guessed");
 assert.equal(detectReopenScope("ใช้งานได้แล้วครับ ขอบคุณ"), "NONE", "a clean confirmation is not a re-open matter");
 assert.equal(detectReopenScope("ระบบล่มขึ้น Error 555"), "NONE");
-assert.equal(detectConfirmationIntent(`อาการเดิมยังไม่หาย ${N}`), "REJECTED", "the same-bug chip reads as a rejection");
+assert.equal(detectReopenScope("ยังไม่ผ่านค่ะ"), "NONE", "a bare complaint is asked about");
+assert.equal(detectConfirmationIntent(`ยังมีปัญหาอยู่ ${N}`), "REJECTED", "…but it is still a rejection of the fix");
 assert.ok(NEW_ISSUE_PATTERN.test("ยังมีอีกปัญหาระบบ Excise ล่ม"));
 assert.deepEqual(detectReopenConfirmation(`ยืนยันเปิดเคสอีกครั้ง ${N}`), { confirmed: true, ticketNumber: N });
 assert.deepEqual(detectReopenConfirmation("ยืนยันเปิดเคสอีกครั้งค่ะ"), { confirmed: true, ticketNumber: null });
 assert.equal(detectReopenConfirmation("ยืนยัน").confirmed, false, "a bare ยืนยัน is never a re-open");
 assert.equal(detectReopenConfirmation(`ยืนยันปิดเคส ${N}`).confirmed, false, "the close chip is not the re-open chip");
 const scopeChips = CustomerNotificationService.defaultQuickReplies("reopen_which_kind", N);
-assert.deepEqual(scopeChips.map((c) => c.text), [`อาการเดิมยังไม่หาย ${N}`, "เป็นปัญหาใหม่", `ใช้งานได้แล้ว ${N}`]);
+assert.deepEqual(scopeChips.map((c) => c.text), [`ปัญหาเดิม ${N}`, `ปัญหาใหม่ ${N}`]);
 assert.ok(scopeChips.every((c) => c.label.length <= 20));
+assert.equal(detectReopenScope(scopeChips[0].text), "SAME");
+assert.equal(detectReopenScope(scopeChips[1].text), "NEW");
 const reopenChips = CustomerNotificationService.defaultQuickReplies("reopen_confirmation_request", N);
 assert.deepEqual(reopenChips.map((c) => c.text), [`ยืนยันเปิดเคสอีกครั้ง ${N}`, "ยกเลิก"]);
 assert.ok(reopenChips.every((c) => c.label.length <= 20), "LINE caps labels at 20 characters");

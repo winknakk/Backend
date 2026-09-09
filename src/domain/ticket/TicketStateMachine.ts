@@ -112,32 +112,18 @@ export class TicketStateMachine {
     );
 
     if ((updated.rowCount || 0) > 0 && req.to === "REOPENED") {
-      // Re-open bookkeeping (operator decisions 2026-09-08): count the cycle,
-      // clear the finished timestamps, and restart both SLA clocks from now —
-      // a case handed back on Thursday must not read as "overdue since
-      // Wednesday". Same targets as the hub's create step (Urgent 15 m / 4 h,
-      // High 30 m / 8 h, Medium 2 h / 2 bd, Low 1 bd / 5 bd, None 2 bd / open).
+      // Re-open bookkeeping (operator decision 2026-09-08, final): count the
+      // cycle and clear the finished timestamps. Priority and BOTH SLA
+      // clocks stay as they were — the same defect coming back means the
+      // original target still stands (and, if it has passed, the case is
+      // overdue). A different problem is filed as a new case with its own SLA.
       await pool
         .query(
           `UPDATE tickets
               SET reopened_count = COALESCE(reopened_count, 0) + 1,
                   last_reopened_at = NOW(),
                   resolved_at = NULL,
-                  closed_at = NULL,
-                  sla_breached = FALSE,
-                  sla_breach_at = NULL,
-                  response_due_at = CASE LOWER(COALESCE(priority, 'medium'))
-                    WHEN 'urgent' THEN NOW() + INTERVAL '15 minutes'
-                    WHEN 'high'   THEN NOW() + INTERVAL '30 minutes'
-                    WHEN 'low'    THEN ticketx_add_business_days(NOW(), 1)
-                    WHEN 'none'   THEN ticketx_add_business_days(NOW(), 2)
-                    ELSE NOW() + INTERVAL '2 hours' END,
-                  due_date = CASE LOWER(COALESCE(priority, 'medium'))
-                    WHEN 'urgent' THEN NOW() + INTERVAL '4 hours'
-                    WHEN 'high'   THEN NOW() + INTERVAL '8 hours'
-                    WHEN 'low'    THEN ticketx_add_business_days(NOW(), 5)
-                    WHEN 'none'   THEN NOW() + INTERVAL '999 hours'
-                    ELSE ticketx_add_business_days(NOW(), 2) END
+                  closed_at = NULL
             WHERE id = $1::integer`,
           [ticket.id]
         )

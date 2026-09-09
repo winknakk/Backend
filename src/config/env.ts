@@ -114,12 +114,10 @@ export const EnvSchema = z.object({
   // days and is closed automatically after M business days; 0 disables.
   RESOLUTION_NUDGE_BUSINESS_DAYS: z.coerce.number().int().min(0).max(30).default(1),
   RESOLUTION_AUTO_CLOSE_BUSINESS_DAYS: z.coerce.number().int().min(0).max(60).default(3),
-  // Re-open path (2026-09-08): bump priority at this reopen count, hand the
-  // conversation to a human at that count (0 disables either), accept
-  // "still broken" on a closed case for this many days, and treat customer
-  // text within this window after a reopen as feedback for the engineer.
-  REOPEN_ESCALATE_AT: z.coerce.number().int().min(0).max(20).default(2),
-  REOPEN_TAKEOVER_AT: z.coerce.number().int().min(0).max(20).default(3),
+  // Re-open path (2026-09-08): accept "still broken" on a closed case for
+  // this many days, and treat customer text within this window after a
+  // reopen as feedback for the engineer. No escalation ladder (operator
+  // decision): a re-opened case keeps its priority; its SLA clocks restart.
   REOPEN_AFTER_CLOSE_DAYS: z.coerce.number().int().min(0).max(365).default(7),
   REOPEN_FEEDBACK_WINDOW_MINUTES: z.coerce.number().int().min(0).max(1440).default(30),
   // SLA console write controls (shift a ticket's clock, force a test send,

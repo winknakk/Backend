@@ -42,8 +42,6 @@ const CLOSE_QUESTION_WINDOW_MINUTES = 30;
 /** Most cases the "which case" list shows; the chips carry the numbers. */
 const WHICH_CASE_LIMIT = 5;
 
-const PRIORITY_LADDER = ["Low", "Medium", "High", "Urgent"] as const;
-
 /**
  * Legal route from each lifecycle status to CLOSED, hop by hop. The customer
  * performs the two hops that are theirs (RESOLVED→CUSTOMER_CONFIRMED and
@@ -79,11 +77,12 @@ type PendingKind = "close" | "which_case" | "reopen" | "scope";
  *   ใช้งานได้แล้ว / ปิดเคส        → CUSTOMER_CONFIRMED + "ต้องการปิดเคส … ใช่ไหมคะ"  [ยืนยันปิดเคส | ยังไม่ปิด | ยังมีปัญหาอยู่]
  *   ยืนยันปิดเคส <TCK>           → CLOSED (Plane → Close) + "ปิดเคสเรียบร้อย" + Done email
  *   ยังไม่ปิด                    → back to RESOLVED, nothing closes
- *   ยังมีปัญหาอยู่ (same bug)     → REOPENED, stays there for engineering (Plane → Re-Open),
- *                                  asks for symptoms, next messages become Plane comments,
- *                                  dev email; #2 bumps priority, #3 hands over to a human
- *   "ใช้ได้แล้ว แต่…"            → asks which  [อาการเดิมยังไม่หาย | เป็นปัญหาใหม่ | ใช้งานได้แล้ว]
- *   "มีอีกปัญหา…"                 → left to the AI: new case (force_new), old case keeps waiting
+ *   ยังมีปัญหาอยู่ / "ใช้ได้แล้ว แต่…" → asks which  [ปัญหาเดิม | ปัญหาใหม่]
+ *   ปัญหาเดิม                    → REOPENED, stays there for engineering (Plane → Re-Open),
+ *                                  next messages within 30 min become Plane comments, dev email;
+ *                                  priority and the original SLA are kept
+ *   ปัญหาใหม่                    → old case CLOSED as done, intake starts over (new case, new SLA)
+ *   "มีอีกปัญหา…" typed as a report → left to the AI: new case (force_new), old case keeps waiting
  *   ยังมีปัญหาอยู่ <closed TCK>   → re-opened when closed ≤ REOPEN_AFTER_CLOSE_DAYS ago, else a new case
  *   ปิดเคส with nothing open     → "ไม่มีเคสที่เปิดอยู่" at the edge, no AI turn
  */
@@ -154,7 +153,7 @@ export class CustomerConfirmationHandler {
     const m = content.match(TICKET_NUMBER_PATTERN);
     const num = m ? m[0].toUpperCase() : null;
     if (/แตะเลือกข้างล่างนี้|แตะเลือกได้เลย/.test(content)) return { kind: "which_case", ticketNumber: null };
-    if (/อาการเดิม[^\n]{0,60}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
+    if (/(?:ปัญหาเดิม|อาการเดิม)[^\n]{0,80}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
     if (/ยืนยันเปิดเคสอีกครั้ง|เปิดเคส[^\n]{0,80}อีกครั้งใช่ไหม/.test(content)) return { kind: "reopen", ticketNumber: num };
     if (/ต้องการปิดเคส|ยืนยันปิดเคส|ปิดเคส[^\n]{0,80}ใช่ไหม/.test(content)) return { kind: "close", ticketNumber: num };
     return null;
@@ -229,7 +228,11 @@ export class CustomerConfirmationHandler {
   }
 
   /** Walks the ticket to CLOSED along ROUTE_TO_CLOSED and tells the customer. */
-  private async closeTicket(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket): Promise<ConfirmationOutcome> {
+  private async closeTicket(
+    input: { conversationId: number; correlationId?: string },
+    ticket: OpenTicket,
+    notifyAs: "closed" | "reopen_new_issue_prompt" = "closed"
+  ): Promise<ConfirmationOutcome> {
     const route = ROUTE_TO_CLOSED[ticket.status];
     if (!route) {
       logger.warn({ ticketId: ticket.id, status: ticket.status }, "No close route for ticket status");
@@ -258,7 +261,7 @@ export class CustomerConfirmationHandler {
       if (next === "CLOSED") closedEventId = r.eventId ?? null;
     }
 
-    await this.notify(input, ticket, "closed", closedEventId ? `ticket_event:${closedEventId}` : `ticket:${ticket.id}:closed`, { quickReplies: [] });
+    await this.notify(input, ticket, notifyAs, closedEventId ? `ticket_event:${closedEventId}` : `ticket:${ticket.id}:closed`, { quickReplies: [] });
     // Customer "Done" email (Gmail via the notification flow), originated here
     // because Plane's own webhook never arrives (ISSUE-053). Fire-and-forget.
     void doneEmailService.notifyClosed({ ticketId: ticket.id, closeEventId: closedEventId, correlationId: input.correlationId }).catch(() => {});
@@ -304,56 +307,6 @@ export class CustomerConfirmationHandler {
     })();
   }
 
-  /** Re-open bookkeeping the operator asked for: priority bump at #N, human at #M. */
-  private async escalateIfNeeded(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket, count: number): Promise<{ escalated: boolean; takeover: boolean }> {
-    let escalated = false;
-    let takeover = false;
-    const escalateAt = config.REOPEN_ESCALATE_AT;
-    const takeoverAt = config.REOPEN_TAKEOVER_AT;
-
-    if (escalateAt > 0 && count >= escalateAt) {
-      const current = PRIORITY_LADDER.findIndex((p) => p.toLowerCase() === String(ticket.priority || "Medium").toLowerCase());
-      const idx = current < 0 ? 1 : current;
-      if (idx < PRIORITY_LADDER.length - 1) {
-        const next = PRIORITY_LADDER[idx + 1];
-        await pool
-          .query(`UPDATE tickets SET priority = $2, updated_at = NOW() WHERE id = $1`, [ticket.id, next])
-          .then(() => {
-            escalated = true;
-            logger.info({ ticketId: ticket.id, from: ticket.priority, to: next, count }, "Re-open escalation: priority raised");
-          })
-          .catch((err) => logger.warn({ ticketId: ticket.id, error: err.message }, "Priority bump failed"));
-        await pool
-          .query(
-            `INSERT INTO ticket_events (ticket_id, event_type, actor, payload, correlation_id, source, created_at)
-             VALUES ($1, 'REOPEN_ESCALATED', 'system', $2, $3, 'customer_reply', NOW())`,
-            [ticket.id, JSON.stringify({ reopenedCount: count, priorityFrom: ticket.priority, priorityTo: next }), input.correlationId || null]
-          )
-          .catch(() => {});
-      } else {
-        escalated = true;
-      }
-    }
-
-    if (takeoverAt > 0 && count >= takeoverAt) {
-      await pool
-        .query(`UPDATE conversations SET handled_by = 'human', updated_at = NOW() WHERE id = $1::integer`, [input.conversationId])
-        .then(() => {
-          takeover = true;
-          logger.info({ ticketId: ticket.id, conversationId: input.conversationId, count }, "Re-open escalation: conversation handed to a human");
-        })
-        .catch((err) => logger.warn({ conversationId: input.conversationId, error: err.message }, "Takeover flag failed"));
-      await pool
-        .query(
-          `INSERT INTO ticket_events (ticket_id, event_type, actor, payload, correlation_id, source, created_at)
-           VALUES ($1, 'REOPEN_TAKEOVER', 'system', $2, $3, 'customer_reply', NOW())`,
-          [ticket.id, JSON.stringify({ reopenedCount: count }), input.correlationId || null]
-        )
-        .catch(() => {});
-    }
-    return { escalated, takeover };
-  }
-
   /**
    * Same bug: RESOLVED / CUSTOMER_CONFIRMED / CLOSED → REOPENED and it stays
    * there (Plane → Re-Open) until engineering moves it. `feedback` is the
@@ -377,18 +330,16 @@ export class CustomerConfirmationHandler {
     const count = Number(countRow?.rows?.[0]?.reopened_count || 1);
 
     if (feedback) await this.saveFeedback(input, ticket, feedback, count);
-    const { escalated, takeover } = await this.escalateIfNeeded(input, ticket, count);
 
+    // No escalation ladder (operator decision 2026-09-08): the case keeps its
+    // priority and its original SLA; the round number only appears in the
+    // engineers' email.
     const key = reopened.eventId ? `ticket_event:${reopened.eventId}` : `ticket:${ticket.id}:reopened:${count}`;
-    if (takeover) {
-      await this.notify(input, ticket, "reopen_escalated", key, { quickReplies: [] });
-    } else {
-      // detail "" = the customer already described the symptoms; skip the ask.
-      await this.notify(input, ticket, "reopened", key, { quickReplies: [], detail: feedback ? "" : undefined });
-    }
-    void reopenAlertService.notifyReopened({ ticketId: ticket.id, feedback, escalated, takeover, correlationId: input.correlationId }).catch(() => {});
+    // detail "" = the customer already described the symptoms; skip the ask.
+    await this.notify(input, ticket, "reopened", key, { quickReplies: [], detail: feedback ? "" : undefined });
+    void reopenAlertService.notifyReopened({ ticketId: ticket.id, feedback, correlationId: input.correlationId }).catch(() => {});
 
-    logger.info({ ticketId: ticket.id, conversationId: input.conversationId, correlationId: input.correlationId, count, escalated, takeover }, "Customer rejected resolution; ticket reopened");
+    logger.info({ ticketId: ticket.id, conversationId: input.conversationId, correlationId: input.correlationId, count }, "Customer rejected resolution; ticket reopened");
     return { handled: true, ticketId: ticket.id, from: ticket.status, to: "REOPENED" };
   }
 
@@ -517,7 +468,30 @@ export class CustomerConfirmationHandler {
       );
       const trimmed = text.trim();
       const trivial = trimmed.length < 8 || /^(?:ขอบคุณ|โอเค|ok|okay|รับทราบ|ครับ|ค่ะ|คับ|จ้า|👍|✅)/i.test(trimmed);
-      if (fresh && !trivial) {
+      // A message that names ANOTHER case is that case's business, never
+      // feedback for the one just re-opened (live 2026-09-08: the chip
+      // "ยังมีปัญหาอยู่ TCK-2026-62090" was filed three times as feedback on
+      // TCK-2026-49825, and a screenshot went to the wrong work item).
+      const aboutAnotherCase = Boolean(numberInText && fresh && numberInText !== String(fresh.ticket_number || "").toUpperCase());
+      // The window collects the first couple of descriptions only. Capturing
+      // every line for 30 minutes turned the bot into "รับไว้แล้วค่ะ" for
+      // anything the customer said (live 2026-09-08, conversation 1203).
+      let windowExhausted = false;
+      if (fresh && fresh.last_reopened_at) {
+        const cnt = await pool.query<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM ticket_events
+            WHERE ticket_id = $1 AND event_type = 'CUSTOMER_FEEDBACK' AND created_at >= $2::timestamptz`,
+          [fresh.id, new Date(fresh.last_reopened_at).toISOString()]
+        ).catch(() => ({ rows: [{ n: "0" }] }));
+        windowExhausted = Number(cnt.rows[0]?.n || 0) >= 2;
+      }
+      // The chip for the fresh case itself carries no symptom: acknowledge, don't file it.
+      const justTheChip = Boolean(fresh && numberInText && this.feedbackFrom(trimmed) === null);
+      if (fresh && !trivial && !aboutAnotherCase && justTheChip) {
+        await this.notify(input, fresh, "acknowledgement_action", this.eventKey(input, "feedback_ack"), { quickReplies: [] });
+        return { handled: true, ticketId: fresh.id, reason: "REOPEN_ALREADY_OPEN" };
+      }
+      if (fresh && !trivial && !aboutAnotherCase && !windowExhausted) {
         // A screenshot may be waiting for a case ("ได้รับรูปแล้ว รบกวนอธิบาย…"):
         // this feedback is that description, so the image goes to the same
         // case too. Seen live 2026-09-08: "เป็นรูปของเคส TCK-… ครับ" was saved
@@ -576,23 +550,34 @@ export class CustomerConfirmationHandler {
       target = awaiting[0];
     }
 
-    if (/^\s*เป็นปัญหาใหม่/.test(text)) {
-      // The ambiguity chip: the old case keeps waiting; the next message is a
-      // fresh report for the AI (the gate's new-issue net sees this turn).
-      await this.notify(input, target, "reopen_new_issue_prompt", this.eventKey(input, "new_issue"), { quickReplies: [] });
-      return { handled: true, ticketId: target.id, reason: "NEW_ISSUE_PROMPTED" };
+    // While the "ปัญหาเดิมหรือปัญหาใหม่" question is pending, a one-word answer counts.
+    let effectiveScope = scope;
+    if (pending?.kind === "scope" && scope === "NONE") {
+      if (/^\s*(?:เป็น)?(?:ปัญหา|เรื่อง|อาการ|อัน)?\s*เดิม/.test(text)) effectiveScope = "SAME";
+      else if (/^\s*(?:เป็น)?(?:ปัญหา|เรื่อง)?\s*ใหม่/.test(text)) effectiveScope = "NEW";
     }
-    if (scope === "NEW") {
-      // Explicitly another problem: leave it to the AI (force_new); the
-      // delivered case stays where it is and keeps its chips.
+
+    if (effectiveScope === "NEW") {
+      const answeredChip = pending?.kind === "scope" || /^\s*(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(text);
+      if (answeredChip) {
+        // "ปัญหาใหม่": the delivered case is done as far as the customer is
+        // concerned — close it (Plane → Close) and start intake over; the
+        // customer's next message is a fresh report for the AI (the gate's
+        // new-issue net sees this turn, so it is never folded into the old case).
+        return this.closeTicket(input, target, "reopen_new_issue_prompt");
+      }
+      // "มีอีกปัญหา …" typed as a full report: leave it to the AI (force_new);
+      // the delivered case keeps waiting for its own answer.
       return { handled: false, reason: "NEW_ISSUE_TO_AI" };
     }
-    if (scope === "AMBIGUOUS") {
+    if (effectiveScope === "SAME") {
+      return this.reopenTicket(input, target, this.feedbackFrom(text));
+    }
+    if (effectiveScope === "AMBIGUOUS" || intent === "REJECTED") {
+      // Same problem or a new one? Two chips decide (operator decision
+      // 2026-09-08: always ask; the chip "ยังมีปัญหาอยู่" lands here).
       await this.notify(input, target, "reopen_which_kind", this.eventKey(input, "which_kind"));
       return { handled: true, ticketId: target.id, reason: "REOPEN_SCOPE_ASKED" };
-    }
-    if (scope === "SAME" || intent === "REJECTED") {
-      return this.reopenTicket(input, target, this.feedbackFrom(text));
     }
     if (intent === "CONFIRMED") {
       // Positive, but nothing closes yet: ask the close question.

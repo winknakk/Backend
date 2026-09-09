@@ -143,8 +143,26 @@ export function registerSlaConsoleRoutes(fastify: FastifyInstance, cadence: SLAC
     const body = (request.body || {}) as any;
     if (!writesGuard(body, reply)) return;
     const mode = body.mode === "closed" ? "closed" : "cancelled";
-    const result = await cadence.closeTicket(String((request.params as any).ref || ""), mode, body.reason);
-    return reply.code(result.ok ? 200 : 400).send({ success: result.ok, data: result });
+    try {
+      const result = await cadence.closeTicket(String((request.params as any).ref || ""), mode, body.reason);
+      return reply.code(result.ok ? 200 : 400).send({ success: result.ok, data: result, error: result.ok ? undefined : result.reason });
+    } catch (err: any) {
+      logger.error({ error: err.message, mode }, "SLA console close failed");
+      return reply.code(500).send({ success: false, error: `Close failed: ${err.message}` });
+    }
+  });
+
+  /** Same path as Plane "Delivery to Customer": RESOLVED + the LINE "please test" message. */
+  fastify.post("/api/v1/admin/sla/tickets/:ref/deliver", adminRouteOptions, async (request, reply) => {
+    const body = (request.body || {}) as any;
+    if (!writesGuard(body, reply)) return;
+    try {
+      const result = await cadence.deliverToCustomer(String((request.params as any).ref || ""));
+      return reply.code(result.ok ? 200 : 400).send({ success: result.ok, data: result, error: result.ok ? undefined : `${result.reason}${(result as any).detail ? " · " + (result as any).detail : ""}` });
+    } catch (err: any) {
+      logger.error({ error: err.message }, "SLA console deliver failed");
+      return reply.code(500).send({ success: false, error: `Deliver failed: ${err.message}` });
+    }
   });
 
   fastify.post("/api/v1/admin/sla/tickets/:ref/reset", adminRouteOptions, async (request, reply) => {
