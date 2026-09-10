@@ -547,7 +547,7 @@ export function buildPlaneReopenBlockHtml(meta: {
   reopenedCount?: number | null;
   feedback?: string | null;
   now?: Date;
-}): { html: string; marker: string } {
+}): { html: string; marker: string; feedbackHtml: string; feedbackText: string } {
   const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const round = Number(meta.reopenedCount) > 0 ? Number(meta.reopenedCount) : 1;
   const marker = `\u{1F501} Re-Open #${round}`;
@@ -557,9 +557,10 @@ export function buildPlaneReopenBlockHtml(meta: {
     .replace(",", "");
   const suffix = meta.ticketNumber ? ` (${esc(String(meta.ticketNumber))})` : "";
   const feedback = String(meta.feedback || "").replace(/\s+/g, " ").trim();
-  const feedbackHtml = feedback ? `<p>อาการที่ลูกค้าแจ้ง: ${esc(feedback)}</p>` : "";
+  const feedbackText = feedback ? esc(feedback) : "";
+  const feedbackHtml = feedback ? `<p>อาการที่ลูกค้าแจ้ง: ${feedbackText}</p>` : "";
   const html = `<p><strong>${marker} · ${esc(when)} · ลูกค้าแจ้งว่าอาการเดิมยังไม่หาย${suffix}</strong></p>${feedbackHtml}<hr>`;
-  return { html, marker };
+  return { html, marker, feedbackHtml, feedbackText };
 }
 
 export function selectPlaneBacklogState(states: PlaneStateSummary[]): PlaneStateSummary | undefined {
@@ -1393,6 +1394,14 @@ export class PlaneService {
       const payload: Record<string, unknown> = {};
       if (!currentDescription.includes(block.marker)) {
         payload.description_html = `${block.html}${currentDescription}`;
+      } else if (block.feedbackText && !currentDescription.includes(block.feedbackText)) {
+        // Same round already has its header (feedback arriving inside the
+        // 30-minute window): append the symptom line at the end of that
+        // round's block (before its <hr>), oldest first.
+        const hr = currentDescription.indexOf("<hr>", currentDescription.indexOf(block.marker));
+        if (hr >= 0) {
+          payload.description_html = `${currentDescription.slice(0, hr)}${block.feedbackHtml}${currentDescription.slice(hr)}`;
+        }
       }
       const labelId = await this.getOrCreatePlaneLabel(PLANE_REOPEN_LABEL, "#f97316", projectConfig);
       if (labelId && !existingLabels.includes(labelId)) {

@@ -119,8 +119,11 @@ assert.ok(blk.html.includes("09/09/2026 14:07"), "Bangkok local time, Gregorian 
 assert.ok(blk.html.includes("(TCK-2026-11249)"));
 assert.ok(blk.html.includes("อาการที่ลูกค้าแจ้ง: เปิดหน้าเว็บ &lt;แล้ว&gt; ขึ้น 414"), "feedback escaped");
 assert.ok(blk.html.endsWith("<hr>"));
+assert.equal(blk.feedbackHtml, "<p>อาการที่ลูกค้าแจ้ง: เปิดหน้าเว็บ &lt;แล้ว&gt; ขึ้น 414</p>");
+assert.equal(blk.feedbackText, "เปิดหน้าเว็บ &lt;แล้ว&gt; ขึ้น 414");
 const blk0 = buildPlaneReopenBlockHtml({ reopenedCount: null, feedback: null });
 assert.equal(blk0.marker, "\u{1F501} Re-Open #1", "missing count -> round 1");
 assert.ok(!blk0.html.includes("อาการที่ลูกค้าแจ้ง"), "no feedback line without feedback");
+assert.equal(blk0.feedbackHtml, "");
 
 console.log("Plane state mapping tests passed (Excise vocabulary + legacy fallbacks).");

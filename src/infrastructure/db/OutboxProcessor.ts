@@ -1,3 +1,4 @@
+import os from "node:os";
 import { PostgresOutboxRepository } from "./PostgresOutboxRepository";
 import { BullMQJobQueue } from "../queue/BullMQJobQueue";
 import { createLogger } from "../../observability/logger";
@@ -11,6 +12,9 @@ const logger = createLogger("OutboxProcessor");
 
 /** Retry budget for failures that could plausibly succeed later. */
 const MAX_TRANSIENT_ATTEMPTS = 5;
+
+/** Which process dispatched an event — several backends share the outbox. */
+const DISPATCHER = { host: os.hostname(), pid: process.pid };
 
 /**
  * OutboxProcessor runs a background polling loop to process transactional
@@ -132,7 +136,7 @@ export class OutboxProcessor {
             ticketId: Number(payload.ticketDbId) || null,
             projectId: payload.projectId ? Number(payload.projectId) : null,
             orgId: payload.orgId ?? null,
-            detail: { eventType: event_type, attempts },
+            detail: { eventType: event_type, attempts, ...DISPATCHER },
           });
         } catch (err: any) {
           const nextAttempts = attempts + 1;
@@ -145,7 +149,7 @@ export class OutboxProcessor {
             eventType: `${event_type}_failed`,
             status: "failed",
             outboxEventId: Number(id),
-            detail: { eventType: event_type, classification: kind, attempts: nextAttempts },
+            detail: { eventType: event_type, classification: kind, attempts: nextAttempts, ...DISPATCHER },
             errorMessage: err.message,
           });
 

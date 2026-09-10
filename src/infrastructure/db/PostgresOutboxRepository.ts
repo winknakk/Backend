@@ -2,25 +2,51 @@ import { pool } from "../../adapters/postgres/PostgresAdapter";
 import { IOutboxRepository, OutboxEventPersistence } from "../../domain/repositories/IOutboxRepository";
 
 /**
+ * A claim older than this is assumed to belong to a processor that died
+ * between claiming and marking; it goes back to the queue. Plane calls time
+ * out at 10 s (with retries), so a live dispatch never reaches this age.
+ */
+const STALE_CLAIM_MINUTES = 10;
+
+/**
  * PostgreSQL implementation of the Outbox Repository.
  */
 export class PostgresOutboxRepository implements IOutboxRepository {
   /**
-   * Fetches pending outbox events using a safe, non-blocking SELECT query.
+   * Claims due outbox events for this process. Several backends share the
+   * table (production api + worker, developer machines), so the fetch is a
+   * claim: rows are moved to `processing` under `FOR UPDATE SKIP LOCKED` and
+   * only the claimant sees them (ISSUE-072: the same event was dispatched
+   * twice by two pollers). Older builds that still SELECT `pending` simply
+   * do not see claimed rows.
    */
   async fetchPending(limit: number): Promise<OutboxEventPersistence[]> {
+    await pool
+      .query(
+        `UPDATE outbox_events
+            SET status = 'pending', updated_at = NOW()
+          WHERE status = 'processing'
+            AND updated_at < NOW() - ($1::int * INTERVAL '1 minute')`,
+        [STALE_CLAIM_MINUTES]
+      )
+      .catch(() => {});
     // Only events that are actually due. A transient failure sets
     // next_attempt_at, so a failing dependency is retried with backoff
     // instead of being hammered on every polling cycle.
     const { rows } = await pool.query(
-      `SELECT id, event_type, payload, status, attempts, error_message, created_at, updated_at
-       FROM outbox_events
-       WHERE status = 'pending'
-         AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
-       ORDER BY id ASC
-       LIMIT $1`,
+      `UPDATE outbox_events o
+          SET status = 'processing', updated_at = NOW()
+        WHERE o.id IN (
+          SELECT id FROM outbox_events
+           WHERE status = 'pending'
+             AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+           ORDER BY id ASC
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED)
+        RETURNING o.id, o.event_type, o.payload, o.status, o.attempts, o.error_message, o.created_at, o.updated_at`,
       [limit]
     );
+    rows.sort((a: any, b: any) => Number(a.id) - Number(b.id));
     return rows.map((r: any) => ({
       id: r.id,
       event_type: r.event_type,

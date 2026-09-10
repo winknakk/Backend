@@ -971,7 +971,9 @@ async function bootstrap() {
 
   // 5. Start background outbox polling loop
   const outboxProcessor = new OutboxProcessor();
-  outboxProcessor.start(10000);
+  // 5 s: the production api/worker poll at 5 s; a slower dev backend never
+  // won a claim (ISSUE-072).
+  outboxProcessor.start(5000);
   planeReverseSyncPoller.start();
 
   fastify.addHook("onClose", async () => {

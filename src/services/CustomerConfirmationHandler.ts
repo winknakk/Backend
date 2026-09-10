@@ -273,8 +273,19 @@ export class CustomerConfirmationHandler {
   // Re-open path (operator decisions 2026-09-08)
   // ---------------------------------------------------------------------------
 
-  /** Appends customer feedback to the ticket and mirrors it to Plane as a comment. */
-  private async saveFeedback(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket, text: string, reopenedCount: number | null): Promise<void> {
+  /**
+   * Appends customer feedback to the ticket and mirrors it to Plane: always a
+   * comment, and (`mirror` = "comment+description") also as a symptom line
+   * under the current round header in the description. `reopenTicket` passes
+   * "comment" because it writes the description itself.
+   */
+  private async saveFeedback(
+    input: { conversationId: number; correlationId?: string },
+    ticket: OpenTicket,
+    text: string,
+    reopenedCount: number | null,
+    mirror: "comment" | "comment+description" = "comment+description"
+  ): Promise<void> {
     const clean = String(text || "").replace(/\s+/g, " ").trim().slice(0, 2000);
     if (!clean) return;
     await pool
@@ -301,6 +312,9 @@ export class CustomerConfirmationHandler {
         const { AdapterFactory } = await import("../adapters/AdapterFactory");
         const planeService = new PlaneService(AdapterFactory.getAdapter());
         await planeService.addCustomerFeedbackComment(ticket.id, clean, { ticketNumber: ticket.ticket_number, reopenedCount });
+        if (mirror === "comment+description") {
+          await planeService.markWorkItemReopened(ticket.id, { ticketNumber: ticket.ticket_number, reopenedCount, feedback: clean });
+        }
       } catch (err: any) {
         logger.warn({ ticketId: ticket.id, error: err?.message }, "Plane feedback comment failed");
       }
@@ -329,7 +343,7 @@ export class CustomerConfirmationHandler {
     const countRow = await pool.query<{ reopened_count: number | null }>(`SELECT reopened_count FROM tickets WHERE id = $1`, [ticket.id]).catch(() => null);
     const count = Number(countRow?.rows?.[0]?.reopened_count || 1);
 
-    if (feedback) await this.saveFeedback(input, ticket, feedback, count);
+    if (feedback) await this.saveFeedback(input, ticket, feedback, count, "comment");
     // Plane: "Re-Open" label + a round header on top of the description so the
     // engineer sees this is the same bug coming back. Never blocks the reply.
     void (async () => {
