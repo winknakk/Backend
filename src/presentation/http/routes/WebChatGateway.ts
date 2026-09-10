@@ -719,10 +719,16 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
       let resolvedProj = decoded.projectId;
       let resolvedComp = decoded.companyId;
+      // Project 1 is the "no verified project yet" sentinel, not a project a
+      // customer can work in: the message handler refuses to accept anything
+      // for it and prompts for a join code instead (see the fail-closed tenant
+      // policy below). Treating it as unset here is therefore correct — it lets
+      // a session whose token still carries the sentinel discover the real
+      // project it already has a conversation in.
       if (!resolvedProj || resolvedProj === "1") {
         try {
           const authCheck = await pool.query(
-            `SELECT c.project_id, p.company_id 
+            `SELECT c.project_id, p.company_id
              FROM conversations c
              JOIN projects p ON p.id = c.project_id
              WHERE (c.identity_id::text = $1 OR c.identity_id IN (SELECT id FROM identities WHERE channel_ref = $2))
@@ -740,8 +746,23 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       wsTickets.set(ticketId, {
         identityId: String(decoded.identityId || decoded.customerId || decoded.profileId || "guest"),
         profileId: String(decoded.profileId || "guest"),
-        companyId: String(resolvedComp || "101"),
-        projectId: String(resolvedProj || "101"),
+        // Unresolvable scope falls back to the sentinel, never to a real tenant.
+        //
+        // These defaulted to "101" — a real, populated project. A token that
+        // never went through the handshake carries no `projectId`, and the
+        // lookup above only resolves one when the identity already has an open
+        // conversation; with neither, the socket was handed project 101. The
+        // fail-closed gate below keys on project "1", so it never fired, and an
+        // identity holding ZERO `profile_projects` rows could open a
+        // conversation in 101 and persist messages there (measured: identity
+        // 100232 -> conversation 100002, message 3085).
+        //
+        // "1" is the documented "no verified project yet" sentinel, so an
+        // unresolvable session now lands where the existing policy already
+        // refuses it and asks for a join code. Nothing changes for a session
+        // that does carry a project, including a legitimate project 101.
+        companyId: String(resolvedComp || "1"),
+        projectId: String(resolvedProj || "1"),
         channelRef: String(decoded.channelRef || decoded.customerId || decoded.identityId || "guest"),
         role: decoded.role === "customer" ? "customer" : "guest",
         expiresAt: Date.now() + ttlMs,
