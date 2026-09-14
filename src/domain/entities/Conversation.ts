@@ -14,6 +14,7 @@ export interface ConversationProps {
   channel?: string;
   assignedPm?: string;
   takeoverExpiresAt?: Date | null;
+  activeTicketId?: number | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -26,6 +27,7 @@ export class Conversation extends BaseAggregate<string> {
   private _handledBy: string;
   private _assignedPm?: string;
   private _takeoverExpiresAt?: Date | null;
+  private _activeTicketId?: number | null;
   public readonly createdAt: Date;
   public readonly updatedAt: Date;
 
@@ -42,8 +44,17 @@ export class Conversation extends BaseAggregate<string> {
     this._handledBy = props.handledBy || "ai";
     this._assignedPm = props.assignedPm;
     this._takeoverExpiresAt = props.takeoverExpiresAt || null;
+    this._activeTicketId = props.activeTicketId !== undefined ? props.activeTicketId : null;
     this.createdAt = props.createdAt || new Date();
     this.updatedAt = props.updatedAt || new Date();
+  }
+
+  get activeTicketId(): number | null | undefined {
+    return this._activeTicketId;
+  }
+
+  public setActiveTicketId(ticketId: number | null): void {
+    this._activeTicketId = ticketId;
   }
 
   get status(): string {

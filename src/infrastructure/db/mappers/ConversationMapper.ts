@@ -11,6 +11,7 @@ export class ConversationMapper {
       channel: raw.channel || "WebChat",
       assignedPm: raw.assigned_pm || undefined,
       takeoverExpiresAt: null,
+      activeTicketId: raw.active_ticket_id ? Number(raw.active_ticket_id) : null,
       createdAt: raw.created_at ? new Date(raw.created_at) : undefined,
       updatedAt: raw.updated_at ? new Date(raw.updated_at) : undefined
     });
@@ -25,6 +26,7 @@ export class ConversationMapper {
       handled_by: domain.handledBy,
       channel: domain.channel,
       assigned_pm: domain.assignedPm || null,
+      active_ticket_id: domain.activeTicketId || null,
       created_at: domain.createdAt ? domain.createdAt.toISOString() : null,
       updated_at: domain.updatedAt ? domain.updatedAt.toISOString() : null
     };

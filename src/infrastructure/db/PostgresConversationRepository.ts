@@ -28,8 +28,8 @@ export class PostgresConversationRepository implements IConversationRepository {
   async save(conversation: Conversation): Promise<Conversation> {
     const data = ConversationMapper.toPersistence(conversation);
     const { rows } = await pool.query(
-      `INSERT INTO conversations (id, project_id, identity_id, status, handled_by, assigned_pm, channel, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), COALESCE($9, NOW()))
+      `INSERT INTO conversations (id, project_id, identity_id, status, handled_by, assigned_pm, channel, active_ticket_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, NOW()), COALESCE($10, NOW()))
        ON CONFLICT (id) DO UPDATE SET
          project_id = EXCLUDED.project_id,
          identity_id = EXCLUDED.identity_id,
@@ -37,6 +37,7 @@ export class PostgresConversationRepository implements IConversationRepository {
          handled_by = EXCLUDED.handled_by,
          assigned_pm = EXCLUDED.assigned_pm,
          channel = EXCLUDED.channel,
+         active_ticket_id = COALESCE(EXCLUDED.active_ticket_id, conversations.active_ticket_id),
          updated_at = NOW()
        RETURNING *`,
       [
@@ -47,6 +48,7 @@ export class PostgresConversationRepository implements IConversationRepository {
         data.handled_by,
         data.assigned_pm,
         data.channel,
+        data.active_ticket_id || null,
         data.created_at,
         data.updated_at
       ]

@@ -27,6 +27,7 @@ import { adminSocketRegistry } from "../../../api/AdminSocketRegistry";
 import { projectResolver, normalizeJoinCode } from "../../../domain/project/ProjectResolver";
 import { findOrCreateWebChatGuestIdentity } from "../../../infrastructure/db/guestIdentityProvisioning";
 import { customerMessagePreRouter } from "../../../services/CustomerMessagePreRouter";
+import { TicketStateMachine } from "../../../domain/ticket/TicketStateMachine";
 
 const logger = createLogger("WebChatGateway");
 
@@ -551,31 +552,71 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       const page = await messageRepo.findPageByConversationId(activeConv.id, limit, before);
       const messages = page.messages;
 
-      // Hydrate attachments
+      // Hydrate attachments and ticket context
       const messagesWithAttachments = await Promise.all(
         messages.map(async (m) => {
-          const { rows } = await pool.query(
-            "SELECT file_url, file_name, file_type, file_size FROM message_attachments WHERE message_id = $1",
-            [parseInt(m.id)]
-          );
+          const [attRes, msgRes] = await Promise.all([
+            pool.query(
+              "SELECT file_url, file_name, file_type, file_size, metadata FROM message_attachments WHERE message_id = $1",
+              [parseInt(m.id)]
+            ),
+            pool.query(
+              "SELECT ticket_id FROM messages WHERE id = $1 LIMIT 1",
+              [parseInt(m.id)]
+            )
+          ]);
+
+          const msgTicketId = msgRes.rows[0]?.ticket_id;
+
           return {
             id: m.id,
             externalId: (m as any).externalId || m.id,
             role: m.role,
             content: m.content,
             createdAt: m.createdAt,
-            attachments: rows.map(r => ({
+            activeTicketId: msgTicketId ? String(msgTicketId) : undefined,
+            attachments: attRes.rows.map(r => ({
               fileUrl: r.file_url,
               fileName: r.file_name,
               fileType: r.file_type,
-              fileSize: r.file_size
+              fileSize: r.file_size,
+              metadata: r.metadata
             }))
           };
         })
       );
 
+      // Resolve canonical active ticket for the conversation
+      let canonicalActiveTicketId: number | null = null;
+      let canonicalActiveTicket: any = null;
+      try {
+        const cRow = await pool.query(
+          `SELECT c.active_ticket_id, t.id, t.ticket_number, t.status, t.subject, t.priority
+           FROM conversations c
+           LEFT JOIN tickets t ON t.id = c.active_ticket_id
+           WHERE c.id = $1 LIMIT 1`,
+          [parseInt(activeConv.id, 10)]
+        );
+        if (cRow.rows.length > 0 && cRow.rows[0].active_ticket_id && cRow.rows[0].id) {
+          const t = cRow.rows[0];
+          const st = String(t.status || "").toUpperCase();
+          if (st !== "CLOSED" && st !== "CANCELLED") {
+            canonicalActiveTicketId = Number(t.id);
+            canonicalActiveTicket = {
+              id: t.id,
+              ticketNumber: t.ticket_number,
+              status: t.status,
+              subject: t.subject,
+              priority: t.priority
+            };
+          }
+        }
+      } catch {}
+
       return reply.code(200).send({
         conversationId: activeConv.id,
+        activeTicketId: canonicalActiveTicketId ? String(canonicalActiveTicketId) : null,
+        activeTicket: canonicalActiveTicket,
         messages: messagesWithAttachments,
         // Additive: existing clients read only `conversationId` and `messages`.
         // `nextCursor` is the oldest id in this page — pass it back as `before`
@@ -808,7 +849,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       return;
     }
 
-    const { identityId, projectId, companyId, channelRef } = ticketData;
+    const { identityId, profileId, projectId, companyId, channelRef } = ticketData;
     let room = "";
     const joinedRooms = new Set<string>();
     const joinRoom = (r: string) => {
@@ -846,6 +887,77 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
               }
             }, socket);
           }
+          return;
+        }
+
+        // 1.1 Handle Switch Ticket Event via WebSocket
+        if (payload.event === "switch_ticket" || payload.action === "switch_ticket") {
+          const rawId = payload.data?.ticketId ?? payload.ticketId;
+          const targetTicketStr = rawId !== undefined && rawId !== null ? String(rawId).trim() : null;
+
+          let switchedTicketId: number | null = null;
+          let switchedTicketNum: string | null = null;
+
+          if (targetTicketStr) {
+            try {
+              const tRes = await pool.query(
+                `SELECT t.id, t.project_id, t.status, t.ticket_number, c.identity_id, i.profile_id
+                 FROM tickets t
+                 LEFT JOIN conversations c ON c.id = t.conversation_id
+                 LEFT JOIN identities i ON i.id = c.identity_id
+                 WHERE (t.id::text = $1 OR t.ticket_number = $1 OR t.ticket_id = $1)
+                   AND t.deleted_at IS NULL
+                 LIMIT 1`,
+                [targetTicketStr]
+              );
+              if (tRes.rows.length > 0) {
+                const tRow = tRes.rows[0];
+                const isSameProj = Number(tRow.project_id) === Number(projectId);
+                const isOwner = (
+                  String(tRow.identity_id) === String(identityId) ||
+                  (profileId && profileId !== "guest" && String(tRow.profile_id) === String(profileId)) ||
+                  (channelRef && String(tRow.identity_id) === String(channelRef))
+                );
+                const isNotClosed = !["CLOSED", "CANCELLED"].includes(String(tRow.status || "").toUpperCase());
+
+                if (isSameProj && (isOwner || !tRow.identity_id) && isNotClosed) {
+                  switchedTicketId = Number(tRow.id);
+                  switchedTicketNum = tRow.ticket_number;
+                } else {
+                  logger.warn({ targetTicketStr, isSameProj, isOwner, status: tRow.status }, "WebSocket switch_ticket rejected: out of scope or closed");
+                }
+              }
+            } catch {}
+          }
+
+          let convId: number | null = null;
+          try {
+            const cRes = await pool.query(
+              `SELECT id FROM conversations
+               WHERE (identity_id::text = $1 OR identity_id IN (SELECT id FROM identities WHERE channel_ref = $2))
+                 AND project_id = $3
+                 AND status = 'open'
+               ORDER BY id DESC LIMIT 1`,
+              [identityId, channelRef, parseInt(String(projectId), 10)]
+            );
+            if (cRes.rows.length > 0) {
+              convId = cRes.rows[0].id;
+              await pool.query(
+                `UPDATE conversations SET active_ticket_id = $1, updated_at = NOW() WHERE id = $2`,
+                [switchedTicketId, convId]
+              );
+            }
+          } catch {}
+
+          socket.send(JSON.stringify({
+            event: "active_ticket_switched",
+            data: {
+              activeTicketId: switchedTicketId,
+              ticketNumber: switchedTicketNum,
+              conversationId: convId ? String(convId) : undefined,
+              projectId: Number(projectId),
+            }
+          }));
           return;
         }
 
@@ -913,6 +1025,98 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             }
           }
 
+          if (postbackVal.startsWith("cancel_confirm:")) {
+            const ticketNum = postbackVal.replace(/^cancel_confirm:/, "").trim();
+            try {
+              const tRes = await pool.query(
+                `SELECT id, ticket_number, status, project_id FROM tickets
+                 WHERE UPPER(ticket_number) = UPPER($1) AND deleted_at IS NULL LIMIT 1`,
+                [ticketNum]
+              );
+              if (tRes.rows.length > 0) {
+                const tRow = tRes.rows[0];
+                const stateMachine = new TicketStateMachine();
+                const transRes = await stateMachine.transition({
+                  ticketRef: tRow.id,
+                  to: "CANCELLED",
+                  actor: "customer",
+                  actorRef: channelRef,
+                  reason: "Customer confirmed cancellation via WebChat",
+                });
+
+                if (transRes.applied || transRes.code === "NO_OP") {
+                  await pool.query(
+                    `UPDATE conversations SET active_ticket_id = NULL, updated_at = NOW() WHERE active_ticket_id = $1`,
+                    [tRow.id]
+                  );
+
+                  broadcastWebChatOutbound({
+                    event: "ticket_updated",
+                    data: {
+                      ticketId: tRow.id,
+                      ticketNumber: tRow.ticket_number,
+                      status: "CANCELLED",
+                      updatedAt: new Date().toISOString(),
+                    },
+                    recipientId: channelRef,
+                  });
+
+                  const cancelReplyText = `ยกเลิกตั๋ว ${tRow.ticket_number} เรียบร้อยแล้วค่ะ`;
+                  let cancelMsgId: number | null = null;
+                  if (activeConvId > 0) {
+                    const ins = await pool.query(
+                      `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+                       VALUES ($1, 'ai', $2, 'text', 'pre_router', NOW())
+                       RETURNING id`,
+                      [activeConvId, cancelReplyText]
+                    );
+                    cancelMsgId = ins.rows[0]?.id ? Number(ins.rows[0].id) : null;
+                  }
+
+                  broadcastWebChatOutbound({
+                    conversationId: activeConvId > 0 ? String(activeConvId) : undefined,
+                    recipientId: channelRef,
+                    id: cancelMsgId ? String(cancelMsgId) : randomUUID(),
+                    externalId: cancelMsgId ? String(cancelMsgId) : undefined,
+                    messageId: cancelMsgId ?? undefined,
+                    text: cancelReplyText,
+                    role: "ai" as const,
+                    sentAt: new Date().toISOString(),
+                  });
+                  return;
+                }
+              }
+            } catch (cancelErr: any) {
+              logger.warn({ error: cancelErr.message, ticketNum }, "Failed processing cancel_confirm postback");
+            }
+          }
+
+          if (postbackVal.startsWith("cancel_decline:")) {
+            const ticketNum = postbackVal.replace(/^cancel_decline:/, "").trim();
+            const declineReplyText = `รับทราบค่ะ ระบบยังคงดำเนินการต่อสำหรับตั๋ว ${ticketNum} นะคะ`;
+            let declineMsgId: number | null = null;
+            if (activeConvId > 0) {
+              const ins = await pool.query(
+                `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+                 VALUES ($1, 'ai', $2, 'text', 'pre_router', NOW())
+                 RETURNING id`,
+                [activeConvId, declineReplyText]
+              );
+              declineMsgId = ins.rows[0]?.id ? Number(ins.rows[0].id) : null;
+            }
+            broadcastWebChatOutbound({
+              conversationId: activeConvId > 0 ? String(activeConvId) : undefined,
+              recipientId: channelRef,
+              id: declineMsgId ? String(declineMsgId) : randomUUID(),
+              externalId: declineMsgId ? String(declineMsgId) : undefined,
+              messageId: declineMsgId ?? undefined,
+              text: declineReplyText,
+              role: "ai" as const,
+              sentAt: new Date().toISOString(),
+            });
+            return;
+          }
+
           const resolved = resolvePostback(postbackVal);
           if (!resolved) {
             logger.warn({ postback: postbackVal }, "Unknown WebChat postback ignored");
@@ -960,7 +1164,10 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         const IncomingMessageSchema = z.object({
           text: z.string().optional().default(""),
           tempId: z.string().optional(),
-          attachments: z.array(IncomingAttachmentSchema).optional().default([])
+          attachments: z.array(IncomingAttachmentSchema).optional().default([]),
+          activeTicketId: z.union([z.string(), z.number()]).optional().nullable(),
+          ticketNumber: z.string().optional().nullable(),
+          externalId: z.string().optional(),
         });
 
         const parsed = IncomingMessageSchema.safeParse(payload);
@@ -979,7 +1186,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
         const messageText = rawText || (attachments[0]?.fileName ? `[ไฟล์แนบ: ${attachments[0].fileName}]` : '[ไฟล์แนบ]');
         const messageType = attachments.length > 0 ? (attachments[0].fileType?.startsWith("image/") || attachments[0].fileUrl?.match(/\.(jpeg|jpg|png|webp|gif)/i) ? "image" : "file") : "text";
-        const externalId = (parsed.data.tempId && parsed.data.tempId.trim()) ? parsed.data.tempId.trim() : `webchat_${Date.now()}_${randomUUID().slice(0, 8)}`;
+        const externalId = (parsed.data.tempId && parsed.data.tempId.trim()) ? parsed.data.tempId.trim() : (parsed.data.externalId && parsed.data.externalId.trim()) ? parsed.data.externalId.trim() : `webchat_${Date.now()}_${randomUUID().slice(0, 8)}`;
         const tempId = externalId;
 
         // Ensure active conversation exists on message send
@@ -996,6 +1203,78 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             channel: "WebChat"
           });
           await conversationRepo.save(conversation);
+        }
+
+        // Validate and authorize active ticket context
+        let validatedTicketId: number | null = null;
+        let validatedTicketNumber: string | null = null;
+        const candidateTicketId = parsed.data.activeTicketId !== undefined && parsed.data.activeTicketId !== null
+          ? String(parsed.data.activeTicketId).trim()
+          : null;
+
+        if (candidateTicketId) {
+          try {
+            const tRes = await pool.query(
+              `SELECT t.id, t.project_id, t.status, t.ticket_number, c.identity_id, i.profile_id
+               FROM tickets t
+               LEFT JOIN conversations c ON c.id = t.conversation_id
+               LEFT JOIN identities i ON i.id = c.identity_id
+               WHERE (t.id::text = $1 OR t.ticket_number = $1 OR t.ticket_id = $1)
+                 AND t.deleted_at IS NULL
+               LIMIT 1`,
+              [candidateTicketId]
+            );
+            if (tRes.rows.length > 0) {
+              const tRow = tRes.rows[0];
+              const isSameProject = Number(tRow.project_id) === Number(projectId);
+              const isOwner = (
+                String(tRow.identity_id) === String(identityId) ||
+                (profileId && profileId !== "guest" && String(tRow.profile_id) === String(profileId)) ||
+                (channelRef && String(tRow.identity_id) === String(channelRef))
+              );
+              const isNotClosed = !["CLOSED", "CANCELLED"].includes(String(tRow.status || "").toUpperCase());
+
+              if (isSameProject && (isOwner || !tRow.identity_id) && isNotClosed) {
+                validatedTicketId = Number(tRow.id);
+                validatedTicketNumber = tRow.ticket_number;
+              } else {
+                logger.warn(
+                  { candidateTicketId, isSameProject, isOwner, status: tRow.status, projectId, identityId },
+                  "Active ticket context rejected: out of scope, unauthorized, or closed"
+                );
+              }
+            }
+          } catch (tErr: any) {
+            logger.warn({ error: tErr.message, candidateTicketId }, "Failed validating active ticket context");
+          }
+        }
+
+        // If no candidate was provided by client, check if conversation already has an active ticket
+        if (!validatedTicketId && conversation.activeTicketId) {
+          try {
+            const tCheck = await pool.query(
+              `SELECT id, ticket_number, status, project_id FROM tickets WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
+              [conversation.activeTicketId]
+            );
+            if (tCheck.rows.length > 0) {
+              const row = tCheck.rows[0];
+              if (Number(row.project_id) === Number(projectId) && !["CLOSED", "CANCELLED"].includes(String(row.status || "").toUpperCase())) {
+                validatedTicketId = Number(row.id);
+                validatedTicketNumber = row.ticket_number;
+              }
+            }
+          } catch {}
+        }
+
+        // Persist validated ticket focus pointer to conversation if different
+        if (validatedTicketId && conversation.activeTicketId !== validatedTicketId) {
+          try {
+            await pool.query(
+              `UPDATE conversations SET active_ticket_id = $1, updated_at = NOW() WHERE id = $2`,
+              [validatedTicketId, conversation.id]
+            );
+            conversation.setActiveTicketId(validatedTicketId);
+          } catch {}
         }
 
         const conversationId = conversation.id;
@@ -1294,12 +1573,13 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         if (conversationId) {
           try {
             const insertRes = await pool.query(
-              `INSERT INTO messages (conversation_id, role, content, message_type, external_id, created_at)
-               VALUES ($1, 'customer', $2, $3, $4, NOW())
+              `INSERT INTO messages (conversation_id, role, content, message_type, external_id, ticket_id, created_at)
+               VALUES ($1, 'customer', $2, $3, $4, $5, NOW())
                ON CONFLICT (conversation_id, external_id) DO UPDATE SET
-                 content = EXCLUDED.content
-               RETURNING id`,
-              [conversationId, messageText, messageType, externalId]
+                 content = EXCLUDED.content,
+                 ticket_id = COALESCE(EXCLUDED.ticket_id, messages.ticket_id)
+               RETURNING id, ticket_id`,
+              [conversationId, messageText, messageType, externalId, validatedTicketId || null]
             );
             if (insertRes.rows.length > 0) {
               insertedMessageId = insertRes.rows[0].id;
@@ -1319,6 +1599,10 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
         if (insertedMessageId && attachments.length > 0) {
           for (const att of attachments) {
             try {
+              const attMetadata = JSON.stringify({
+                activeTicketId: validatedTicketId,
+                ticketNumber: validatedTicketNumber || parsed.data.ticketNumber || undefined
+              });
               await pool.query(
                 `INSERT INTO message_attachments (message_id, file_url, thumbnail_url, file_name, file_type, file_size, storage_key, attachment_status, metadata, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'READY', $8, NOW())`,
@@ -1330,7 +1614,7 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
                   att.fileType || (att.fileUrl.match(/\.(png|jpg|jpeg|webp|gif)/i) ? 'image/jpeg' : 'application/octet-stream'),
                   att.fileSize || 0,
                   att.storageKey || null,
-                  JSON.stringify({})
+                  attMetadata
                 ]
               );
             } catch (attErr: any) {
@@ -1352,7 +1636,9 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
             role: "customer",
             content: messageText,
             createdAt: receivedAtStr,
-            attachments
+            attachments,
+            activeTicketId: validatedTicketId ? String(validatedTicketId) : undefined,
+            ticketNumber: validatedTicketNumber || parsed.data.ticketNumber || undefined
           }
         };
 
