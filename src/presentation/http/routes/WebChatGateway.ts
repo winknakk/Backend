@@ -192,6 +192,17 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
               data: {
                 id: resolvedId,
                 externalId: resolvedExternalId,
+                // Which conversation this belongs to, so the client can reject a
+                // message meant for another one.
+                //
+                // Outbound also targets `recipient:<channelRef>`, which is scoped
+                // to the IDENTITY, not the project — and one identity legitimately
+                // spans several projects. Without this field a socket viewing
+                // project B received project A's messages and had no way to tell.
+                // `conversations.project_id` is the project boundary, so the
+                // conversation id is sufficient to decide; the project id itself
+                // is not needed on the wire.
+                conversationId: payload.conversationId ? String(payload.conversationId) : undefined,
                 role: payload.role || "ai",
                 content: payload.text || payload.content || "",
                 createdAt: payload.sentAt || new Date().toISOString(),
@@ -489,11 +500,25 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
       let activeConv = await conversationRepo.findActiveByIdentity(identityId, projectId);
       if (!activeConv) {
+        // The fallback is scoped to the SAME project as the primary lookup.
+        //
+        // It used to select `WHERE identity_id = $1 AND channel='webchat' AND
+        // status='open'` with no project filter, so a customer who switched to a
+        // project they had no conversation in was served a different project's
+        // transcript. `conversations.project_id` is the project boundary, and an
+        // identity legitimately spans several projects, so identity alone can
+        // never be the selector here.
+        //
+        // No conversation for this project is a normal, empty state — the
+        // gateway creates one when the customer actually sends something.
         const convRes = await pool.query(
-          `SELECT id, project_id FROM conversations 
-           WHERE identity_id = $1 AND LOWER(channel) = 'webchat' AND status = 'open'
-           ORDER BY id DESC LIMIT 1`,
-          [parseInt(identityId, 10) || 0]
+          `SELECT id, project_id FROM conversations
+            WHERE identity_id = $1
+              AND project_id = $2
+              AND LOWER(channel) = 'webchat'
+              AND status = 'open'
+            ORDER BY id DESC LIMIT 1`,
+          [parseInt(identityId, 10) || 0, parseInt(String(projectId), 10) || 0]
         );
         if (convRes.rows.length > 0) {
           activeConv = { id: String(convRes.rows[0].id) } as any;
@@ -694,10 +719,16 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
 
       let resolvedProj = decoded.projectId;
       let resolvedComp = decoded.companyId;
+      // Project 1 is the "no verified project yet" sentinel, not a project a
+      // customer can work in: the message handler refuses to accept anything
+      // for it and prompts for a join code instead (see the fail-closed tenant
+      // policy below). Treating it as unset here is therefore correct — it lets
+      // a session whose token still carries the sentinel discover the real
+      // project it already has a conversation in.
       if (!resolvedProj || resolvedProj === "1") {
         try {
           const authCheck = await pool.query(
-            `SELECT c.project_id, p.company_id 
+            `SELECT c.project_id, p.company_id
              FROM conversations c
              JOIN projects p ON p.id = c.project_id
              WHERE (c.identity_id::text = $1 OR c.identity_id IN (SELECT id FROM identities WHERE channel_ref = $2))
@@ -715,8 +746,23 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
       wsTickets.set(ticketId, {
         identityId: String(decoded.identityId || decoded.customerId || decoded.profileId || "guest"),
         profileId: String(decoded.profileId || "guest"),
-        companyId: String(resolvedComp || "101"),
-        projectId: String(resolvedProj || "101"),
+        // Unresolvable scope falls back to the sentinel, never to a real tenant.
+        //
+        // These defaulted to "101" — a real, populated project. A token that
+        // never went through the handshake carries no `projectId`, and the
+        // lookup above only resolves one when the identity already has an open
+        // conversation; with neither, the socket was handed project 101. The
+        // fail-closed gate below keys on project "1", so it never fired, and an
+        // identity holding ZERO `profile_projects` rows could open a
+        // conversation in 101 and persist messages there (measured: identity
+        // 100232 -> conversation 100002, message 3085).
+        //
+        // "1" is the documented "no verified project yet" sentinel, so an
+        // unresolvable session now lands where the existing policy already
+        // refuses it and asks for a join code. Nothing changes for a session
+        // that does carry a project, including a legitimate project 101.
+        companyId: String(resolvedComp || "1"),
+        projectId: String(resolvedProj || "1"),
         channelRef: String(decoded.channelRef || decoded.customerId || decoded.identityId || "guest"),
         role: decoded.role === "customer" ? "customer" : "guest",
         expiresAt: Date.now() + ttlMs,
@@ -1300,6 +1346,9 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
           data: {
             id: insertedMessageId ? String(insertedMessageId) : externalId,
             externalId,
+            // Carried for the same reason as the outbound builders: the client
+            // filters on it, and this payload is also the send acknowledgement.
+            conversationId: String(conversationId),
             role: "customer",
             content: messageText,
             createdAt: receivedAtStr,
@@ -1619,6 +1668,10 @@ export function broadcastWebChatOutbound(payload: {
     data: {
       id: resolvedId,
       externalId: resolvedExternalId,
+      // See the Redis-side builder above: `recipient:<channelRef>` is
+      // identity-scoped, so the client needs the conversation to reject a
+      // message belonging to another project's conversation.
+      conversationId: payload.conversationId ? String(payload.conversationId) : undefined,
       role: payload.role || "ai",
       content: payload.text || payload.content || "",
       createdAt: payload.sentAt || new Date().toISOString(),
