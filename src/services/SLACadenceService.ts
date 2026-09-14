@@ -5,7 +5,7 @@ import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { addBusinessDays, businessDaysBetween } from "./BusinessCalendar";
 import { ConstantSystemService } from "./ConstantSystemService";
-import { customerNotificationService } from "./CustomerNotificationService";
+import { customerNotificationService, thaiDateStamp } from "./CustomerNotificationService";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import { doneEmailService } from "./UrgentAlertService";
 
@@ -86,46 +86,6 @@ export function slotStartedAt(createdAt: Date, slot: number, interval: CadenceIn
 
 const OPEN_STATUS_EXCLUDED = ["resolved", "closed", "cancelled", "done", "customer_confirmed"];
 const ADVISORY_LOCK_KEY = "ticketx:sla_cadence";
-
-/** Plain-Thai status wording — same semantics as the reply prompt's table. */
-function thaiStatus(status: string | null | undefined): string {
-  switch (String(status || "").trim().toUpperCase()) {
-    // Short labels: they sit on a "• สถานะ:" bullet the customer scans
-    // (operator decision 2026-09-09), so no trailing explanation.
-    case "NEW":
-    case "OPEN":
-    case "BACKLOG":
-    case "TODO":
-      return "รับเรื่องแล้ว รอดำเนินการ";
-    case "TRIAGED":
-      return "ตรวจสอบเบื้องต้นแล้ว";
-    case "IN_PROGRESS":
-      return "กำลังแก้ไข";
-    case "REOPENED":
-      return "เปิดเคสอีกครั้ง กำลังตรวจสอบซ้ำ";
-    case "WAITING_CUSTOMER":
-      return "รอข้อมูลเพิ่มเติมจากคุณ";
-    case "WAITING_INTERNAL":
-      return "รอทีมภายในตรวจสอบ";
-    default:
-      return "กำลังดำเนินการ";
-  }
-}
-
-/** "วันนี้ 18:34 น." / "พรุ่งนี้ 09:00 น." / "8 ก.ย. 2569 เวลา 17:00 น." in Bangkok time. */
-function thaiWhen(date: Date, now: Date): string {
-  const TZ = 7 * 3_600_000;
-  const b = new Date(date.getTime() + TZ);
-  const n = new Date(now.getTime() + TZ);
-  const pad = (x: number) => (x < 10 ? `0${x}` : String(x));
-  const clock = `${pad(b.getUTCHours())}:${pad(b.getUTCMinutes())} น.`;
-  const key = (x: Date) => `${x.getUTCFullYear()}-${x.getUTCMonth()}-${x.getUTCDate()}`;
-  const tomorrow = new Date(n.getTime() + 86_400_000);
-  if (key(b) === key(n)) return `วันนี้ ${clock}`;
-  if (key(b) === key(tomorrow)) return `พรุ่งนี้ ${clock}`;
-  const MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
-  return `${b.getUTCDate()} ${MONTHS[b.getUTCMonth()]} ${b.getUTCFullYear() + 543} เวลา ${clock}`;
-}
 
 interface OpenTicketRow {
   id: number;
@@ -672,22 +632,12 @@ export class SLACadenceService {
       return false;
     }
     const slotKey = slotKeyOverride || `ticket:${t.id}:user:${slot}`;
-    const due = t.due_date ? new Date(t.due_date) : null;
-    const dueAhead = due && !isNaN(due.getTime()) && due.getTime() > now.getTime();
-    // Bullet lines of the progress report (the "เรื่อง" line is added by the
-    // notification service from `subject`). Layout decision 2026-09-09: the
-    // customer scans for the status and the target time, so each is its own
-    // line instead of one long sentence.
-    const created = t.created_at ? new Date(t.created_at) : null;
-    const detail = [
-      `• สถานะ: ${thaiStatus(t.status)}`,
-      dueAhead
-        ? `• คาดว่าเรียบร้อย: ${thaiWhen(due as Date, now)}`
-        : "• คาดว่าเรียบร้อย: ทีมงานกำลังเร่งดำเนินการให้โดยเร็วที่สุดค่ะ",
-      ...(created && !isNaN(created.getTime()) ? [`• แจ้งเมื่อ: ${thaiWhen(created, now)}`] : []),
-    ].join("\n");
+    // The card (operator decision 2026-09-10) is rendered by the notification
+    // service from these facts: status word, "แจ้งเมื่อ" = created_at, and the
+    // "คาดว่าเรียบร้อย" line while due_date is still ahead.
+    const facts = { status: t.status, subject: t.subject ?? null, createdAt: t.created_at ?? null, dueAt: t.due_date ?? null };
     if (this.effectiveDryRun()) {
-      logger.info({ ticketNumber: t.ticket_number, slot, slotKey, conversationId: t.conversation_id, detail }, "[dry-run] would send customer progress report");
+      logger.info({ ticketNumber: t.ticket_number, slot, slotKey, conversationId: t.conversation_id, facts }, "[dry-run] would send customer progress report");
       return true;
     }
     const logId = await this.claimSlot(t.id, "user", slotKey, "line");
@@ -703,7 +653,7 @@ export class SLACadenceService {
         subject: t.subject ?? null,
         projectId: t.project_id ?? null,
         correlationId: slotKey,
-        detail,
+        facts,
       });
       await this.finishSlot(logId, res.sent ? "sent" : "skipped");
       if (res.sent) {
@@ -788,7 +738,7 @@ export class SLACadenceService {
     if (this.humanOwnsThread(t)) return false;
     const closeDays = config.RESOLUTION_AUTO_CLOSE_BUSINESS_DAYS;
     const deadline = closeDays > 0
-      ? `หากไม่ได้รับการตอบกลับ ระบบจะปิดเคสให้อัตโนมัติภายใน ${thaiWhen(addBusinessDays(since, closeDays), now)} นะคะ`
+      ? `หากไม่ได้รับการตอบกลับ ระบบจะปิดเคสให้อัตโนมัติภายใน ${thaiDateStamp(addBusinessDays(since, closeDays))} นะคะ`
       : "";
     if (this.effectiveDryRun()) {
       logger.info({ ticketNumber: t.ticket_number, slotKey, conversationId: t.conversation_id }, "[dry-run] would send resolution nudge");

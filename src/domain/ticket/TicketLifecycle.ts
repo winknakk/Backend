@@ -332,10 +332,14 @@ export function nextStatuses(
  */
 export function customerNotificationFor(
   to: TicketLifecycleStatus
-): "resolution_confirmation_request" | "closed" | "reopened" | null {
+): "resolution_confirmation_request" | "closed" | "reopened" | "waiting_customer" | null {
   switch (to) {
     case "RESOLVED":
       return "resolution_confirmation_request";
+    // Engineering needs something from the customer (Plane "Waiting for
+    // Customer"): tell them at once (operator decision 2026-09-10).
+    case "WAITING_CUSTOMER":
+      return "waiting_customer";
     case "CLOSED":
       return "closed";
     case "REOPENED":

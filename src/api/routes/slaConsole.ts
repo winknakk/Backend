@@ -22,13 +22,37 @@ function consolePagePath(): string {
   return path.resolve(__dirname, "../../../assets/sla-console/index.html");
 }
 
-async function requireConfiguredAdminApiKey(_request: FastifyRequest, reply: FastifyReply): Promise<void> {
+const SUPER_ADMIN_ROLES = new Set(["super_admin", "superadmin"]);
+
+/**
+ * Who may use the console API: the service key (the standalone console page)
+ * or a signed-in super_admin (the control panel inside the product SLA
+ * Center). Every other operator role is refused — these endpoints read across
+ * projects and, for writes, change tickets and send real messages.
+ */
+export function isSlaConsolePrincipal(request: FastifyRequest): boolean {
+  const principal = request.principal;
+  if (!principal) return false;
+  if (principal.kind === "service") return true;
+  return principal.kind === "operator" && SUPER_ADMIN_ROLES.has(String(principal.role || "").toLowerCase());
+}
+
+async function requireSlaConsoleAccess(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (!config.API_KEY) {
-    await reply.code(503).send({ error: "SLA console API is disabled until API_KEY is configured" });
+    await reply.code(503).send({ success: false, error: "SLA console API is disabled until API_KEY is configured" });
+    return;
+  }
+  if (!isSlaConsolePrincipal(request)) {
+    logger.warn({ url: request.url, principal: request.principal?.subject, role: request.principal?.role }, "SLA console access refused");
+    await reply.code(403).send({ success: false, code: "SUPER_ADMIN_REQUIRED", error: "SLA controls require the service key or a super_admin session" });
   }
 }
 
-const adminRouteOptions = { preHandler: requireConfiguredAdminApiKey };
+const adminRouteOptions = { preHandler: requireSlaConsoleAccess };
+/** The tenant-scoped overview is readable by any signed-in operator. */
+const overviewRouteOptions = { preHandler: async (_request: FastifyRequest, reply: FastifyReply) => {
+  if (!config.API_KEY) await reply.code(503).send({ success: false, error: "SLA console API is disabled until API_KEY is configured" });
+} };
 
 function writesGuard(body: any, reply: FastifyReply): boolean {
   if (!SLACadenceService.consoleWritesAllowed()) {
@@ -88,12 +112,14 @@ export function registerSlaConsoleRoutes(fastify: FastifyInstance, cadence: SLAC
    * middleware: an operator session only ever sees the projects it may
    * access, even when it asks for "all".
    */
-  fastify.get("/api/v1/admin/sla/overview", adminRouteOptions, async (request, reply) => {
+  fastify.get("/api/v1/admin/sla/overview", overviewRouteOptions, async (request, reply) => {
     const requested = (request.query as any)?.projectId;
     const filter = resolveProjectFilter(request, reply, requested);
     if (!filter) return;
     try {
       const data = await cadence.getOverview(filter.projectIds);
+      // Tells the page whether to offer the control panel at all.
+      (data as any).viewer = { canControl: isSlaConsolePrincipal(request), writesAllowed: SLACadenceService.consoleWritesAllowed() };
       return reply.send({ success: true, data });
     } catch (err: any) {
       logger.error({ error: err.message, requested }, "SLA overview failed");

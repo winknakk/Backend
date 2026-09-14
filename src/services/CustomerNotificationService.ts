@@ -40,7 +40,68 @@ export type CustomerNotificationType =
   | "reopened_by_team"
   | "reopen_too_old"
   | "reopen_confirmation_request"
-  | "due_extension_notice";
+  | "due_extension_notice"
+  // Engineering set "Waiting for Customer" in Plane (2026-09-10).
+  | "waiting_customer";
+
+/**
+ * Facts the case card is built from. Loaded from `tickets` by ticket id when
+ * the caller does not supply them.
+ */
+export interface CaseFacts {
+  status?: string | null;
+  subject?: string | null;
+  createdAt?: Date | string | null;
+  dueAt?: Date | string | null;
+  resolvedAt?: Date | string | null;
+}
+
+/**
+ * "09/09/69 เวลา 13:04 น." — Bangkok wall clock, zero-padded day / month /
+ * hour / minute, two-digit Buddhist year (operator decision 2026-09-10: never
+ * "วันนี้" or "พรุ่งนี้", always the date). Asia/Bangkok is UTC+7 all year.
+ */
+export function thaiDateStamp(value: Date | string | null | undefined): string {
+  const d = value instanceof Date ? value : new Date(String(value || ""));
+  if (!value || isNaN(d.getTime())) return "";
+  const b = new Date(d.getTime() + 7 * 3_600_000);
+  const pad = (x: number) => (x < 10 ? `0${x}` : String(x));
+  const yy = pad((b.getUTCFullYear() + 543) % 100);
+  return `${pad(b.getUTCDate())}/${pad(b.getUTCMonth() + 1)}/${yy} เวลา ${pad(b.getUTCHours())}:${pad(b.getUTCMinutes())} น.`;
+}
+
+/**
+ * The status word on the "• สถานะ:" line. Plane keeps its own vocabulary;
+ * the customer sees six coarse states (operator decision 2026-09-10:
+ * TRIAGED and IN_PROGRESS read the same).
+ */
+export function customerStatusLabel(status: string | null | undefined): string {
+  switch (String(status || "").trim().toUpperCase().replace(/[\s-]+/g, "_")) {
+    case "NEW":
+    case "OPEN":
+    case "BACKLOG":
+    case "TODO":
+      return "รับเรื่องแล้ว";
+    case "TRIAGED":
+    case "IN_PROGRESS":
+    case "WAITING_INTERNAL":
+      return "อยู่ระหว่างดำเนินการ";
+    case "REOPENED":
+      return "เปิดเคสอีกครั้ง อยู่ระหว่างตรวจสอบซ้ำ";
+    case "WAITING_CUSTOMER":
+      return "รอข้อมูลเพิ่มเติมจากคุณลูกค้า";
+    case "RESOLVED":
+    case "CUSTOMER_CONFIRMED":
+      return "แก้ไขแล้ว รอคุณลูกค้าตรวจสอบ";
+    case "CLOSED":
+    case "DONE":
+      return "เสร็จสิ้น";
+    case "CANCELLED":
+      return "ยกเลิก";
+    default:
+      return "อยู่ระหว่างดำเนินการ";
+  }
+}
 
 /** LINE quick-reply chip (message action): the tap sends `text` as the customer. */
 export interface NotificationQuickReply {
@@ -69,6 +130,11 @@ export interface SendRequest {
    * SLA cadence engine. Never internal vocabulary.
    */
   detail?: string | null;
+  /**
+   * Facts for the case card (progress / delivery / waiting / closed). When
+   * omitted and `ticketId` is set, they are read from `tickets`.
+   */
+  facts?: CaseFacts | null;
   /**
    * Quick-reply chips. When omitted, the type's default chips are attached
    * (delivery / close question); pass [] to send none.
@@ -157,29 +223,44 @@ export class CustomerNotificationService {
   ] as const;
 
   /**
-   * SLA progress reports ("รายงานความคืบหน้า User" cadence), laid out as a
-   * one-line opener, a bullet block and a one-line closer (operator decision
-   * 2026-09-09: a status update is scanned, not read). The opener states the
-   * case number and promises nothing beyond "still being worked on"; the
-   * bullet lines (status, target time, reported-at) come from the SLA cadence
-   * engine via SendRequest.detail. Seeded from the slot key so a re-run of the
-   * same slot (which the idempotency index already blocks) could never differ.
+   * Case card (operator decision 2026-09-10). Every status message the
+   * customer receives has the same shape, so it is recognised at a glance:
+   *
+   *   เคส TCK-…
+   *
+   *   • เรื่อง: <subject>
+   *   • สถานะ: <customerStatusLabel>
+   *   • แจ้งเมื่อ: <created_at>
+   *
+   *   <closing line(s)>
+   *
+   * No opener, no rotating closer — only the close message keeps a random
+   * thank-you line. LINE renders "\n" and "•" as-is.
    */
-  private static readonly PROGRESS_VARIANTS = [
-    "อัปเดตความคืบหน้าเคส {ticket} ให้นะคะ",
-    "แอดมินแวะมาอัปเดตเคส {ticket} ค่ะ",
-    "ขอรายงานสถานะล่าสุดของเคส {ticket} นะคะ",
-    "เคส {ticket} ที่แจ้งไว้ แอดมินขออัปเดตให้ค่ะ",
-    "มาบอกความคืบหน้าเคส {ticket} นะคะ",
-  ] as const;
+  private static caseBlock(ticketNumber: string | null | undefined, facts: CaseFacts | null | undefined, statusLabel: string, closing: string): string {
+    const subject = CustomerNotificationService.subjectLine(facts?.subject);
+    const created = thaiDateStamp(facts?.createdAt);
+    const bullets = [
+      ...(subject ? [`• เรื่อง: ${subject}`] : []),
+      `• สถานะ: ${statusLabel}`,
+      ...(created ? [`• แจ้งเมื่อ: ${created}`] : []),
+    ];
+    return [`เคส ${ticketNumber || "ที่แจ้งไว้"}`, bullets.join("\n"), closing.trim()].filter((part) => part.length > 0).join("\n\n");
+  }
 
-  /** Closing line for progress reports; seeded separately so opener/closer pairs vary. */
-  private static readonly PROGRESS_CLOSERS = [
-    "มีความคืบหน้าเพิ่มเติมแอดมินจะรีบแจ้งนะคะ",
-    "ถ้ามีอะไรเปลี่ยนแปลงจะรีบมาบอกค่ะ",
-    "แอดมินยังติดตามให้อยู่ตลอดนะคะ",
-    "ขอบคุณที่รอนะคะ มีอัปเดตเมื่อไหร่จะแจ้งทันทีค่ะ",
-  ] as const;
+  /** A due date this far out is the "no resolution target" sentinel (priority None = 999 h in the Hub), not a promise. */
+  private static readonly NO_TARGET_DAYS = 40;
+
+  /** "คาดว่าเรียบร้อย <due>" while the target is ahead; otherwise the still-working line. */
+  private static dueLine(facts: CaseFacts | null | undefined): string {
+    const due = facts?.dueAt instanceof Date ? facts.dueAt : facts?.dueAt ? new Date(String(facts.dueAt)) : null;
+    if (due && !isNaN(due.getTime())) {
+      const ahead = due.getTime() - Date.now();
+      if (ahead > CustomerNotificationService.NO_TARGET_DAYS * 86_400_000) return "ทีมงานรับเรื่องไว้แล้ว จะแจ้งกำหนดการให้ทราบอีกครั้งค่ะ";
+      if (ahead > 0) return `คาดว่าเรียบร้อย ${thaiDateStamp(due)}`;
+    }
+    return "ทีมงานกำลังเร่งดำเนินการให้โดยเร็วที่สุดค่ะ";
+  }
 
   /**
    * Two-step close wording. Every variant names the case number without "#"
@@ -190,34 +271,13 @@ export class CustomerNotificationService {
    * that ever changes.
    */
 
-  /**
-   * Engineering set Delivery to Customer: same opener / bullets / closer
-   * layout as the progress report. The opener names the case and says the
-   * fix is done; the bullets carry the subject, the state the customer is in
-   * (waiting on their test); the ask ("try it, tap a chip") is the closing
-   * paragraph, as a sentence, right above the chips (operator decision
-   * 2026-09-09: an instruction reads naturally as prose, not as a bullet).
-   */
-  private static readonly DELIVERY_VARIANTS = [
-    "ทีมงานแก้ไขเคส {ticket} เรียบร้อยแล้วค่ะ",
-    "แอดมินได้รับแจ้งจากทีมงานว่าเคส {ticket} แก้ไขเสร็จแล้วค่ะ",
-    "เคส {ticket} ที่แจ้งไว้ ทีมงานแก้ไขเสร็จแล้วนะคะ",
-    "อัปเดตค่ะ เคส {ticket} ทางทีมแก้ไขให้เรียบร้อยแล้วนะคะ",
-    "ข่าวดีค่ะ เคส {ticket} แก้ไขเสร็จเรียบร้อยแล้วนะคะ",
-  ] as const;
-
-  /** Status bullet of the delivery message (fixed: the customer scans this). */
-  private static readonly DELIVERY_STATUS_LINE = "แก้ไขสำเร็จ";
-  /** The ask, opening the closing paragraph; a seeded closer follows it. */
+  /** Status bullet of the delivery card (fixed: the customer scans this). */
+  private static readonly DELIVERY_STATUS_LINE = "แก้ไขแล้ว รอคุณลูกค้าตรวจสอบ";
+  /** The ask under the delivery card, right above the chips. */
   private static readonly DELIVERY_NEXT_LINE =
     "ลองเข้าใช้งานอีกครั้ง แล้วแตะ 'ใช้งานได้แล้ว' หรือ 'ยังมีปัญหาอยู่' ข้างล่างนี้ได้เลยค่ะ";
-
-  /** Closing line for delivery messages; seeded with a different stride than the opener. */
-  private static readonly DELIVERY_CLOSERS = [
-    "ขอบคุณที่รอนะคะ",
-    "แอดมินรอฟังผลอยู่นะคะ",
-    "ถ้ายังติดตรงไหนบอกแอดมินได้เลยค่ะ",
-  ] as const;
+  /** The ask under the waiting-for-customer card. */
+  private static readonly WAITING_NEXT_LINE = "รบกวนส่งข้อมูลเพิ่มเติมมาในแชทนี้ได้เลยนะคะ ทีมงานจะได้ดำเนินการต่อค่ะ";
 
   /** Customer said it works (or asked to close): confirm before closing. */
   private static readonly CLOSE_QUESTION_VARIANTS = [
@@ -227,10 +287,12 @@ export class CustomerNotificationService {
     "ต้องการปิดเคส {ticket}{about} ใช่ไหมคะ ถ้าใช่แตะ 'ยืนยันปิดเคส' ข้างล่างนี้ได้เลยค่ะ",
   ] as const;
 
-  private static readonly CLOSED_VARIANTS = [
-    "ปิดเคส {ticket} ให้เรียบร้อยแล้วนะคะ ขอบคุณที่ช่วยทดสอบค่ะ ถ้ามีอะไรอีกทักมาได้เลย",
-    "เรียบร้อยค่ะ เคส {ticket} ปิดให้แล้วนะคะ ขอบคุณที่แจ้งเข้ามาค่ะ มีอะไรเพิ่มเติมแจ้งได้เสมอนะคะ",
-    "ปิดเคส {ticket} แล้วค่ะ ขอบคุณมากนะคะ ถ้าเจอปัญหาเดิมอีกทักมาบอกได้เลย แอดมินเปิดเคสให้ใหม่ได้ค่ะ",
+  /** Closing line of the closed card — the one line that still rotates (operator decision 2026-09-10). */
+  private static readonly CLOSED_CLOSERS = [
+    "ขอบคุณมากนะคะ ถ้าเจอปัญหาเดิมอีกทักมาบอกได้เลย แอดมินเปิดเคสให้ใหม่ได้ค่ะ",
+    "ขอบคุณที่แจ้งเข้ามานะคะ หากพบปัญหาอีกทักแอดมินได้ตลอดเลยค่ะ",
+    "ขอบคุณที่ช่วยทดสอบให้นะคะ มีอะไรเพิ่มเติมแจ้งแอดมินได้เสมอค่ะ",
+    "ยินดีที่ได้ช่วยนะคะ ถ้าติดขัดตรงไหนอีกทักมาได้เลยค่ะ",
   ] as const;
 
   /** Same problem confirmed: the case goes back to engineering, nothing is asked. */
@@ -357,33 +419,35 @@ export class CustomerNotificationService {
     return [opener, lines.join("\n"), closer].filter((part) => part.length > 0).join("\n\n");
   }
 
-  /** The "เรื่อง" bullet value: the subject, cut with an ellipsis past 80 characters. */
+  /** The "เรื่อง" bullet value: the full subject (operator decision 2026-09-10: never cut it short); a hard cap far beyond any real subject keeps LINE's 5000-char limit safe. */
   private static subjectLine(subject?: string | null): string {
-    const raw = String(subject || "").trim();
-    return raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+    const raw = String(subject || "").replace(/\s+/g, " ").trim();
+    return raw.length > 1000 ? `${raw.slice(0, 1000)}…` : raw;
   }
 
   /** Wording is deliberately conservative — see rule 2 above. */
-  private body(type: CustomerNotificationType, ticketNumber?: string | null, seed?: string | null, subject?: string | null, detail?: string | null): string {
+  private body(
+    type: CustomerNotificationType,
+    ticketNumber?: string | null,
+    seed?: string | null,
+    subject?: string | null,
+    detail?: string | null,
+    facts?: CaseFacts | null
+  ): string {
+    const card = { ...(facts || {}), subject: subject ?? facts?.subject ?? null };
     switch (type) {
-      case "progress_update": {
-        // No "#" before the case number (operator decision) and a closer that
-        // varies independently of the opener, so consecutive hourly reports
-        // never read as the same template.
-        const opener = CustomerNotificationService.pickRotating(CustomerNotificationService.PROGRESS_VARIANTS, seed)
-          .replace("{ticket}", ticketNumber ? ticketNumber : "ที่แจ้งไว้");
-        // 5 openers × 4 closers with different strides → 20 distinct pairs before any repeat.
-        const closer = CustomerNotificationService.pickRotating(CustomerNotificationService.PROGRESS_CLOSERS, seed, 1);
-        // `detail` is the pre-formatted bullet block from the SLA cadence
-        // engine ("• สถานะ: …\n• คาดว่าเรียบร้อย: …\n• แจ้งเมื่อ: …"); a caller
-        // without one still gets a status line, never a bare opener.
-        const about = CustomerNotificationService.subjectLine(subject);
-        const lines = [
-          ...(about ? [`• เรื่อง: ${about}`] : []),
-          String(detail || "").trim() || "• สถานะ: ทีมงานยังดำเนินการอยู่ค่ะ",
-        ];
-        return [opener, lines.join("\n"), closer].join("\n\n");
-      }
+      case "progress_update":
+        // Hourly SLA report and the console's "force send": the card with the
+        // current status and the target time. `detail` from older callers is
+        // ignored — the card is built from facts only.
+        return CustomerNotificationService.caseBlock(ticketNumber, card, customerStatusLabel(card.status), CustomerNotificationService.dueLine(card));
+      case "waiting_customer":
+        return CustomerNotificationService.caseBlock(
+          ticketNumber,
+          card,
+          customerStatusLabel("WAITING_CUSTOMER"),
+          `${CustomerNotificationService.dueLine(card)}\n${CustomerNotificationService.WAITING_NEXT_LINE}`
+        );
       case "acknowledgement":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_VARIANTS, seed);
       case "acknowledgement_action":
@@ -428,23 +492,25 @@ export class CustomerNotificationService {
           ? `สร้างเคส #${ticketNumber} ให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ`
           : "สร้างเคสให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ";
       case "resolution_confirmation": {
-        // 5 openers × 3 closers with different strides → 15 pairs; the bullets are fixed.
-        const opener = CustomerNotificationService.pickRotating(CustomerNotificationService.DELIVERY_VARIANTS, seed)
-          .replace("{ticket}", ticketNumber ? ticketNumber : "ที่แจ้งไว้");
-        const closer = CustomerNotificationService.pickRotating(CustomerNotificationService.DELIVERY_CLOSERS, seed, 1);
-        return CustomerNotificationService.layout(
-          opener,
-          [
-            ["เรื่อง", CustomerNotificationService.subjectLine(subject)],
-            ["สถานะ", CustomerNotificationService.DELIVERY_STATUS_LINE],
-          ],
-          `${CustomerNotificationService.DELIVERY_NEXT_LINE} ${closer}`
+        // "เสร็จสิ้น" = when engineering set Delivery to Customer (resolved_at,
+        // written by the same transition that triggers this message).
+        const finished = thaiDateStamp(card.resolvedAt || new Date());
+        return CustomerNotificationService.caseBlock(
+          ticketNumber,
+          card,
+          CustomerNotificationService.DELIVERY_STATUS_LINE,
+          `${finished ? `เสร็จสิ้น ${finished}\n` : ""}${CustomerNotificationService.DELIVERY_NEXT_LINE}`
         );
       }
       case "close_confirmation_request":
         return this.fill(CustomerNotificationService.CLOSE_QUESTION_VARIANTS, seed, ticketNumber, subject);
       case "closed":
-        return this.fill(CustomerNotificationService.CLOSED_VARIANTS, seed, ticketNumber, null);
+        return CustomerNotificationService.caseBlock(
+          ticketNumber,
+          card,
+          customerStatusLabel("CLOSED"),
+          CustomerNotificationService.pickVariant(CustomerNotificationService.CLOSED_CLOSERS, seed)
+        );
       case "reopened":
         return this.fill(CustomerNotificationService.REOPENED_VARIANTS, seed, ticketNumber, null);
       case "due_extension_notice":
@@ -479,6 +545,42 @@ export class CustomerNotificationService {
       }
       case "auto_closed":
         return this.fill(CustomerNotificationService.AUTO_CLOSED_VARIANTS, seed, ticketNumber, null);
+    }
+  }
+
+  /** Types rendered as the case card, which needs the ticket row. */
+  private static readonly CARD_TYPES: ReadonlySet<CustomerNotificationType> = new Set<CustomerNotificationType>([
+    "progress_update",
+    "resolution_confirmation",
+    "waiting_customer",
+    "closed",
+  ]);
+
+  /**
+   * Facts for the card: what the caller passed, completed from `tickets` by
+   * id. A read failure degrades to whatever the caller supplied — the message
+   * still goes out, possibly without the "แจ้งเมื่อ" line.
+   */
+  private async factsFor(req: SendRequest): Promise<CaseFacts | null> {
+    if (!CustomerNotificationService.CARD_TYPES.has(req.notificationType)) return req.facts ?? null;
+    if (!req.ticketId) return req.facts ?? null;
+    try {
+      const { rows } = await pool.query<{ status: string | null; subject: string | null; created_at: Date | null; due_date: Date | null; resolved_at: Date | null }>(
+        `SELECT status, subject, created_at, due_date, resolved_at FROM tickets WHERE id = $1 LIMIT 1`,
+        [req.ticketId]
+      );
+      const row = rows[0];
+      if (!row) return req.facts ?? null;
+      return {
+        status: req.facts?.status ?? row.status,
+        subject: req.facts?.subject ?? row.subject,
+        createdAt: req.facts?.createdAt ?? row.created_at,
+        dueAt: req.facts?.dueAt ?? row.due_date,
+        resolvedAt: req.facts?.resolvedAt ?? row.resolved_at,
+      };
+    } catch (err: any) {
+      logger.warn({ ticketId: req.ticketId, error: err?.message }, "Could not load case facts for the notification card");
+      return req.facts ?? null;
     }
   }
 
@@ -820,7 +922,8 @@ export class CustomerNotificationService {
       }
     }
 
-    const body = this.body(req.notificationType, req.ticketNumber, req.idempotencyKey, req.subject, req.detail);
+    const facts = await this.factsFor(req);
+    const body = this.body(req.notificationType, req.ticketNumber, req.idempotencyKey, req.subject ?? facts?.subject ?? null, req.detail, facts);
 
     const claimId = await this.claim(
       { ...req, projectId: req.projectId ?? recipient.projectId, orgId: req.orgId ?? recipient.orgId },

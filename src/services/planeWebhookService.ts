@@ -370,6 +370,14 @@ export class PlaneWebhookService {
       });
     }
 
+    // Engineering set "Waiting for Customer": the card asks for the missing
+    // information (operator decision 2026-09-10). Keyed on the transition row.
+    if (lifecycleResult?.applied && lifecycleResult.notify === "waiting_customer" && lifecycleResult.ticketId) {
+      void this.dispatchWaitingCustomerNotification(planeIssueId, lifecycleResult.ticketId, lifecycleResult.eventId ?? null).catch((err) => {
+        logger.error({ error: err.message, planeIssueId }, "Failed to dispatch waiting-for-customer notification");
+      });
+    }
+
     return {
       processed: true,
       matched: syncResult.matched,
@@ -413,6 +421,28 @@ export class PlaneWebhookService {
       projectId: ticket.project_id ?? null,
       orgId: ticket.org_id ?? null,
       correlationId: planeIssueId,
+    });
+  }
+
+  private async dispatchWaitingCustomerNotification(planeIssueId: string, ticketId: number, eventId: number | null): Promise<void> {
+    const { rows } = await pool.query(
+      `SELECT t.id, t.ticket_number, t.subject, t.conversation_id, t.project_id, t.org_id
+         FROM tickets t WHERE t.id = $1 LIMIT 1`,
+      [ticketId]
+    );
+    if (rows.length === 0 || !rows[0].conversation_id) return;
+    const ticket = rows[0];
+    await customerNotificationService.send({
+      conversationId: Number(ticket.conversation_id),
+      notificationType: "waiting_customer",
+      idempotencyKey: eventId ? `ticket_event:${eventId}` : `ticket:${ticketId}:waiting_customer`,
+      ticketId: Number(ticket.id),
+      ticketNumber: ticket.ticket_number,
+      subject: ticket.subject ?? null,
+      projectId: ticket.project_id ?? null,
+      orgId: ticket.org_id ?? null,
+      correlationId: planeIssueId,
+      quickReplies: [],
     });
   }
 
