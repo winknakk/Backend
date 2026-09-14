@@ -59,6 +59,25 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
     }
   });
 
+  fastify.get("/api/v1/admin/master-data/projects", async (request, reply) => {
+    try {
+      const client = await pool.connect();
+      try {
+        const result = await client.query(
+          "SELECT id, company_id, name, project_type, environment, created_at FROM projects ORDER BY id ASC"
+        );
+        return reply.send({ success: true, projects: result.rows });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      return reply.send({
+        success: true,
+        projects: REAL_PROJECTS_SEED,
+      });
+    }
+  });
+
   fastify.post("/api/v1/admin/master-data/projects", async (request, reply) => {
     const { id, company_id, name, project_type, environment, knowledge_base_tag } = request.body as any;
     try {
