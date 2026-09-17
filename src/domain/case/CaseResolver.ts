@@ -380,6 +380,31 @@ export class CaseResolver {
           }
         }
 
+        // Return intent (ขอกลับมา / กลับไป / เรื่องเดิม):
+        // If customer expresses intent to return to a previously discussed case, check conversational history
+        const isReturnIntent = /(?:กลับมา|ขอกลับมา|กลับไป|ขอกลับไป|เรื่องเดิม|เคสเดิม)/i.test(text);
+        if (isReturnIntent && recentMessages.length > 0) {
+          const recentTicketIds = recentMessages
+            .map((m) => Number(m.ticket_id))
+            .filter(Boolean);
+          const recentCompeting = competingOpen.filter(
+            (c) => recentTicketIds.includes(c.candidate.id) && c.candidate.id !== activeTicketId
+          );
+          if (recentCompeting.length === 1) {
+            const target = recentCompeting[0];
+            return {
+              decision: "SWITCH_EXISTING_CASE",
+              intent: "SWITCH_EXISTING_CASE",
+              type: "SWITCH_EXISTING_CASE",
+              ticketId: target.candidate.id,
+              ticketNumber: target.candidate.ticket_number,
+              confidence: 0.92,
+              evidence: [...target.evidence, `RETURN_INTENT_RESOLVED_TO_RECENT_CASE: ${target.candidate.ticket_number}`],
+              reason: `RETURN_INTENT_RESOLVED_TO_RECENT_CASE: ${target.candidate.ticket_number}`,
+            };
+          }
+        }
+
         // True Ambiguity: P6 AMBIGUOUS_CASE
         const candidates = competingOpen.map((m) => m.candidate);
         return this.buildAmbiguityResult(candidates, `AMBIGUOUS_EVIDENCE_BETWEEN_${candidates.length}_CASES`);
@@ -422,8 +447,10 @@ export class CaseResolver {
     // ─────────────────────────────────────────────────────────────
     // P4 — Recent-Context CASE Resolution
     // If no active case is set, resolve to the most recently discussed open case.
+    // Guard: If customer explicitly requested to switch (e.g. "สลับไป...", "เปลี่ยนเรื่อง..."),
+    // do NOT silently fall back to recent context of an unrelated case.
     // ─────────────────────────────────────────────────────────────
-    if (recentMessages.length > 0) {
+    if (!hasExplicitSwitchWord && recentMessages.length > 0) {
       const lastMsgWithCase = recentMessages
         .slice()
         .reverse()
@@ -519,9 +546,9 @@ export class CaseResolver {
       }
     }
 
-    // 3. Explicit Switch Phrases ("เรื่อง...", "เกี่ยวกับ...", "กลับไป...", "ไปที่...")
+    // 3. Explicit Switch Phrases ("เรื่อง...", "เกี่ยวกับ...", "กลับไป...", "ไปที่...", "ขอกลับมาดูเรื่อง...")
     const cleanText = lowerText.replace(/(?:ครับ|ค่ะ|คับ|นะคะ|นะครับ|หน่อย|ด้วย)$/g, "").trim();
-    const switchMatch = cleanText.match(/(?:กลับไปที่เรื่อง|กลับไปเรื่อง|กลับไปที่|กลับไป|สลับไปที่เรื่อง|สลับไปเรื่อง|สลับไปที่|สลับไป|เรื่อง|เกี่ยวกับ|เคส|ปัญหา|ไปที่)\s*(?:เรื่อง\s*)?([^\s,]+)/);
+    const switchMatch = cleanText.match(/(?:ขอกลับมาดูเรื่อง|กลับมาดูเรื่อง|ขอกลับมาที่เรื่อง|ขอกลับมาเรื่อง|กลับมาที่เรื่อง|กลับมาเรื่อง|กลับมาที่|กลับมา|ขอกลับไปที่เรื่อง|ขอกลับไปเรื่อง|กลับไปที่เรื่อง|กลับไปเรื่อง|กลับไปที่|กลับไป|สลับไปที่เรื่อง|สลับไปเรื่อง|สลับไปที่|สลับไป|เรื่อง|เกี่ยวกับ|เคส|ปัญหา|ไปที่)\s*(?:เรื่อง\s*)?([^\s,]+)/);
     if (switchMatch && switchMatch[1]) {
       let rawTopic = switchMatch[1].replace(/(?:ครับ|ค่ะ|คับ|นะคะ|นะครับ|หน่อย|ด้วย)$/g, "").trim();
       rawTopic = rawTopic.replace(/^เรื่อง/, "").trim();
@@ -534,7 +561,7 @@ export class CaseResolver {
       }
     }
 
-    // 4. Distinctive Domain Terms in Thai & English
+    // 4. Distinctive Domain Terms & Semantic Clusters in Thai & English
     const domainTerms = [
       "ใบแจ้งหนี้", "เข้าไม่ได้", "เข้าสู่ระบบ", "ใบเสร็จ", "ยอดเงิน", "ยอดชำระ",
       "ที่อยู่", "แพ็กเกจ", "ราคา", "ภาษี", "เงินยืม", "สลิป", "ล็อกอิน", "รหัสผ่าน",
@@ -544,6 +571,47 @@ export class CaseResolver {
       if (cleanText.includes(term) && (subject.includes(term) || summary.includes(term) || running.includes(term) || searchable.includes(term))) {
         score += 0.50;
         evidence.push(`DOMAIN_TERM_MATCH: "${term}"`);
+      }
+    }
+
+    // 4.1 Domain Semantic Concept Clusters (e.g. "เข้าไม่ได้" matches "เข้าสู่ระบบ" / "LOGIN")
+    const domainClusters = [
+      {
+        name: "login",
+        terms: ["เข้าไม่ได้", "เข้าสู่ระบบ", "เข้าระบบ", "ล็อกอิน", "รหัสผ่าน", "login", "password", "sign in", "signin", "auth"],
+      },
+      {
+        name: "tax_invoice",
+        terms: ["ใบแจ้งหนี้", "ใบเสร็จ", "ใบกำกับภาษี", "ภาษี", "ยอดเงิน", "ยอดชำระ", "invoice", "receipt", "billing", "tax"],
+      },
+      {
+        name: "pricing",
+        terms: ["แพ็กเกจ", "ราคา", "บริการ", "package", "pricing", "price", "plan"],
+      },
+      {
+        name: "shipping_address",
+        terms: ["ที่อยู่", "จัดส่ง", "address", "shipping", "delivery"],
+      },
+      {
+        name: "payment",
+        terms: ["ชำระเงิน", "จ่ายเงิน", "บัตรเครดิต", "โอนเงิน", "payment", "credit card", "pay"],
+      },
+    ];
+
+    for (const cluster of domainClusters) {
+      const textMatchesCluster = cluster.terms.some((term) => cleanText.includes(term));
+      const caseMatchesCluster = cluster.terms.some(
+        (term) =>
+          subject.includes(term) ||
+          summary.includes(term) ||
+          running.includes(term) ||
+          searchable.includes(term) ||
+          category.includes(term)
+      );
+      if (textMatchesCluster && caseMatchesCluster) {
+        score = Math.max(score, 0.52);
+        evidence.push(`DOMAIN_CLUSTER_MATCH: "${cluster.name}"`);
+        break;
       }
     }
 
