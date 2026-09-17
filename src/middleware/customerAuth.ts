@@ -132,6 +132,7 @@ export async function customerAuthHook(request: FastifyRequest, reply: FastifyRe
     role: "customer",
     orgId,
     projectIds: [projectId], // strictly concrete array, never null
+    channelRef: (decoded as any).channelRef || (decoded as any).customerId || String(decoded.identityId || decoded.profileId),
   };
 
   await tenantScopeHook(request);

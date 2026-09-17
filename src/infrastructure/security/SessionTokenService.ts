@@ -30,6 +30,8 @@ export interface AuthPrincipal {
   projectIds: number[] | null;
   /** Profile id for customer principals. */
   profileId?: string;
+  /** Channel reference for customer principals. */
+  channelRef?: string;
 }
 
 interface TokenPayload extends AuthPrincipal {

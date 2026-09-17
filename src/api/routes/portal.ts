@@ -57,18 +57,29 @@ export function registerPortalRoutes(
 
     let convId: string;
     const identityIdNum = parseInt(authoritativeCustomerId, 10);
+    const authProjIdNum = parseInt(authoritativeProjectId, 10);
     const openConvRes = await pool.query(
-      `SELECT id FROM conversations WHERE identity_id = $1 AND (project_id = $2 OR project_id IS NULL) ORDER BY created_at DESC LIMIT 1`,
-      [identityIdNum, parseInt(authoritativeProjectId, 10)]
+      `SELECT id, project_id FROM conversations WHERE identity_id = $1 AND (project_id = $2 OR project_id IS NULL) ORDER BY created_at DESC LIMIT 1`,
+      [identityIdNum, authProjIdNum]
     );
 
     if (openConvRes.rows.length > 0) {
       convId = String(openConvRes.rows[0].id);
+      if (!openConvRes.rows[0].project_id) {
+        await pool.query(
+          "UPDATE conversations SET project_id = $1 WHERE id = $2 AND project_id IS NULL",
+          [authProjIdNum, convId]
+        );
+      }
     } else {
       const identRes = await pool.query("SELECT channel_ref, channel FROM identities WHERE id = $1 LIMIT 1", [identityIdNum]);
       const channelRef = identRes.rows[0]?.channel_ref || authoritativeCustomerId;
       const channel = identRes.rows[0]?.channel || "WebChat";
       convId = await deps.dbAdapter.ensureConversation(channelRef, authoritativeCompanyId, channel);
+      await pool.query(
+        "UPDATE conversations SET project_id = $1 WHERE id = $2 AND project_id IS NULL",
+        [authProjIdNum, convId]
+      );
     }
 
     const slaInfo = await deps.slaService.calculateSLADueDate(authoritativeProjectId, body.priority);
@@ -123,9 +134,31 @@ export function registerPortalRoutes(
       });
     } catch {}
 
+    const createdTicketId = (result.data as any)?.id ? Number((result.data as any).id) : null;
+    if (createdTicketId && convId) {
+      try {
+        await pool.query(
+          `UPDATE conversations SET active_ticket_id = $1, updated_at = NOW() WHERE id = $2`,
+          [createdTicketId, parseInt(convId, 10)]
+        );
+        broadcastWebChatOutbound({
+          event: "active_ticket_switched",
+          data: {
+            ticketId: createdTicketId,
+            ticketNumber,
+            conversationId: convId,
+            projectId: parseInt(authoritativeProjectId, 10),
+          },
+          recipientId: authoritativeCustomerId,
+        });
+      } catch {}
+    }
+
     return reply.code(201).send({
       success: true,
+      ticketId: createdTicketId,
       ticketNumber,
+      activeTicketId: createdTicketId,
       dueDate: slaInfo.dueDate,
       result,
     });
@@ -278,15 +311,28 @@ export function registerPortalRoutes(
     });
 
     if (!result.applied) {
-      if (result.code === "NO_OP" && String(match.status || "").toUpperCase() === String(body.targetStatus).toUpperCase()) {
+      if (result.code === "NO_OP") {
         return reply.code(200).send({
           success: true,
           ticketId: match.id,
           ticketNumber: match.ticket_number,
-          from: match.status,
-          to: match.status,
+          from: result.from || body.targetStatus,
+          to: body.targetStatus,
           idempotent: true,
         });
+      }
+      if (result.code === "CONCURRENT_MODIFICATION") {
+        const freshRow = await pool.query("SELECT status FROM tickets WHERE id = $1", [match.id]);
+        if (freshRow.rows[0]?.status === body.targetStatus) {
+          return reply.code(200).send({
+            success: true,
+            ticketId: match.id,
+            ticketNumber: match.ticket_number,
+            from: result.from || body.targetStatus,
+            to: body.targetStatus,
+            idempotent: true,
+          });
+        }
       }
       return reply.code(400).send({
         error: "Bad Request",
@@ -499,6 +545,7 @@ export function registerPortalRoutes(
         {
           profileId: p.profileId,
           identityId: p.subject,
+          channelRef: p.channelRef || p.subject,
           kind: "customer",
           role: "customer",
           projectId: String(targetProjectId),
@@ -588,6 +635,16 @@ export function registerPortalRoutes(
       [parseInt(p.subject, 10) || 0, String(p.profileId), authoritativeProjectId]
     );
 
+    if (convRes.rows.length === 0 && match.conversation_id) {
+      const ticketConvRes = await pool.query(
+        `SELECT id, project_id FROM conversations WHERE id = $1 AND project_id = $2 AND status = 'open' LIMIT 1`,
+        [match.conversation_id, authoritativeProjectId]
+      );
+      if (ticketConvRes.rows.length > 0) {
+        convRes.rows.push(ticketConvRes.rows[0]);
+      }
+    }
+
     if (convRes.rows.length > 0) {
       convId = convRes.rows[0].id;
       await pool.query(
@@ -612,7 +669,7 @@ export function registerPortalRoutes(
 
     return reply.code(200).send({
       success: true,
-      activeTicketId: match.id,
+      activeTicketId: match.id ? Number(match.id) : null,
       ticketNumber: match.ticket_number,
       projectId: authoritativeProjectId,
     });

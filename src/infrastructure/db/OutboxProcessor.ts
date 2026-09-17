@@ -1,6 +1,7 @@
 import os from "node:os";
 import { PostgresOutboxRepository } from "./PostgresOutboxRepository";
-import { BullMQJobQueue } from "../queue/BullMQJobQueue";
+import { QueueFactory } from "../../queue/QueueFactory";
+import { IJobQueue } from "../../queue/types";
 import { createLogger } from "../../observability/logger";
 import { deletePlaneWorkItem } from "../../services/planeDeletionService";
 import { PlaneService } from "../../services/planeService";
@@ -22,14 +23,14 @@ const DISPATCHER = { host: os.hostname(), pid: process.pid };
  */
 export class OutboxProcessor {
   private outboxRepo: PostgresOutboxRepository;
-  private jobQueue: BullMQJobQueue;
+  private jobQueue: IJobQueue;
   private planeService: PlaneService;
   private intervalId: NodeJS.Timeout | null = null;
   private isProcessing = false;
 
   constructor(planeService?: PlaneService) {
     this.outboxRepo = new PostgresOutboxRepository();
-    this.jobQueue = new BullMQJobQueue();
+    this.jobQueue = QueueFactory.getQueue();
     this.planeService = planeService || new PlaneService(new PostgresAdapter());
   }
 

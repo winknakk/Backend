@@ -978,6 +978,8 @@ export class PostgresAdapter implements DatabaseAdapter {
         id1: String(r.id),
         ticketId: String(r.ticket_number || r.ticket_id || r.id),
         ticket_id: String(r.ticket_number || r.ticket_id || r.id),
+        projectId: r.project_id ? String(r.project_id) : undefined,
+        project_id: r.project_id,
         conversationId: String(r.conversation_id),
         subject: r.subject,
         summary: r.summary,
