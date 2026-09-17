@@ -239,3 +239,77 @@ export function detectCloseIntent(text: string, closeQuestionPending = false): C
 
   return { kind: "NONE", ticketNumber };
 }
+
+// ---------------------------------------------------------------------------
+// Post-ticket cancel (Flow 5, operator decision 2026-09-17)
+// ---------------------------------------------------------------------------
+//
+// "ขอยกเลิกเคส TCK-…" about a case that already exists. Same two-step shape
+// as the close protocol: the request only produces a question with chips,
+// and only the explicit "ยืนยันยกเลิกเคส <TCK>" chip performs the transition.
+//
+// A bare "ยกเลิก" is deliberately NOT a cancel request. It already carries
+// three meanings decided by context — abort a draft report (the AI gate's
+// CANCEL_RESET), decline the close question, decline the re-open question —
+// so every pattern here requires the object word (เคส / ตั๋ว / งาน / case /
+// ticket). Ambiguity resolves to NONE, never to CONFIRM_CANCEL.
+
+export type CancelIntentKind =
+  /** "ยืนยันยกเลิกเคส", "ยืนยันยกเลิกเคส TCK-…", or a bare yes right after the cancel question. */
+  | "CONFIRM_CANCEL"
+  /** "ไม่ยกเลิก", "ยังไม่ยกเลิก", "ไม่" while the cancel question is pending. */
+  | "DECLINE_CANCEL"
+  /** "ยกเลิกเคส", "ขอยกเลิกเคส TCK-… ค่ะ", "cancel the ticket": the customer asks to cancel something. */
+  | "CANCEL_REQUEST"
+  | "NONE";
+
+export interface CancelIntent {
+  kind: CancelIntentKind;
+  /** Ticket number found in the message, upper-cased, when present. */
+  ticketNumber: string | null;
+}
+
+const CANCEL_OBJECT = "(?:the\\s+)?(?:เคส|ตั๋ว|งาน|case|ticket)";
+
+/** Whole-message cancel request. Exported so the pre-router can route on the same rule. */
+export const CANCEL_TICKET_PATTERN = new RegExp(
+  `^\\s*(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ|จะ|please\\s+)?\\s*(?:ยกเลิก|cancel)\\s*${CANCEL_OBJECT}(?:\\s*(?:นี้|นั้น|เดิม|ที่แจ้ง(?:ไว้)?))?${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  "i"
+);
+
+/** Explicit cancel confirmation — the chip text, or the same words typed. */
+const CONFIRM_CANCEL_RE = new RegExp(
+  `^\\s*(?:ยืนยัน\\s*(?:การ)?ยกเลิก(?:เคส|ตั๋ว|งาน)?|confirm\\s+cancel(?:lation)?)${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  "i"
+);
+
+/** A refusal to cancel, meaningful only while the cancel question is pending. */
+const DECLINE_CANCEL_RE = new RegExp(
+  `^\\s*(?:ไม่ยกเลิก|ไม่ต้องยกเลิก|ยังไม่ยกเลิก|อย่าเพิ่งยกเลิก|อย่ายกเลิก|ไม่ยกเลิกแล้ว|เก็บไว้ก่อน|ทำต่อ(?:เลย|ได้เลย)?|ไม่ใช่|ไม่|ยังก่อน|เดี๋ยวก่อน|no|nope|keep\\s+it|❌)${TAIL}$`,
+  "i"
+);
+
+/**
+ * Classifies a message against the post-ticket cancel protocol.
+ *
+ * `cancelQuestionPending` tells the detector that the last thing the bot said
+ * was the cancel question. Only then do a bare "ยืนยัน"/"ใช่" and a bare
+ * "ไม่"/"ยังก่อน" count — outside that context they belong to other
+ * protocols (create confirmation, close question) and are left alone.
+ */
+export function detectCancelIntent(text: string, cancelQuestionPending = false): CancelIntent {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return { kind: "NONE", ticketNumber: null };
+  const num = raw.match(TICKET_NUMBER_PATTERN);
+  const ticketNumber = num ? num[0].toUpperCase() : null;
+
+  if (CONFIRM_CANCEL_RE.test(raw)) return { kind: "CONFIRM_CANCEL", ticketNumber };
+  if (CANCEL_TICKET_PATTERN.test(raw)) return { kind: "CANCEL_REQUEST", ticketNumber };
+
+  if (cancelQuestionPending) {
+    if (DECLINE_CANCEL_RE.test(raw)) return { kind: "DECLINE_CANCEL", ticketNumber };
+    if (BARE_YES_RE.test(raw)) return { kind: "CONFIRM_CANCEL", ticketNumber };
+  }
+
+  return { kind: "NONE", ticketNumber };
+}

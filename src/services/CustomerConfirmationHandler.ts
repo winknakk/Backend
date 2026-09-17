@@ -4,6 +4,7 @@ import { createLogger } from "../observability/logger";
 import {
   detectConfirmationIntent,
   detectCloseIntent,
+  detectCancelIntent,
   detectReopenScope,
   detectReopenConfirmation,
   TICKET_NUMBER_PATTERN,
@@ -11,7 +12,8 @@ import {
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import type { TicketLifecycleStatus } from "../domain/ticket/TicketLifecycle";
 import { customerNotificationService, type CustomerNotificationType } from "./CustomerNotificationService";
-import { doneEmailService, reopenAlertService } from "./UrgentAlertService";
+import { cancelAlertService, doneEmailService, reopenAlertService } from "./UrgentAlertService";
+import { conversationFocusService } from "./ConversationFocusService";
 
 const logger = createLogger("customer-confirmation");
 
@@ -61,7 +63,7 @@ const ROUTE_TO_CLOSED: Record<string, TicketLifecycleStatus[]> = {
   CUSTOMER_CONFIRMED: ["CLOSED"],
 };
 
-type PendingKind = "close" | "which_case" | "reopen" | "scope";
+type PendingKind = "close" | "which_case" | "reopen" | "scope" | "cancel" | "cancel_which_case" | "create";
 
 /**
  * Two-step close and the re-open path, decided by the customer alone and
@@ -85,6 +87,9 @@ type PendingKind = "close" | "which_case" | "reopen" | "scope";
  *   "มีอีกปัญหา…" typed as a report → left to the AI: new case (force_new), old case keeps waiting
  *   ยังมีปัญหาอยู่ <closed TCK>   → re-opened when closed ≤ REOPEN_AFTER_CLOSE_DAYS ago, else a new case
  *   ปิดเคส with nothing open     → "ไม่มีเคสที่เปิดอยู่" at the edge, no AI turn
+ *   ยกเลิกเคส [TCK]              → "ต้องการยกเลิกเคส … ใช่ไหมคะ"  [ยืนยันยกเลิกเคส | ไม่ยกเลิก]   (Flow 5, 2026-09-17)
+ *   ยืนยันยกเลิกเคส <TCK>        → CANCELLED (Plane → Cancelled via outbox) + "ยกเลิกเคสแล้ว" + dev email,
+ *                                  focus (active_ticket_id) released; a RESOLVED case is offered the close question instead
  */
 export class CustomerConfirmationHandler {
   private static readonly TICKET_COLUMNS =
@@ -152,10 +157,18 @@ export class CustomerConfirmationHandler {
     if (!content) return null;
     const m = content.match(TICKET_NUMBER_PATTERN);
     const num = m ? m[0].toUpperCase() : null;
+    if (/ยกเลิกเคสไหน/.test(content)) return { kind: "cancel_which_case", ticketNumber: null };
+    if (/ต้องการยกเลิกเคส|ยืนยันยกเลิกเคส|ยกเลิกเคส[^\n]{0,80}ใช่ไหม/.test(content)) return { kind: "cancel", ticketNumber: num };
     if (/แตะเลือกข้างล่างนี้|แตะเลือกได้เลย/.test(content)) return { kind: "which_case", ticketNumber: null };
     if (/(?:ปัญหาเดิม|อาการเดิม)[^\n]{0,80}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
     if (/ยืนยันเปิดเคสอีกครั้ง|เปิดเคส[^\n]{0,80}อีกครั้งใช่ไหม/.test(content)) return { kind: "reopen", ticketNumber: num };
     if (/ต้องการปิดเคส|ยืนยันปิดเคส|ปิดเคส[^\n]{0,80}ใช่ไหม/.test(content)) return { kind: "close", ticketNumber: num };
+    // The AI gate's create-confirmation prompt (same markers as the flow's
+    // deterministic net): while it is pending, "ยกเลิกเคส" without a number
+    // means the draft, which the gate's CANCEL_RESET owns.
+    if (/ยืนยันให้เปิดเคส|ข้อมูลถูกต้องหรือไม่|ขอทวน|ยืนยันได้เลยไหม|กดปุ่ม\s*['"]ยืนยัน['"]|ปุ่มด้านล่าง|สรุปเรื่องที่แจ้งมา|สรุปรายละเอียดก่อน|สรุปให้ยืนยันอีกครั้ง/.test(content)) {
+      return { kind: "create", ticketNumber: num };
+    }
     return null;
   }
 
@@ -262,6 +275,8 @@ export class CustomerConfirmationHandler {
     }
 
     await this.notify(input, ticket, notifyAs, closedEventId ? `ticket_event:${closedEventId}` : `ticket:${ticket.id}:closed`, { quickReplies: [] });
+    // A closed case must not stay the conversation's focus (spec v2 Flow 3 step 7).
+    void conversationFocusService.releaseTerminalTicket(ticket.id).catch(() => {});
     // Customer "Done" email (Gmail via the notification flow), originated here
     // because Plane's own webhook never arrives (ISSUE-053). Fire-and-forget.
     void doneEmailService.notifyClosed({ ticketId: ticket.id, closeEventId: closedEventId, correlationId: input.correlationId }).catch(() => {});
@@ -369,6 +384,66 @@ export class CustomerConfirmationHandler {
     return { handled: true, ticketId: ticket.id, from: ticket.status, to: "REOPENED" };
   }
 
+  // ---------------------------------------------------------------------------
+  // Post-ticket cancel (Flow 5, operator decision 2026-09-17)
+  // ---------------------------------------------------------------------------
+
+  /** "ยกเลิกเคสไหน?" — the list plus one chip per case, each chip a full cancel request. */
+  private async askWhichCaseToCancel(input: { conversationId: number; correlationId?: string }, tickets: OpenTicket[]): Promise<ConfirmationOutcome> {
+    const shown = tickets.slice(0, WHICH_CASE_LIMIT);
+    const lines = shown.map((t) => {
+      const subject = String(t.subject || "").trim();
+      const short = subject.length > 60 ? `${subject.slice(0, 60)}…` : subject;
+      return `• ${t.ticket_number || `#${t.id}`}${short ? ` – ${short}` : ""}`;
+    });
+    await this.notify(input, null, "cancel_which_case", this.eventKey(input, "cancel_which_case"), {
+      detail: lines.join("\n"),
+      quickReplies: shown
+        .filter((t) => t.ticket_number)
+        .map((t) => ({ label: String(t.ticket_number).slice(0, 20), text: `ยกเลิกเคส ${t.ticket_number}` })),
+    });
+    return { handled: true, reason: "CANCEL_WHICH_CASE" };
+  }
+
+  /** Asks "ต้องการยกเลิกเคส … ใช่ไหมคะ". Nothing changes until the confirmation chip. */
+  private async askCancel(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket): Promise<ConfirmationOutcome> {
+    await this.notify(input, ticket, "cancel_confirmation_request", this.eventKey(input, `cancel_ask:${ticket.id}`));
+    return { handled: true, ticketId: ticket.id, from: ticket.status, to: ticket.status, reason: "CANCEL_QUESTION_ASKED" };
+  }
+
+  /**
+   * CANCELLED at the customer's request. Plane follows through the existing
+   * outbox trigger (tickets status change → PlaneWorkItemUpdateRequested →
+   * Cancelled state); the engineers get a "[CANCELLED]" email; the case is
+   * dropped as the conversation's focus.
+   */
+  private async cancelTicket(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket): Promise<ConfirmationOutcome> {
+    const r = await ticketStateMachine.transition({
+      ticketRef: ticket.id,
+      to: "CANCELLED",
+      actor: "customer",
+      actorRef: `conversation:${input.conversationId}`,
+      reason: "Customer asked to cancel the case and confirmed",
+      correlationId: input.correlationId,
+      source: "customer_reply",
+    });
+    if (!r.applied) {
+      logger.warn({ ticketId: ticket.id, from: ticket.status, code: r.code }, "Customer cancel could not be applied");
+      return { handled: false, ticketId: ticket.id, from: ticket.status, reason: r.code };
+    }
+    await pool
+      .query(
+        `UPDATE tickets SET cancellation_reason = COALESCE(cancellation_reason, $2), updated_at = NOW() WHERE id = $1`,
+        [ticket.id, "Cancelled by the customer (confirmation chip)"]
+      )
+      .catch((err) => logger.warn({ ticketId: ticket.id, error: err.message }, "Could not record cancellation_reason"));
+    await this.notify(input, ticket, "cancelled", r.eventId ? `ticket_event:${r.eventId}` : `ticket:${ticket.id}:cancelled`, { quickReplies: [] });
+    void conversationFocusService.releaseTerminalTicket(ticket.id).catch(() => {});
+    void cancelAlertService.notifyCancelled({ ticketId: ticket.id, cancelEventId: r.eventId ?? null, correlationId: input.correlationId }).catch(() => {});
+    logger.info({ ticketId: ticket.id, conversationId: input.conversationId, correlationId: input.correlationId, from: ticket.status }, "Ticket cancelled by customer confirmation");
+    return { handled: true, ticketId: ticket.id, from: ticket.status, to: "CANCELLED" };
+  }
+
   /** The text minus the chip words / case number: what the customer actually said. */
   private feedbackFrom(text: string): string | null {
     const stripped = String(text || "")
@@ -422,6 +497,61 @@ export class CustomerConfirmationHandler {
     if (pending?.kind === "reopen" && /^\s*(?:ยกเลิก|ไม่|cancel|no)\b/i.test(text)) {
       await this.notify(input, null, "acknowledgement_action", this.eventKey(input, "reopen_cancel"), { quickReplies: [] });
       return { handled: true, reason: "REOPEN_CANCELLED" };
+    }
+
+    // 0b. Post-ticket cancel (Flow 5, 2026-09-17). The object word is required
+    //     ("ยกเลิกเคส"), so a bare "ยกเลิก" keeps its other meanings below.
+    let cancel = detectCancelIntent(text, pending?.kind === "cancel");
+    // The "which case to cancel" list answered with just a number.
+    if (cancel.kind === "NONE" && pending?.kind === "cancel_which_case" && numberInText
+        && text.replace(TICKET_NUMBER_PATTERN, "").replace(/นะครับ|นะคะ|ครับ|ค่ะ|คับ|จ้า|เคส|\s/g, "") === "") {
+      cancel = { kind: "CANCEL_REQUEST", ticketNumber: numberInText };
+    }
+    if (cancel.kind === "CONFIRM_CANCEL") {
+      let target = byNumber(cancel.ticketNumber);
+      if (!target && !cancel.ticketNumber) {
+        target = byNumber(pending?.kind === "cancel" ? pending.ticketNumber : null);
+        // The explicit phrase without a number: the only open case qualifies;
+        // a bare yes never does (same lesson as the close protocol).
+        if (!target && /ยกเลิก|cancel/i.test(text) && tickets.length === 1) target = tickets[0];
+      }
+      if (!target) {
+        if (tickets.length === 0) {
+          await this.notify(input, null, "cancel_no_open_case", this.eventKey(input, "cancel_no_open_case"));
+          return { handled: true, reason: "NO_OPEN_CASE" };
+        }
+        return this.askWhichCaseToCancel(input, tickets);
+      }
+      // A delivered case is not cancellable (state machine): the customer is
+      // really saying "we are done" — offer the close question instead.
+      if (target.status === "RESOLVED" || target.status === "CUSTOMER_CONFIRMED") return this.askClose(input, target);
+      return this.cancelTicket(input, target);
+    }
+    if (cancel.kind === "DECLINE_CANCEL" && pending?.kind === "cancel") {
+      const target = byNumber(pending.ticketNumber);
+      await this.notify(input, target, "cancel_declined", this.eventKey(input, "cancel_declined"), { quickReplies: [] });
+      return { handled: true, ticketId: target?.id, from: target?.status, to: target?.status, reason: "CANCEL_DECLINED" };
+    }
+    if (cancel.kind === "CANCEL_REQUEST") {
+      // Mid-intake "ยกเลิกเคส" with no number is the draft, not a filed case:
+      // the AI gate's CANCEL_RESET owns that turn.
+      if (!cancel.ticketNumber && pending?.kind === "create") return { handled: false, reason: "CANCEL_DRAFT_TO_AI" };
+      if (tickets.length === 0 && !cancel.ticketNumber) {
+        await this.notify(input, null, "cancel_no_open_case", this.eventKey(input, "cancel_no_open_case"));
+        return { handled: true, reason: "NO_OPEN_CASE" };
+      }
+      let target = byNumber(cancel.ticketNumber) ?? (!cancel.ticketNumber && tickets.length === 1 ? tickets[0] : null);
+      if (!target && cancel.ticketNumber) {
+        const old = await this.loadClosedByNumber(input.conversationId, cancel.ticketNumber);
+        if (old) {
+          await this.notify(input, old, "cancel_case_not_open", this.eventKey(input, "cancel_not_open"), { quickReplies: [] });
+          return { handled: true, ticketId: old.id, reason: "CANCEL_CASE_NOT_OPEN" };
+        }
+        return { handled: false, reason: "CANCEL_TARGET_NOT_FOUND" };
+      }
+      if (!target) return this.askWhichCaseToCancel(input, tickets);
+      if (target.status === "RESOLVED" || target.status === "CUSTOMER_CONFIRMED") return this.askClose(input, target);
+      return this.askCancel(input, target);
     }
 
     // 1. "ยืนยันปิดเคส [TCK]" — the only thing that closes.

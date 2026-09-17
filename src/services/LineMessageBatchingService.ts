@@ -2,6 +2,7 @@ import { createLogger } from "../observability/logger";
 import { createHash } from "crypto";
 import { AgentSessionQueueService } from "./AgentSessionQueueService";
 import { AgentSessionQueueWorker } from "./AgentSessionQueueWorker";
+import type { CaseContextHint } from "./LineCaseContextService";
 
 const logger = createLogger("line-batch");
 
@@ -18,6 +19,8 @@ type BatchEntry = {
       executionToken?: string;
       executionContextId?: string;
       correlationId?: string;
+      /** Flow 6: which case this turn is about, decided at the edge (2026-09-17). */
+      caseContext?: CaseContextHint | null;
     };
   }>;
   destination: string;
@@ -141,6 +144,9 @@ export class LineMessageBatchingService {
         // persist, so it carries the token itself.
         executionContextId: lastDecision.executionContextId,
         correlationId: lastDecision.correlationId,
+        // Flow 6 hint (2026-09-17): forwarded by Channel Gateway - LINE as
+        // case_intent / case_ticket_number / case_force_new for the AI gate.
+        caseContext: lastDecision.caseContext ?? null,
       },
     };
 

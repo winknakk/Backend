@@ -82,7 +82,9 @@ export const EnvSchema = z.object({
   LINE_GROUP_GATEWAY_WEBHOOK_URL: z.string().url().default("https://wf.promptxai.com/api/v1/webhooks/dRV0RN5vXQLDZ67t9VROo"),
   LINE_ONBOARDING_MODE: z.enum(["code_required", "smart"]).default("code_required"),
   LINE_BATCH_ENABLED: z.coerce.boolean().default(true),
-  LINE_BATCH_WINDOW_MS: z.coerce.number().int().min(500).default(2000),
+  // 15 s (operator decision, spec v2 Flow 1): consecutive DM messages are grouped
+  // into one AI turn. Was 2000 ms in source while every environment set 15000.
+  LINE_BATCH_WINDOW_MS: z.coerce.number().int().min(500).default(15000),
   PROJECT_JOIN_CODE_PEPPER: z.string().min(16).optional(),
   PLANE_API_URL: z.string().url().default("https://api.plane.so"),
   PLANE_API_KEY: z.string().default("plane_mock_key"),

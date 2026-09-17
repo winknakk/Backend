@@ -42,7 +42,17 @@ export type CustomerNotificationType =
   | "reopen_confirmation_request"
   | "due_extension_notice"
   // Engineering set "Waiting for Customer" in Plane (2026-09-10).
-  | "waiting_customer";
+  | "waiting_customer"
+  // Post-ticket cancel, two-step (Flow 5, 2026-09-17).
+  | "cancel_confirmation_request"
+  | "cancelled"
+  | "cancel_declined"
+  | "cancel_which_case"
+  | "cancel_no_open_case"
+  | "cancel_case_not_open"
+  // Multi-case context answered at the edge on LINE (Flow 6, 2026-09-17):
+  // the resolver's own clarification text, chips supplied by the caller.
+  | "case_context";
 
 /**
  * Facts the case card is built from. Loaded from `tickets` by ticket id when
@@ -386,6 +396,49 @@ export class CustomerNotificationService {
     "เคส {ticket} ถูกปิดอัตโนมัติแล้วค่ะ เพราะไม่มีการตอบกลับหลังทีมงานแก้ไขเสร็จนะคะ หากยังมีปัญหาแจ้งกลับมาได้เลยค่ะ",
   ] as const;
 
+  // -------------------------------------------------------------------------
+  // Post-ticket cancel (Flow 5, operator decision 2026-09-17). None of these
+  // contain "ปิดเคส" (the close-question detector) nor the create-confirmation
+  // markers ("ปุ่มด้านล่าง", "กดปุ่ม 'ยืนยัน'"), so the pending-question
+  // detector in CustomerConfirmationHandler reads them unambiguously.
+  // -------------------------------------------------------------------------
+
+  /** "ยกเลิกเคส" received: confirm before anything changes. */
+  private static readonly CANCEL_QUESTION_VARIANTS = [
+    "ต้องการยกเลิกเคส {ticket}{about} ใช่ไหมคะ ถ้าใช่แตะ 'ยืนยันยกเลิกเคส' ข้างล่างนี้ได้เลยค่ะ ถ้ายังอยากให้ทีมงานดูต่อ แตะ 'ไม่ยกเลิก' นะคะ",
+    "รับทราบค่ะ ขอเช็คอีกครั้งนะคะ จะยกเลิกเคส {ticket}{about} เลยใช่ไหมคะ แตะ 'ยืนยันยกเลิกเคส' ได้เลยค่ะ หรือแตะ 'ไม่ยกเลิก' ถ้าเปลี่ยนใจนะคะ",
+    "โอเคค่ะ ก่อนยกเลิกเคส {ticket}{about} แอดมินขอให้ยืนยันอีกครั้งนะคะ แตะ 'ยืนยันยกเลิกเคส' ข้างล่างนี้ได้เลยค่ะ",
+  ] as const;
+
+  /** Closing line of the cancelled card. */
+  private static readonly CANCELLED_CLOSERS = [
+    "ยกเลิกเคสให้เรียบร้อยแล้วนะคะ ทีมงานจะหยุดดำเนินการเคสนี้ค่ะ ถ้ามีเรื่องใหม่ทักมาได้เลยนะคะ",
+    "แอดมินยกเลิกเคสนี้ให้แล้วค่ะ ขอบคุณที่แจ้งนะคะ มีอะไรให้ช่วยอีกบอกได้เสมอค่ะ",
+    "เรียบร้อยค่ะ เคสนี้ถูกยกเลิกแล้วนะคะ หากกลับมาเจอปัญหาอีก แจ้งแอดมินได้ตลอดเลยค่ะ",
+  ] as const;
+
+  /** "ไม่ยกเลิก" — the case keeps going. */
+  private static readonly CANCEL_DECLINED_VARIANTS = [
+    "โอเคค่ะ ไม่ยกเลิกเคส {ticket} นะคะ ทีมงานดำเนินการต่อตามปกติค่ะ",
+    "รับทราบค่ะ เคส {ticket} ยังเปิดอยู่เหมือนเดิมนะคะ มีอะไรเพิ่มเติมแจ้งได้เลยค่ะ",
+  ] as const;
+
+  /** Several cases are open: list them and let the chips pick which to cancel. */
+  private static readonly CANCEL_WHICH_CASE_VARIANTS = [
+    "ตอนนี้มีเคสเปิดอยู่หลายเคสค่ะ ต้องการยกเลิกเคสไหนคะ แตะเลือกจากรายการนี้ได้เลยค่ะ",
+    "มีเคสที่ยังเปิดอยู่มากกว่าหนึ่งเคสนะคะ อยากยกเลิกเคสไหน แตะเลือกจากรายการนี้ได้เลยค่ะ",
+  ] as const;
+
+  private static readonly CANCEL_NO_OPEN_CASE_VARIANTS = [
+    "ตอนนี้ไม่มีเคสที่เปิดอยู่ให้ยกเลิกเลยค่ะ ถ้ามีเรื่องใหม่แจ้งเข้ามาได้เลยนะคะ",
+    "แอดมินเช็คแล้วไม่พบเคสที่ยังเปิดอยู่ค่ะ เลยไม่มีอะไรต้องยกเลิกนะคะ มีเรื่องใหม่ทักมาได้เลยค่ะ",
+  ] as const;
+
+  private static readonly CANCEL_CASE_NOT_OPEN_VARIANTS = [
+    "เคส {ticket} ไม่ได้เปิดอยู่แล้วค่ะ เลยไม่มีอะไรต้องยกเลิกนะคะ ถ้าเจอปัญหาอีกแจ้งแอดมินได้เลยค่ะ",
+    "เคส {ticket} ปิดหรือยกเลิกไปเรียบร้อยแล้วค่ะ ไม่ต้องยกเลิกเพิ่มนะคะ มีเรื่องใหม่ทักมาได้เลยค่ะ",
+  ] as const;
+
   private static pickVariant(variants: readonly string[], seed?: string | null): string {
     if (!seed) return variants[0];
     const digest = createHash("sha256").update(seed).digest();
@@ -545,6 +598,30 @@ export class CustomerNotificationService {
       }
       case "auto_closed":
         return this.fill(CustomerNotificationService.AUTO_CLOSED_VARIANTS, seed, ticketNumber, null);
+      case "cancel_confirmation_request":
+        return this.fill(CustomerNotificationService.CANCEL_QUESTION_VARIANTS, seed, ticketNumber, subject);
+      case "cancelled":
+        return CustomerNotificationService.caseBlock(
+          ticketNumber,
+          card,
+          customerStatusLabel("CANCELLED"),
+          CustomerNotificationService.pickVariant(CustomerNotificationService.CANCELLED_CLOSERS, seed)
+        );
+      case "cancel_declined":
+        return this.fill(CustomerNotificationService.CANCEL_DECLINED_VARIANTS, seed, ticketNumber, null);
+      case "cancel_which_case": {
+        const list = String(detail || "").trim();
+        const head = CustomerNotificationService.pickVariant(CustomerNotificationService.CANCEL_WHICH_CASE_VARIANTS, seed);
+        return list ? `${head}\n\n${list}` : head;
+      }
+      case "cancel_no_open_case":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.CANCEL_NO_OPEN_CASE_VARIANTS, seed);
+      case "cancel_case_not_open":
+        return this.fill(CustomerNotificationService.CANCEL_CASE_NOT_OPEN_VARIANTS, seed, ticketNumber, null);
+      case "case_context":
+        // The case resolver composed the whole message (which case? closed
+        // case?); `detail` is that text and the caller supplies the chips.
+        return String(detail || "").trim() || "คุณลูกค้าหมายถึงเคสไหนคะ";
     }
   }
 
@@ -554,6 +631,7 @@ export class CustomerNotificationService {
     "resolution_confirmation",
     "waiting_customer",
     "closed",
+    "cancelled",
   ]);
 
   /**
@@ -626,6 +704,13 @@ export class CustomerNotificationService {
           { label: "เปิดเคสอีกครั้ง", text: `ยืนยันเปิดเคสอีกครั้ง${n}` },
           { label: "ยกเลิก", text: "ยกเลิก" },
         ];
+      case "cancel_confirmation_request":
+        // The confirmation chip carries the case number; "ไม่ยกเลิก" is only
+        // read as a decline while this question is pending.
+        return [
+          { label: "ยืนยันยกเลิกเคส", text: `ยืนยันยกเลิกเคส${n}` },
+          { label: "ไม่ยกเลิก", text: "ไม่ยกเลิก" },
+        ];
       default:
         return [];
     }
@@ -645,15 +730,21 @@ export class CustomerNotificationService {
            JOIN tickets t ON t.id = n.ticket_id
           WHERE n.conversation_id = $1
             AND n.ticket_id = $2
-            AND n.notification_type IN ('resolution_confirmation', 'resolution_nudge', 'close_confirmation_request')
+            AND n.notification_type IN ('resolution_confirmation', 'resolution_nudge', 'close_confirmation_request', 'cancel_confirmation_request')
             AND n.created_at >= NOW() - INTERVAL '24 hours'
             AND t.deleted_at IS NULL
-            AND UPPER(t.status) IN ('RESOLVED', 'CUSTOMER_CONFIRMED')
+            AND UPPER(t.status) NOT IN ('CLOSED', 'CANCELLED')
           ORDER BY n.id DESC LIMIT 1`,
         [conversationId, ticketId]
       );
       const row = rows[0];
       if (!row) return [];
+      // The cancel question stands on any still-open case; the delivery /
+      // close questions only while the case is actually waiting on the customer.
+      if (row.notification_type === "cancel_confirmation_request") {
+        return CustomerNotificationService.defaultQuickReplies("cancel_confirmation_request", row.ticket_number);
+      }
+      if (row.status !== "RESOLVED" && row.status !== "CUSTOMER_CONFIRMED") return [];
       const type: CustomerNotificationType = row.status === "CUSTOMER_CONFIRMED" ? "close_confirmation_request" : "resolution_confirmation";
       return CustomerNotificationService.defaultQuickReplies(type, row.ticket_number);
     } catch {

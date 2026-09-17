@@ -27,6 +27,7 @@ import { LineMessageBatchingService } from "../../services/LineMessageBatchingSe
 import { AgentSessionQueueService } from "../../services/AgentSessionQueueService";
 import { AgentSessionQueueWorker } from "../../services/AgentSessionQueueWorker";
 import { LineTypingIndicatorService } from "../../services/LineTypingIndicatorService";
+import { lineCaseContextService, type CaseContextHint } from "../../services/LineCaseContextService";
 
 const logger = createLogger("line-webhook");
 
@@ -889,6 +890,36 @@ export function registerLineWebhookRoutes(
               }
             }
 
+            // Flow 6 on LINE (2026-09-17): which case is this message about?
+            // The same CaseResolver the WebChat gateway uses decides at the
+            // edge. Ambiguity and closed-case references are answered here
+            // with chips (no AI turn); everything else continues with a hint
+            // beside the events for the AI gate. Never a reason to fail the
+            // turn: an error simply means no hint.
+            let caseContext: CaseContextHint | null = null;
+            if (!confirmationHandled && decision.conversationId && event?.type === "message" && event?.message?.type === "text") {
+              try {
+                const caseTurn = await lineCaseContextService.resolveTurn({
+                  conversationId: Number(decision.conversationId),
+                  projectId: decision.projectId ?? null,
+                  text: String(event.message.text || ""),
+                  correlationId: webhookEventId,
+                  externalMessageId: event?.message?.id ? String(event.message.id) : undefined,
+                });
+                caseContext = caseTurn.hint;
+                logger.info(
+                  { webhookEventId, conversationId: decision.conversationId, handled: caseTurn.handled, reason: caseTurn.reason, intent: caseTurn.hint?.intent, ticket: caseTurn.hint?.ticketNumber },
+                  "Case context resolved"
+                );
+                if (caseTurn.handled) {
+                  processed += 1;
+                  continue;
+                }
+              } catch (caseErr: any) {
+                logger.error({ error: caseErr.message, webhookEventId }, "Case context resolution failed; continuing without a hint");
+              }
+            }
+
             // --- B-0: mint the server-owned execution context ---
             //
             // Created here, after signature verification and identity /
@@ -1011,6 +1042,7 @@ export function registerLineWebhookRoutes(
                   executionToken,
                   executionContextId,
                   correlationId: webhookEventId,
+                  caseContext,
                 }
               );
               // The 24-hour carousel recall push is sent immediately (not batched) —
@@ -1054,6 +1086,7 @@ export function registerLineWebhookRoutes(
                       // Plane promotion failed closed.
                       executionToken,
                       correlationId: webhookEventId || undefined,
+                      caseContext,
                     },
                   },
                   sequenceAt: new Date(),
@@ -1075,6 +1108,7 @@ export function registerLineWebhookRoutes(
                   // Plane promotion failed closed (403 EXECUTION_CONTEXT_REQUIRED).
                   executionToken,
                   correlationId: webhookEventId || undefined,
+                  caseContext,
                 });
               }
 

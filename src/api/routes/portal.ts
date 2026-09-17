@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { JwtUtil } from "../../shared/jwt";
 import { broadcastWebChatOutbound } from "../../presentation/http/routes/WebChatGateway";
 import { z } from "zod";
+import { conversationFocusService } from "../../services/ConversationFocusService";
 
 const CreatePortalTicketSchema = z.object({
   customerId: z.string().optional(),
@@ -341,14 +342,10 @@ export function registerPortalRoutes(
       });
     }
 
-    // If ticket transitioned to terminal status, clear active_ticket_id from conversation
+    // If ticket transitioned to terminal status, drop it as the conversation's
+    // focus (shared owner with the LINE protocols, 2026-09-17).
     if (result.to === "CLOSED" || result.to === "CANCELLED") {
-      try {
-        await pool.query(
-          `UPDATE conversations SET active_ticket_id = NULL, updated_at = NOW() WHERE active_ticket_id = $1`,
-          [match.id]
-        );
-      } catch {}
+      await conversationFocusService.releaseTerminalTicket(match.id).catch(() => {});
     }
 
     // Broadcast realtime ticket_updated event to customer
