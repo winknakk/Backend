@@ -163,11 +163,12 @@ function sendWsMessage(token: string, payload: any): Promise<any[]> {
       const ws = new WebSocket(`${WS_URL}?ticket=${encodeURIComponent(ticket)}`);
       const received: any[] = [];
       let settleTimer: any = null;
+      let hasEchoed = false;
 
       const fallbackTimer = setTimeout(() => {
         ws.close();
         resolve(received);
-      }, 5000);
+      }, 6000);
 
       ws.on("open", () => {
         ws.send(JSON.stringify(payload));
@@ -178,16 +179,30 @@ function sendWsMessage(token: string, payload: any): Promise<any[]> {
           const parsed = JSON.parse(raw.toString());
           received.push(parsed);
 
-          // If we received an edge reply or outbound event, settle quickly
+          if (payload.tempId && (parsed.data?.externalId === payload.tempId || parsed.externalId === payload.tempId)) {
+            hasEchoed = true;
+            // Plain messages without edge AI replies settle quickly once echoed
+            if (!settleTimer) {
+              settleTimer = setTimeout(() => {
+                clearTimeout(fallbackTimer);
+                ws.close();
+                resolve(received);
+              }, 400);
+            }
+          }
+
+          // If we received an edge reply or outbound event, settle quickly once our echo has also arrived
           const evt = parsed.event || parsed.type;
           const isAiMsg = parsed.data?.role === "ai" || parsed.role === "ai";
           if (evt === "active_ticket_switched" || evt === "ticket_created" || isAiMsg) {
-            if (settleTimer) clearTimeout(settleTimer);
-            settleTimer = setTimeout(() => {
-              clearTimeout(fallbackTimer);
-              ws.close();
-              resolve(received);
-            }, 600);
+            if (!payload.tempId || hasEchoed) {
+              if (settleTimer) clearTimeout(settleTimer);
+              settleTimer = setTimeout(() => {
+                clearTimeout(fallbackTimer);
+                ws.close();
+                resolve(received);
+              }, 600);
+            }
           }
         } catch {}
       });
@@ -201,6 +216,15 @@ function sendWsMessage(token: string, payload: any): Promise<any[]> {
       reject(err);
     }
   });
+}
+
+async function waitForMessageInDb(externalId: string): Promise<any> {
+  for (let i = 0; i < 20; i++) {
+    const res = await pool.query(`SELECT * FROM messages WHERE external_id = $1`, [externalId]);
+    if (res.rows.length > 0) return res.rows[0];
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return null;
 }
 
 function getTextFromResponse(r: any): string {
@@ -505,8 +529,9 @@ async function runAcceptanceSuite() {
     ticketNumber: ctx.ticket2.ticket_number,
   });
 
-  const f612Db = await pool.query(`SELECT ticket_id FROM messages WHERE external_id = $1`, [f612MsgId]);
-  assert.strictEqual(Number(f612Db.rows[0].ticket_id), ctx.ticket2.id);
+  const f612DbRow = await waitForMessageInDb(f612MsgId);
+  assert.ok(f612DbRow, "f612 message row must exist in DB");
+  assert.strictEqual(Number(f612DbRow.ticket_id), ctx.ticket2.id);
   console.log(`  ✅ F6-12 PASS: Immediate send message bound to Case 2 (ticket_id = ${ctx.ticket2.id})`);
 
   // ─────────────────────────────────────────────────────────────
