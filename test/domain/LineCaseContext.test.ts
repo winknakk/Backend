@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { CaseResolver } from "../../src/domain/case/CaseResolver";
-import { ambiguityChips, buildCaseHint, closedReferenceChips, isPureSwitchCommand } from "../../src/services/LineCaseContextService";
+import { ambiguityChips, ambiguityMessage, buildCaseHint, caseChipLabel, closedReferenceChips, isPureSwitchCommand } from "../../src/services/LineCaseContextService";
 import { shouldDeferToPendingIntake } from "../../src/domain/case/PendingIntake";
 
 let passed = 0;
@@ -64,12 +64,47 @@ check("L-04 closed-case reference → no routing ticket in the hint (never attac
   assert.equal(hint.ticketNumber, null);
 });
 
-check("L-05 ambiguity chips: one per candidate (label ≤ 20 chars) plus 'แจ้งเรื่องใหม่'", () => {
+check("L-05 ambiguity chips: system-name label per candidate (≤ 20 chars) plus 'แจ้งเรื่องใหม่'", () => {
   const chips = ambiguityChips(openCases);
   assert.equal(chips.length, 3);
+  assert.equal(chips[0].label, "ระบบชดใช้เงินยืม");
   assert.equal(chips[0].text, "สลับไปที่ TCK-2026-10101");
+  assert.equal(chips[1].label, "ใบกำกับภาษี");
   assert.ok(chips.every((c) => c.label.length <= 20));
   assert.equal(chips[2].text, "เปิดเคสใหม่");
+});
+
+check("L-05b duplicate system names are told apart by the number's tail; no subject falls back to the number", () => {
+  const twins = [
+    { id: 1, ticket_number: "TCK-2026-86186", subject: "ระบบเว็บไซต์ - เข้าใช้งานไม่ได้", status: "TRIAGED" },
+    { id: 2, ticket_number: "TCK-2026-45367", subject: "ระบบเว็บไซต์ - 429 Too Many Requests", status: "OPEN" },
+    { id: 3, ticket_number: "TCK-2026-00003", subject: null, status: "OPEN" },
+  ];
+  const chips = ambiguityChips(twins);
+  assert.equal(chips[0].label, "ระบบเว็บไซต์ 86186");
+  assert.equal(chips[1].label, "ระบบเว็บไซต์ 45367");
+  assert.equal(chips[2].label, "TCK-2026-00003");
+  assert.ok(chips.every((c) => c.label.length <= 20));
+  assert.equal(caseChipLabel({ id: 4, ticket_number: "TCK-2026-00004", subject: "ระบบปฏิบัติงานนอกเวลาราชการยาวมาก - ยอดผิด" }).length, 20);
+});
+
+check("L-05c ambiguity body lists every case with number and subject", () => {
+  const body = ambiguityMessage(openCases);
+  assert.ok(body.includes("• TCK-2026-10101 ระบบชดใช้เงินยืม - ย้อนสถานะไม่ได้"));
+  assert.ok(body.includes("• TCK-2026-10102 ใบกำกับภาษี - ยอดไม่ตรง"));
+  assert.ok(body.startsWith("ตอนนี้มี 2 เคส"));
+});
+
+check("L-05d live 2026-09-18: 'แล้วเรื่องระบบล่ะคะ' with an active case is asked, not answered from the active case", () => {
+  const live = [
+    { id: 731, ticket_number: "TCK-2026-86186", subject: "ระบบเว็บไซต์ - เข้าใช้งานไม่ได้ และเป็นเคสด่วนมาก", summary: "ลูกค้าแจ้งว่าไม่สามารถเข้าใช้งานระบบเว็บไซต์ได้และระบุเป็นเคสด่วนมาก", status: "TRIAGED" },
+    { id: 732, ticket_number: "TCK-2026-73046", subject: "ระบบชดใช้เงินยืม - ขอย้อนสถานะใบเสร็จเล่มที่ 05 เป็นค้างชำระ", summary: "ลูกค้าต้องการเปลี่ยนสถานะใบเสร็จเล่มที่ 05 จากชำระแล้วเป็นค้างชำระ", status: "TRIAGED" },
+  ];
+  const res = resolver.resolve({ conversationId: 99961, activeTicketId: 731, messageText: "แล้วเรื่องระบบล่ะคะ มีใครดูให้หรือยัง", openCases: live, closedCases: [] });
+  assert.equal(res.type, "AMBIGUOUS_CASE");
+  const chips = ambiguityChips(res.candidatesDetails || live);
+  assert.deepEqual(chips.map((c) => c.label), ["ระบบเว็บไซต์", "ระบบชดใช้เงินยืม", "แจ้งเรื่องใหม่"]);
+  assert.equal(buildCaseHint(res, live.length).ticketId, null);
 });
 
 check("L-06 closed-reference chips: reopen chip only inside the re-open window", () => {
