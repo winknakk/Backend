@@ -92,7 +92,7 @@ export function registerSlaConsoleRoutes(fastify: FastifyInstance, cadence: SLAC
   fastify.get("/api/v1/admin/sla/tickets", adminRouteOptions, async (request, reply) => {
     const q = (request.query || {}) as any;
     const data = await cadence.listTickets({
-      scope: ["cadence", "open", "closed", "all"].includes(String(q.scope)) ? q.scope : "cadence",
+      scope: ["cadence", "open", "closed", "all", "deleted"].includes(String(q.scope)) ? q.scope : "cadence",
       priority: q.priority ? String(q.priority) : undefined,
       channel: q.channel ? String(q.channel).toLowerCase() : undefined,
       projectId: q.projectId ? Number(q.projectId) : undefined,
@@ -147,6 +147,31 @@ export function registerSlaConsoleRoutes(fastify: FastifyInstance, cadence: SLAC
       // 500 — the console shows this text to the operator.
       logger.error({ error: err.message, dryRun }, "SLA console run failed");
       return reply.code(500).send({ success: false, error: `Cadence run failed: ${err.message}` });
+    }
+  });
+
+  /**
+   * Bulk action over a selection: close, cancel, soft delete, or restore.
+   *
+   * "delete" is a soft delete (tickets.deleted_at). It hides the ticket from
+   * every list and stops its reminders, and it leaves the linked Plane work
+   * item alone — only a real row delete would trigger the Plane deletion.
+   */
+  fastify.post("/api/v1/admin/sla/tickets/bulk", adminRouteOptions, async (request, reply) => {
+    const body = (request.body || {}) as any;
+    if (!writesGuard(body, reply)) return;
+    const action = String(body.action || "");
+    if (!(SLACadenceService.BULK_ACTIONS as readonly string[]).includes(action)) {
+      return reply.code(400).send({ success: false, error: `Unknown bulk action "${action}"` });
+    }
+    const refs = Array.isArray(body.refs) ? body.refs.map((r: unknown) => String(r)) : [];
+    try {
+      const result = await cadence.bulkTicketAction(refs, action as any, body.reason);
+      if (!result.ok) return reply.code(400).send({ success: false, data: result, error: result.reason });
+      return reply.send({ success: true, data: result });
+    } catch (err: any) {
+      logger.error({ error: err.message, action, count: refs.length }, "SLA console bulk action failed");
+      return reply.code(500).send({ success: false, error: `Bulk action failed: ${err.message}` });
     }
   });
 

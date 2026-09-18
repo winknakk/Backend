@@ -255,7 +255,21 @@ function testCaseResolver() {
   assert.strictEqual(resRecentContext.ticketId, 102);
   console.log("✅ Test 15 Passed: P4 Recent-context resolved ticket 102 from conversational history");
 
-  console.log("\nAll 15 CaseResolver unit tests passed!\n");
+  // 16. Generic topic words ("เคสด่วนมาก", "ปัญหาใหม่") never select a case (live defect 2026-09-17)
+  const resGenericTopic = resolver.resolve({
+    conversationId: 1,
+    activeTicketId: null,
+    messageText: "ขอแก้อาการเป็น เข้าใช้งานไม่ได้เลย และเป็นเคสด่วนมากครับ",
+    openCases: [],
+    closedCases: [
+      { id: 301, ticket_number: "TCK-2026-301", subject: "ระบบเว็บไซต์ - 401 Unauthorized เข้าใช้งานไม่ได้", summary: "เข้าใช้งานเว็บไซต์ไม่ได้ เป็นเรื่องด่วนมาก", status: "CLOSED" },
+    ],
+  });
+  assert.strictEqual(resGenericTopic.intent, "NEW_CASE", "urgency word must not reference the closed case");
+  assert.ok(!resGenericTopic.evidence.some((e) => e.startsWith("EXPLICIT_TOPIC_MATCH")), resGenericTopic.evidence.join(", "));
+  console.log("✅ Test 16 Passed: Generic topic word after 'เคส' is not an explicit topic match");
+
+  console.log("\nAll 16 CaseResolver unit tests passed!\n");
 }
 
 testCaseResolver();

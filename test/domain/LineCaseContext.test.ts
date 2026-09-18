@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { CaseResolver } from "../../src/domain/case/CaseResolver";
 import { ambiguityChips, buildCaseHint, closedReferenceChips, isPureSwitchCommand } from "../../src/services/LineCaseContextService";
+import { shouldDeferToPendingIntake } from "../../src/domain/case/PendingIntake";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -93,6 +94,40 @@ check("L-08 the switch chip text resolves as an exact reference on the next turn
   const res = resolver.resolve({ conversationId: 1, activeTicketId: null, messageText: "สลับไปที่ TCK-2026-10101", openCases, closedCases });
   assert.equal(res.type, "SWITCH_EXISTING_CASE");
   assert.equal(res.ticketId, 101);
+});
+
+check("L-09 a correction mid-intake never references a closed case by an urgency word (live 2026-09-17, TCK-2026-83960)", () => {
+  // Real rows from conversation 99961: every case closed, the customer is answering
+  // the "which part to change?" question. Before the fix the resolver produced
+  // EXPLICIT_TOPIC_MATCH: "ด่วนมาก" (+0.65) and the closed-case protection was sent.
+  const closed = [
+    {
+      id: 439,
+      ticket_number: "TCK-2026-83960",
+      subject: "ระบบเว็บไซต์ - ข้อความแสดงข้อผิดพลาด 401 Unauthorized เข้าใช้งานไม่ได้",
+      summary: "ลูกค้าแจ้งไม่สามารถเข้าใช้งานเว็บไซต์ได้เนื่องจากระบบแสดงข้อความ 401 Unauthorized ทุกเมนูและทุกแพลตฟอร์ม เป็นเรื่องด่วนมาก",
+      status: "CLOSED",
+    },
+  ];
+  const res = resolver.resolve({
+    conversationId: 99961,
+    activeTicketId: null,
+    messageText: "ขอแก้อาการเป็น เข้าใช้งานไม่ได้เลย และเป็นเคสด่วนมากครับ",
+    openCases: [],
+    closedCases: closed,
+    recentMessages: [],
+  });
+  assert.notEqual(res.type, "CLOSED_CASE_REFERENCE");
+  assert.equal(res.type, "NEW_CASE");
+  assert.ok(!res.evidence.some((e) => e.includes('EXPLICIT_TOPIC_MATCH: "ด่วนมาก"')), res.evidence.join(", "));
+  // The guard in front of the resolver stands down for the same turn regardless of scoring.
+  assert.equal(shouldDeferToPendingIntake("ขอแก้อาการเป็น เข้าใช้งานไม่ได้เลย และเป็นเคสด่วนมากครับ", "ได้เลยค่ะ ต้องการแก้ไขส่วนไหนคะ ชื่อระบบ อาการ หรือรายละเอียด พิมพ์บอกแอดมินได้เลยนะคะ\nแก้ไขแล้วแอดมินจะสรุปให้ยืนยันอีกครั้งนะคะ"), "edit");
+});
+
+check("L-10 a real topic after 'เรื่อง' still matches (stoplist only drops generic words)", () => {
+  const res = resolver.resolve({ conversationId: 1, activeTicketId: null, messageText: "ขอกลับมาดูเรื่องล็อกอินไม่ได้ครับ", openCases, closedCases });
+  assert.equal(res.type, "CLOSED_CASE_REFERENCE");
+  assert.equal(res.referencedTicketId, 201);
 });
 
 console.log(`\n${passed} checks passed${process.exitCode ? ", with failures" : ""}`);

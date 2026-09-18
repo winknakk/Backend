@@ -13,6 +13,8 @@ const logger = createLogger("customer-notification");
 export type CustomerNotificationType =
   | "acknowledgement"
   | "acknowledgement_action"
+  // The "ขอแก้ไขข้อมูล" chip and the correction that answers it (2026-09-17).
+  | "acknowledgement_edit"
   | "greeting"
   | "thanks"
   | "image_attached"
@@ -20,6 +22,10 @@ export type CustomerNotificationType =
   | "image_which_case"
   | "image_case_not_found"
   | "image_need_context"
+  // A standalone screenshot attached to the case just opened without asking
+  // (LINE_IMAGE_AUTO_ATTACH_MINUTES, operator decision 2026-09-17).
+  | "image_auto_attached"
+  | "image_auto_attach_pending"
   | "unsupported_file"
   | "ticket_created"
   | "resolution_confirmation"
@@ -213,6 +219,24 @@ export class CustomerNotificationService {
     "รับเรื่องค่ะ",
     "รับทราบเรียบร้อยค่ะ",
     "รับเรื่องแล้วนะคะ",
+  ] as const;
+
+  /**
+   * Acknowledgement for the "ขอแก้ไขข้อมูล" chip and for the correction the
+   * customer types after the "which part to change?" question (operator
+   * request 2026-09-17: the general "ขอแอดมินดูสักครู่" line read oddly as a
+   * reply to a tap). Short, promises only a moment's wait, never mentions a
+   * ticket. Picked per LINE event id like the other variants, so consecutive
+   * taps differ while a webhook retry cannot re-word the same one.
+   */
+  private static readonly ACK_EDIT_VARIANTS = [
+    "รับทราบค่ะ รอสักครู่นะคะ",
+    "ได้เลยค่ะ รอแป๊บนึงนะคะ",
+    "รับทราบค่ะ ขอเวลาสักครู่นะคะ",
+    "โอเคค่ะ รอสักครู่นะคะ",
+    "ได้ค่ะ ขอเวลาแป๊บนึงนะคะ",
+    "รับทราบค่ะ แป๊บนึงนะคะ",
+    "ได้เลยค่ะ สักครู่นะคะ",
   ] as const;
 
   /**
@@ -472,6 +496,13 @@ export class CustomerNotificationService {
     return [opener, lines.join("\n"), closer].filter((part) => part.length > 0).join("\n\n");
   }
 
+  /** " (subject)" for the auto-attach lines; empty when there is no subject. Capped so the line stays one bubble. */
+  private static imageCaseAbout(subject?: string | null): string {
+    const raw = String(subject || "").replace(/\s+/g, " ").trim();
+    if (!raw) return "";
+    return ` (${raw.length > 80 ? `${raw.slice(0, 80)}…` : raw})`;
+  }
+
   /** The "เรื่อง" bullet value: the full subject (operator decision 2026-09-10: never cut it short); a hard cap far beyond any real subject keeps LINE's 5000-char limit safe. */
   private static subjectLine(subject?: string | null): string {
     const raw = String(subject || "").replace(/\s+/g, " ").trim();
@@ -505,6 +536,8 @@ export class CustomerNotificationService {
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_VARIANTS, seed);
       case "acknowledgement_action":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_ACTION_VARIANTS, seed);
+      case "acknowledgement_edit":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_EDIT_VARIANTS, seed);
       case "greeting":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.GREETING_VARIANTS, seed);
       case "thanks":
@@ -540,6 +573,26 @@ export class CustomerNotificationService {
       // the one line that makes it actionable instead of guessing.
       case "image_need_context":
         return "ได้รับรูปแล้วนะคะ รบกวนพิมพ์อธิบายอาการสั้น ๆ อีกนิดค่ะ จะได้เปิดเคสให้ถูกต้องนะคะ";
+      // Screenshot right after a case was opened: attached to it without asking.
+      // The case is named with its subject so a wrong guess is visible at once,
+      // and the tail invites a one-line correction (not a question).
+      case "image_auto_attached": {
+        const n = ticketNumber || "ที่เพิ่งเปิด";
+        const about = CustomerNotificationService.imageCaseAbout(subject);
+        const line = CustomerNotificationService.pickVariant(
+          [
+            `ได้รับรูปแล้วนะคะ แนบเข้าเคส ${n}${about} ให้เรียบร้อยแล้วค่ะ`,
+            `รับรูปแล้วค่ะ เก็บเข้าเคส ${n}${about} ให้แล้วนะคะ`,
+            `แนบรูปเข้าเคส ${n}${about} เรียบร้อยแล้วค่ะ`,
+          ],
+          seed
+        );
+        return `${line} ถ้าไม่ใช่รูปของเคสนี้ พิมพ์บอกแอดมินได้เลยนะคะ`;
+      }
+      case "image_auto_attach_pending": {
+        const n = ticketNumber || "ที่เพิ่งเปิด";
+        return `ได้รับรูปแล้วนะคะ กำลังแนบเข้าเคส ${n}${CustomerNotificationService.imageCaseAbout(subject)} ให้ค่ะ ถ้าไม่ใช่รูปของเคสนี้ พิมพ์บอกแอดมินได้เลยนะคะ`;
+      }
       case "ticket_created":
         return ticketNumber
           ? `สร้างเคส #${ticketNumber} ให้แล้วนะคะ ทีมงานกำลังตรวจสอบให้อยู่ค่ะ`
@@ -901,7 +954,7 @@ export class CustomerNotificationService {
           AND COALESCE(n.error_message, '') NOT ILIKE '%status code 401%'
           AND COALESCE(n.error_message, '') NOT ILIKE '%status code 403%'
           AND COALESCE(n.error_message, '') NOT ILIKE '[retry 3]%'
-          AND n.notification_type NOT IN ('acknowledgement', 'acknowledgement_action', 'greeting', 'thanks')
+          AND n.notification_type NOT IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit', 'greeting', 'thanks', 'image_auto_attached', 'image_auto_attach_pending')
         ORDER BY n.id ASC
         LIMIT $2`,
       [maxAge, limit]
@@ -995,11 +1048,14 @@ export class CustomerNotificationService {
     // the LINE event, so a customer sending "แจ้งเคสค่ะ", then the details, then
     // a screenshot used to receive three of these — and now that the wording is
     // randomized they would not even look like the same message.
+    // The edit acknowledgement answers a chip tap, so it is never held back
+    // by the burst window; it still counts as the burst's acknowledgement for
+    // whatever the customer sends next.
     if (req.notificationType === "acknowledgement" || req.notificationType === "acknowledgement_action") {
       const recent = await pool.query(
         `SELECT 1 FROM customer_notifications
           WHERE conversation_id = $1
-            AND notification_type IN ('acknowledgement', 'acknowledgement_action')
+            AND notification_type IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit')
             AND created_at >= NOW() - ($2::int * INTERVAL '1 second')
           LIMIT 1`,
         [req.conversationId, ACK_BURST_WINDOW_SECONDS]

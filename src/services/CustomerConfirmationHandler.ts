@@ -10,6 +10,7 @@ import {
   TICKET_NUMBER_PATTERN,
 } from "../domain/ticket/CustomerConfirmation";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
+import { isPendingCreatePrompt } from "../domain/case/PendingIntake";
 import type { TicketLifecycleStatus } from "../domain/ticket/TicketLifecycle";
 import { customerNotificationService, type CustomerNotificationType } from "./CustomerNotificationService";
 import { cancelAlertService, doneEmailService, reopenAlertService } from "./UrgentAlertService";
@@ -163,10 +164,12 @@ export class CustomerConfirmationHandler {
     if (/(?:ปัญหาเดิม|อาการเดิม)[^\n]{0,80}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
     if (/ยืนยันเปิดเคสอีกครั้ง|เปิดเคส[^\n]{0,80}อีกครั้งใช่ไหม/.test(content)) return { kind: "reopen", ticketNumber: num };
     if (/ต้องการปิดเคส|ยืนยันปิดเคส|ปิดเคส[^\n]{0,80}ใช่ไหม/.test(content)) return { kind: "close", ticketNumber: num };
-    // The AI gate's create-confirmation prompt (same markers as the flow's
-    // deterministic net): while it is pending, "ยกเลิกเคส" without a number
-    // means the draft, which the gate's CANCEL_RESET owns.
-    if (/ยืนยันให้เปิดเคส|ข้อมูลถูกต้องหรือไม่|ขอทวน|ยืนยันได้เลยไหม|กดปุ่ม\s*['"]ยืนยัน['"]|ปุ่มด้านล่าง|สรุปเรื่องที่แจ้งมา|สรุปรายละเอียดก่อน|สรุปให้ยืนยันอีกครั้ง/.test(content)) {
+    // The AI gate's create-confirmation prompt or its "which part to change?"
+    // question (markers shared with the LINE case-context guard and the
+    // flow's deterministic net — `domain/case/PendingIntake.ts`): while it is
+    // pending, "ยกเลิกเคส" without a number means the draft, which the gate's
+    // CANCEL_RESET owns.
+    if (isPendingCreatePrompt(content)) {
       return { kind: "create", ticketNumber: num };
     }
     return null;

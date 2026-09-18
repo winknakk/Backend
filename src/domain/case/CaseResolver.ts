@@ -80,6 +80,16 @@ export interface CaseResolverInput {
   imageOnly?: boolean;
 }
 
+/**
+ * Words that follow "เคส / ปัญหา / เรื่อง" without naming a topic — urgency and
+ * context words ("เป็นเคสด่วนมาก", "ปัญหาใหม่", "เรื่องเดิม"). Seen live
+ * 2026-09-17: "…และเป็นเคสด่วนมากครับ" matched a closed case whose summary
+ * also said "ด่วนมาก" and the customer got the closed-case protection instead
+ * of the new-case summary. Such a word is never an EXPLICIT_TOPIC_MATCH.
+ */
+const GENERIC_TOPIC_WORDS =
+  /^(?:ด่วน|ด่วนมาก|ด่วนที่สุด|ด่วนสุด|เร่งด่วน|ใหม่|เดิม|เก่า|นี้|นั้น|นี่|ล่าสุด|ก่อนหน้า|ก่อน|เพิ่ม|เพิ่มเติม|ต่อ|เลย|มาก|ไหน|อะไร|ที่แล้ว|ที่ผ่านมา|สำคัญ|ปกติ|ทั่วไป|urgent|new|old|same)ๆ?$/i;
+
 export class CaseResolver {
   /**
    * Resolves the customer's intent for the current turn using deterministic P0-P7 priorities.
@@ -221,7 +231,9 @@ export class CaseResolver {
     // Phrases explicitly introducing an unrelated new issue
     // ─────────────────────────────────────────────────────────────
     const isNewProblemStatement =
-      /(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม)/i.test(
+      // Aligned with the flow's NEW_ISSUE_NET (2026-09-17): "มีอีกปัญหาครับ …" resolved to
+      // CONTINUE_ACTIVE_CASE and the hint could not tell the hub not to fold.
+      /(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม|(?:มี)?อีก\s*(?:ปัญหา|เคส|อย่าง)|เรื่องใหม่|ปัญหาใหม่|เคสใหม่|คนละเรื่อง|คนละปัญหา|คนละเคส|ไม่เกี่ยวกับเคส|อีกระบบ|another (?:issue|problem|case)|new (?:issue|problem|case)|separate (?:issue|case))/i.test(
         text
       );
 
@@ -229,7 +241,7 @@ export class CaseResolver {
       const initialSubject =
         text
           .replace(
-            /^(?:(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม)[,:\s]*)/i,
+            /^(?:(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม|(?:มี)?อีก\s*(?:ปัญหา|เคส|อย่าง)(?:ครับ|ค่ะ|คับ|นะ)?|เรื่องใหม่|ปัญหาใหม่|เคสใหม่|คนละเรื่อง|คนละปัญหา|คนละเคส)[,:\s]*)/i,
             ""
           )
           .trim()
@@ -552,6 +564,7 @@ export class CaseResolver {
     if (switchMatch && switchMatch[1]) {
       let rawTopic = switchMatch[1].replace(/(?:ครับ|ค่ะ|คับ|นะคะ|นะครับ|หน่อย|ด้วย)$/g, "").trim();
       rawTopic = rawTopic.replace(/^เรื่อง/, "").trim();
+      if (GENERIC_TOPIC_WORDS.test(rawTopic)) rawTopic = "";
       if (
         rawTopic.length >= 2 &&
         (subject.includes(rawTopic) || summary.includes(rawTopic) || running.includes(rawTopic) || searchable.includes(rawTopic))

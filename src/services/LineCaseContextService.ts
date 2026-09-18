@@ -2,6 +2,7 @@ import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { caseResolver, type CaseCandidate, type CaseResolutionResult, type CaseResolutionType } from "../domain/case/CaseResolver";
+import { shouldDeferToPendingIntake, type PendingIntakeKind } from "../domain/case/PendingIntake";
 import { customerNotificationService, type NotificationQuickReply } from "./CustomerNotificationService";
 import { conversationFocusService } from "./ConversationFocusService";
 
@@ -40,6 +41,12 @@ export interface LineCaseTurnResult {
   hint: CaseContextHint | null;
   resolution?: CaseResolutionResult;
   reason?: string;
+  /**
+   * Set when the resolver stood down because the bot's last real reply is a
+   * pending create-confirmation (`confirm`: the summary card; `edit`: the
+   * "which part to change?" question). The turn belongs to the AI gate's draft.
+   */
+  pendingIntake?: PendingIntakeKind | null;
 }
 
 /** LINE quick-reply labels are limited to 20 characters and 13 items. */
@@ -130,6 +137,21 @@ export class LineCaseContextService {
         // and the conversation's do not agree — resolve nothing.
         logger.warn({ conversationId: conv.id, callerProject: input.projectId, convProject: conv.project_id }, "Project mismatch; case context skipped");
         return { handled: false, hint: null, reason: "PROJECT_MISMATCH" };
+      }
+
+      // Pending intake (2026-09-17): while the bot's last real reply is the
+      // create-confirmation card or the "which part to change?" question, the
+      // turn is the customer's answer to that draft — "ยืนยัน", the edit chip,
+      // the correction itself. The resolver must not read a correction such
+      // as "…เป็นเคสด่วนมาก" as a reference to an old case (seen live: the
+      // closed-case protection answered instead of the new summary). The
+      // same last-reply rule the flow's `isAwaitingConfirmation` net uses;
+      // backend acknowledgements (message_purpose = 'notification') are not
+      // replies. A turn naming a TCK number or asking for a new case outright
+      // still resolves normally.
+      const pendingIntake = shouldDeferToPendingIntake(text, await this.lastRealAiReply(conv.id));
+      if (pendingIntake) {
+        return { handled: false, hint: null, reason: "PENDING_CREATE_CONFIRMATION", pendingIntake };
       }
 
       const casesRes = await pool.query<CaseCandidate & { closed_at: Date | null }>(
@@ -245,6 +267,24 @@ export class LineCaseContextService {
       logger.error({ error: err.message, conversationId: input.conversationId }, "Case context resolution failed; turn continues without a hint");
       return { handled: false, hint: null, reason: "ERROR" };
     }
+  }
+
+  /**
+   * The bot's last real reply among the same window the flow reads (its last
+   * 10 non-notification messages), or null when none is there.
+   */
+  private async lastRealAiReply(conversationId: number): Promise<string | null> {
+    const res = await pool.query<{ role: string; content: string }>(
+      `SELECT role, content FROM messages
+        WHERE conversation_id = $1::integer
+          AND content <> ''
+          AND COALESCE(message_purpose, '') <> 'notification'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 10`,
+      [conversationId]
+    );
+    const last = res.rows.find((m) => String(m.role || "").toLowerCase() === "ai" || String(m.role || "").toLowerCase() === "assistant");
+    return last ? String(last.content || "") : null;
   }
 
   /** Attaches the persisted inbound row to the resolved case (never a closed one). */
