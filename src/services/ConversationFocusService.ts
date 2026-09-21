@@ -23,6 +23,20 @@ export class ConversationFocusService {
       .catch((err) => logger.warn({ conversationId, ticketId, error: err.message }, "Could not set active ticket"));
   }
 
+  /** Returns the active ticket ID for this conversation if set. */
+  async getActiveTicketId(conversationId: number): Promise<number | null> {
+    try {
+      const { rows } = await pool.query<{ active_ticket_id: number | null }>(
+        `SELECT active_ticket_id FROM conversations WHERE id = $1::integer AND deleted_at IS NULL LIMIT 1`,
+        [conversationId]
+      );
+      return rows[0]?.active_ticket_id ? Number(rows[0].active_ticket_id) : null;
+    } catch (err: any) {
+      logger.warn({ conversationId, error: err.message }, "Could not get active ticket");
+      return null;
+    }
+  }
+
   /**
    * A case reached CLOSED / CANCELLED: it must not stay the focus of any
    * conversation. When the case's own conversation has exactly one other

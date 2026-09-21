@@ -246,6 +246,12 @@ export class CustomerConfirmationHandler {
     ticket: OpenTicket,
     notifyAs: "closed" | "reopen_new_issue_prompt" = "closed"
   ): Promise<ConfirmationOutcome> {
+    if (!ticket || !ticket.id) {
+      return { handled: false, reason: "NO_TARGET_TICKET" };
+    }
+    if (["CLOSED", "CANCELLED"].includes(ticket.status)) {
+      return { handled: true, ticketId: ticket.id, reason: "ALREADY_CLOSED" };
+    }
     const route = ROUTE_TO_CLOSED[ticket.status];
     if (!route) {
       logger.warn({ ticketId: ticket.id, status: ticket.status }, "No close route for ticket status");
@@ -462,6 +468,8 @@ export class CustomerConfirmationHandler {
   async handle(input: { conversationId: number; text: string; correlationId?: string }): Promise<ConfirmationOutcome> {
     const text = String(input.text || "");
     const tickets = await this.loadOpenTickets(input.conversationId);
+    const activeTicketId = await conversationFocusService.getActiveTicketId(input.conversationId);
+    const activeTicket = activeTicketId ? tickets.find((t) => t.id === activeTicketId) ?? null : null;
     const pending = await this.pendingQuestion(input.conversationId);
     const close = detectCloseIntent(text, pending?.kind === "close" || pending?.kind === "which_case");
     const numberInText = (text.match(TICKET_NUMBER_PATTERN)?.[0] || "").toUpperCase() || null;
@@ -568,6 +576,16 @@ export class CustomerConfirmationHandler {
           if (confirmed.length === 1) target = confirmed[0];
         }
       }
+      if (!target && close.ticketNumber) {
+        const old = await this.loadClosedByNumber(input.conversationId, close.ticketNumber);
+        if (old) {
+          await this.notify(input, old, "case_context", this.eventKey(input, "already_closed"), {
+            detail: `เคส ${old.ticket_number || old.id} ปิดเรียบร้อยแล้วค่ะ`,
+            quickReplies: [],
+          });
+          return { handled: true, ticketId: old.id, reason: "ALREADY_CLOSED" };
+        }
+      }
       if (!target) {
         if (tickets.length === 0) {
           await this.notify(input, null, "close_no_open_case", this.eventKey(input, "no_open_case"));
@@ -603,14 +621,50 @@ export class CustomerConfirmationHandler {
 
     // 3. "ปิดเคส [TCK]" — menu chip, typed, or a bare number answering the list.
     if (close.kind === "CLOSE_REQUEST") {
+      // 3a. Explicit ticket reference (e.g. "ปิดเคส TCK-2026-101", "ขอปิดเคส TCK-201")
+      if (close.ticketNumber) {
+        const target = byNumber(close.ticketNumber);
+        if (target) {
+          return this.askClose(input, target);
+        }
+        const old = await this.loadClosedByNumber(input.conversationId, close.ticketNumber);
+        if (old) {
+          await this.notify(input, old, "case_context", this.eventKey(input, "close_already_closed"), {
+            detail: `เคส ${old.ticket_number || old.id} ปิดเรียบร้อยแล้วค่ะ`,
+            quickReplies: [],
+          });
+          return { handled: true, ticketId: old.id, reason: "ALREADY_CLOSED" };
+        }
+        if (tickets.length === 0) {
+          await this.notify(input, null, "close_no_open_case", this.eventKey(input, "no_open_case"));
+          return { handled: true, reason: "NO_OPEN_CASE" };
+        }
+        return this.askWhichCase(input, tickets);
+      }
+
+      // 3b. No open cases exist
       if (tickets.length === 0) {
         await this.notify(input, null, "close_no_open_case", this.eventKey(input, "no_open_case"));
         logger.info({ conversationId: input.conversationId, correlationId: input.correlationId }, "Close requested with no open case; answered at the edge");
         return { handled: true, reason: "NO_OPEN_CASE" };
       }
-      const target = byNumber(close.ticketNumber) ?? (!close.ticketNumber && tickets.length === 1 ? tickets[0] : null);
-      if (!target) return this.askWhichCase(input, tickets);
-      return this.askClose(input, target);
+
+      // 3c. Explicit demonstrative reference to this case (e.g. "ขอปิดเคสนี้ค่ะ", "ปิดตั๋วนี้")
+      if (close.isThisCaseRef) {
+        if (activeTicket) {
+          return this.askClose(input, activeTicket);
+        }
+        // No active ticket set or active ticket was closed/stale: must not guess!
+        return this.askWhichCase(input, tickets);
+      }
+
+      // 3d. Generic close request (e.g. "ขอปิดเคสค่ะ")
+      // If exactly one open ticket exists, offer that one.
+      // If multiple open tickets exist, MUST ASK clarification rather than guessing or picking active!
+      if (tickets.length === 1) {
+        return this.askClose(input, tickets[0]);
+      }
+      return this.askWhichCase(input, tickets);
     }
 
     const scope = detectReopenScope(text);
