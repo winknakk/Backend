@@ -2,6 +2,7 @@ import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { caseResolver, type CaseCandidate, type CaseResolutionResult, type CaseResolutionType } from "../domain/case/CaseResolver";
+import { shouldDeferToPendingIntake, type PendingIntakeKind } from "../domain/case/PendingIntake";
 import { customerNotificationService, type NotificationQuickReply } from "./CustomerNotificationService";
 import { conversationFocusService } from "./ConversationFocusService";
 
@@ -40,6 +41,12 @@ export interface LineCaseTurnResult {
   hint: CaseContextHint | null;
   resolution?: CaseResolutionResult;
   reason?: string;
+  /**
+   * Set when the resolver stood down because the bot's last real reply is a
+   * pending create-confirmation (`confirm`: the summary card; `edit`: the
+   * "which part to change?" question). The turn belongs to the AI gate's draft.
+   */
+  pendingIntake?: PendingIntakeKind | null;
 }
 
 /** LINE quick-reply labels are limited to 20 characters and 13 items. */
@@ -61,14 +68,57 @@ export function buildCaseHint(res: CaseResolutionResult, openCaseCount: number):
   };
 }
 
+/**
+ * Pure: the chip label for a case (operator decision 2026-09-18): the system
+ * name in front of " - " in the subject ("ระบบชดใช้เงินยืม - ขอย้อนสถานะ…" →
+ * "ระบบชดใช้เงินยืม"), else the subject, else the number — cut to LINE's 20
+ * characters. The number itself travels in the chip's text and in the body.
+ */
+export function caseChipLabel(c: CaseCandidate): string {
+  const subject = String(c.subject || c.title || "").replace(/\s+/g, " ").trim();
+  const head = subject.split(/\s+[-–—:|]\s+/)[0].trim();
+  const base = head || subject || String(c.ticket_number || "");
+  return base.slice(0, LINE_LABEL_MAX);
+}
+
 /** Pure: chips for the "which case?" question — one per candidate plus "new case". */
 export function ambiguityChips(candidates: CaseCandidate[]): NotificationQuickReply[] {
-  const chips: NotificationQuickReply[] = candidates
-    .filter((c) => c.ticket_number)
-    .slice(0, LINE_CHIP_MAX - 1)
-    .map((c) => ({ label: String(c.ticket_number).slice(0, LINE_LABEL_MAX), text: `สลับไปที่ ${c.ticket_number}` }));
+  const shown = candidates.filter((c) => c.ticket_number).slice(0, LINE_CHIP_MAX - 1);
+  const labels = shown.map(caseChipLabel);
+  const chips: NotificationQuickReply[] = shown.map((c, i) => {
+    let label = labels[i];
+    // Two cases on the same system ("ระบบเว็บไซต์" twice): keep the labels
+    // apart with the number's tail — "ระบบเว็บไซต์ 86186".
+    if (labels.filter((l) => l === label).length > 1) {
+      const tail = String(c.ticket_number).replace(/^TCK-\d{4}-/i, "").slice(-5);
+      label = `${label.slice(0, LINE_LABEL_MAX - tail.length - 1)} ${tail}`;
+    }
+    return { label, text: `สลับไปที่ ${c.ticket_number}` };
+  });
   chips.push({ label: "แจ้งเรื่องใหม่", text: "เปิดเคสใหม่" });
   return chips;
+}
+
+/**
+ * Pure: the LINE body for the "which case?" question — neutral wording (the
+ * turn may be a status question, not new information) plus one line per
+ * case so the customer sees number and subject before tapping a chip.
+ */
+export function ambiguityMessage(candidates: CaseCandidate[]): string {
+  const lines = candidates
+    .filter((c) => c.ticket_number)
+    .slice(0, LINE_CHIP_MAX - 1)
+    .map((c) => {
+      const subject = String(c.subject || c.title || "").replace(/\s+/g, " ").trim();
+      return `• ${c.ticket_number}${subject ? ` ${subject.length > 120 ? `${subject.slice(0, 120)}…` : subject}` : ""}`;
+    });
+  return [
+    `ตอนนี้มี ${lines.length} เคสที่กำลังดำเนินการอยู่ค่ะ หมายถึงเคสไหนคะ`,
+    "",
+    ...lines,
+    "",
+    "กดเลือกเคสด้านล่าง หรือพิมพ์เลขเคสมาได้เลยนะคะ หากเป็นเรื่องใหม่ กด [แจ้งเรื่องใหม่] ได้เลยค่ะ",
+  ].join("\n");
 }
 
 /**
@@ -130,6 +180,21 @@ export class LineCaseContextService {
         // and the conversation's do not agree — resolve nothing.
         logger.warn({ conversationId: conv.id, callerProject: input.projectId, convProject: conv.project_id }, "Project mismatch; case context skipped");
         return { handled: false, hint: null, reason: "PROJECT_MISMATCH" };
+      }
+
+      // Pending intake (2026-09-17): while the bot's last real reply is the
+      // create-confirmation card or the "which part to change?" question, the
+      // turn is the customer's answer to that draft — "ยืนยัน", the edit chip,
+      // the correction itself. The resolver must not read a correction such
+      // as "…เป็นเคสด่วนมาก" as a reference to an old case (seen live: the
+      // closed-case protection answered instead of the new summary). The
+      // same last-reply rule the flow's `isAwaitingConfirmation` net uses;
+      // backend acknowledgements (message_purpose = 'notification') are not
+      // replies. A turn naming a TCK number or asking for a new case outright
+      // still resolves normally.
+      const pendingIntake = shouldDeferToPendingIntake(text, await this.lastRealAiReply(conv.id));
+      if (pendingIntake) {
+        return { handled: false, hint: null, reason: "PENDING_CREATE_CONFIRMATION", pendingIntake };
       }
 
       const casesRes = await pool.query<CaseCandidate & { closed_at: Date | null }>(
@@ -232,7 +297,7 @@ export class LineCaseContextService {
           notificationType: "case_context",
           ticketId: null,
           ticketNumber: null,
-          detail: res.clarificationPrompt || "ตอนนี้มีหลายเคสที่กำลังดำเนินการอยู่ค่ะ ต้องการแจ้งเรื่องไหนคะ",
+          detail: ambiguityMessage(res.candidatesDetails || openCases),
           quickReplies: ambiguityChips(res.candidatesDetails || openCases),
         });
         return { handled: true, hint, resolution: res, reason: "AMBIGUOUS_ASKED" };
@@ -245,6 +310,24 @@ export class LineCaseContextService {
       logger.error({ error: err.message, conversationId: input.conversationId }, "Case context resolution failed; turn continues without a hint");
       return { handled: false, hint: null, reason: "ERROR" };
     }
+  }
+
+  /**
+   * The bot's last real reply among the same window the flow reads (its last
+   * 10 non-notification messages), or null when none is there.
+   */
+  private async lastRealAiReply(conversationId: number): Promise<string | null> {
+    const res = await pool.query<{ role: string; content: string }>(
+      `SELECT role, content FROM messages
+        WHERE conversation_id = $1::integer
+          AND content <> ''
+          AND COALESCE(message_purpose, '') <> 'notification'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 10`,
+      [conversationId]
+    );
+    const last = res.rows.find((m) => String(m.role || "").toLowerCase() === "ai" || String(m.role || "").toLowerCase() === "assistant");
+    return last ? String(last.content || "") : null;
   }
 
   /** Attaches the persisted inbound row to the resolved case (never a closed one). */

@@ -149,7 +149,7 @@ export interface CadenceRunLog {
 
 export interface TicketListFilter {
   /** cadence = only what the engine would consider; open/closed/all otherwise. */
-  scope?: "cadence" | "open" | "closed" | "all";
+  scope?: "cadence" | "open" | "closed" | "all" | "deleted";
   priority?: string;
   channel?: string;
   projectId?: number;
@@ -936,7 +936,7 @@ export class SLACadenceService {
     const scope = filter.scope || "cadence";
     const limit = Math.min(200, Math.max(1, filter.limit ?? 60));
     const params: any[] = [];
-    const where: string[] = ["t.deleted_at IS NULL"];
+    const where: string[] = [filter.scope === "deleted" ? "t.deleted_at IS NOT NULL" : "t.deleted_at IS NULL"];
 
     if (scope === "cadence" || scope === "open") {
       params.push(OPEN_STATUS_EXCLUDED);
@@ -1274,6 +1274,84 @@ export class SLACadenceService {
     await this.audit(t.id, "SLA_CONSOLE_DELIVER_TICKET", { from: t.status, to: result.to ?? "RESOLVED", eventId: result.eventId ?? null, notified, notifyError });
     logger.warn({ ticketId: t.id, ticketNumber: t.ticket_number, from: t.status, notified }, "SLA console delivered a ticket to the customer");
     return { ok: true as const, ticket: { id: t.id, ticket_number: t.ticket_number, status: result.to ?? "RESOLVED" }, previousStatus: t.status, notified, notifyError, eventId: result.eventId ?? null };
+  }
+
+  /** Actions the console may apply to a selection of tickets. */
+  static readonly BULK_ACTIONS = ["close", "cancel", "delete", "restore"] as const;
+  /** Upper bound on one bulk request, so a runaway selection cannot touch the whole table. */
+  static readonly BULK_MAX = 200;
+
+  /**
+   * Applies one action to many tickets, one ticket at a time, and reports the
+   * outcome per ticket. A single failure never aborts the rest: the caller
+   * gets the full list back and can retry only what failed.
+   */
+  async bulkTicketAction(refs: string[], action: "close" | "cancel" | "delete" | "restore", reason?: string) {
+    const unique = Array.from(new Set((refs || []).map((r) => String(r || "").trim()).filter(Boolean)));
+    if (unique.length === 0) return { ok: false as const, reason: "NO_TICKETS_SELECTED" };
+    if (unique.length > SLACadenceService.BULK_MAX) {
+      return { ok: false as const, reason: "TOO_MANY_TICKETS", limit: SLACadenceService.BULK_MAX, requested: unique.length };
+    }
+
+    const results: { ref: string; ok: boolean; ticketNumber?: string | null; from?: string | null; to?: string | null; reason?: string }[] = [];
+    for (const ref of unique) {
+      try {
+        if (action === "close" || action === "cancel") {
+          const r = await this.closeTicket(ref, action === "close" ? "closed" : "cancelled", reason);
+          results.push(r.ok
+            ? { ref, ok: true, ticketNumber: r.ticket?.ticket_number ?? null, from: r.previousStatus ?? null, to: r.ticket?.status ?? null }
+            : { ref, ok: false, reason: r.reason });
+        } else {
+          const r = action === "delete" ? await this.softDeleteTicket(ref, reason) : await this.restoreTicket(ref);
+          results.push(r.ok
+            ? { ref, ok: true, ticketNumber: r.ticketNumber, to: action === "delete" ? "DELETED" : "RESTORED" }
+            : { ref, ok: false, reason: r.reason });
+        }
+      } catch (err: any) {
+        results.push({ ref, ok: false, reason: String(err?.message || err) });
+      }
+    }
+
+    const okCount = results.filter((r) => r.ok).length;
+    logger.warn({ action, requested: unique.length, ok: okCount, failed: unique.length - okCount }, "SLA console ran a bulk ticket action");
+    return { ok: true as const, action, requested: unique.length, succeeded: okCount, failed: unique.length - okCount, results };
+  }
+
+  /**
+   * Soft delete: sets tickets.deleted_at, which every cadence, board and
+   * overview query already filters on, so the ticket disappears from the
+   * product and stops producing reminders and customer updates.
+   *
+   * Deliberately NOT a row delete. A real DELETE fires
+   * trg_queue_linked_plane_work_item_delete, which queues the deletion of the
+   * linked Plane work item, and cascades away ticket_events, cadence claims
+   * and notification logs. Hiding a test ticket must not destroy engineering's
+   * board or the audit trail.
+   */
+  async softDeleteTicket(ref: string, reason?: string) {
+    const t = await this.loadTicketByRef(ref);
+    if (!t) return { ok: false as const, reason: "TICKET_NOT_FOUND" };
+    if (t.deleted_at) return { ok: false as const, reason: "ALREADY_DELETED", ticketNumber: t.ticket_number };
+    // deleted_at is a varchar column; store the same ISO shape the existing rows use.
+    const { rowCount } = await pool.query(
+      `UPDATE tickets SET deleted_at = NOW()::text, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`,
+      [t.id]
+    );
+    if (!rowCount) return { ok: false as const, reason: "ALREADY_DELETED", ticketNumber: t.ticket_number };
+    await this.audit(t.id, "SLA_CONSOLE_SOFT_DELETE_TICKET", { status: t.status, reason: reason || null });
+    logger.warn({ ticketId: t.id, ticketNumber: t.ticket_number, status: t.status }, "SLA console soft-deleted a ticket");
+    return { ok: true as const, ticketId: t.id, ticketNumber: t.ticket_number, previousStatus: t.status };
+  }
+
+  /** Undoes a soft delete. The ticket returns to every list and, if still open, to the cadence. */
+  async restoreTicket(ref: string) {
+    const t = await this.loadTicketByRef(ref);
+    if (!t) return { ok: false as const, reason: "TICKET_NOT_FOUND" };
+    if (!t.deleted_at) return { ok: false as const, reason: "NOT_DELETED", ticketNumber: t.ticket_number };
+    await pool.query(`UPDATE tickets SET deleted_at = NULL, updated_at = NOW() WHERE id = $1`, [t.id]);
+    await this.audit(t.id, "SLA_CONSOLE_RESTORE_TICKET", { status: t.status });
+    logger.warn({ ticketId: t.id, ticketNumber: t.ticket_number }, "SLA console restored a soft-deleted ticket");
+    return { ok: true as const, ticketId: t.id, ticketNumber: t.ticket_number, previousStatus: t.status };
   }
 
   private describeCadence(

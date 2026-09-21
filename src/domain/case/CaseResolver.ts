@@ -84,6 +84,66 @@ export interface CaseResolverInput {
   imageOnly?: boolean;
 }
 
+/**
+ * Words that follow "เคส / ปัญหา / เรื่อง" without naming a topic — urgency and
+ * context words ("เป็นเคสด่วนมาก", "ปัญหาใหม่", "เรื่องเดิม"). Seen live
+ * 2026-09-17: "…และเป็นเคสด่วนมากครับ" matched a closed case whose summary
+ * also said "ด่วนมาก" and the customer got the closed-case protection instead
+ * of the new-case summary. Such a word is never an EXPLICIT_TOPIC_MATCH.
+ */
+const GENERIC_TOPIC_WORDS =
+  /^(?:ด่วน|ด่วนมาก|ด่วนที่สุด|ด่วนสุด|เร่งด่วน|ใหม่|เดิม|เก่า|นี้|นั้น|นี่|ล่าสุด|ก่อนหน้า|ก่อน|เพิ่ม|เพิ่มเติม|ต่อ|เลย|มาก|ไหน|อะไร|ที่แล้ว|ที่ผ่านมา|สำคัญ|ปกติ|ทั่วไป|urgent|new|old|same)ๆ?$/i;
+
+/**
+ * Where a topic is named: "เรื่อง X", "เกี่ยวกับ X", "กลับไปเรื่อง X", "ปัญหา X" …
+ * The capture is the raw topic up to the next space; `normalizeTopic` strips
+ * the particles that Thai glues onto it.
+ */
+const TOPIC_REFERENCE_PATTERN =
+  /(?:ขอกลับมาดูเรื่อง|กลับมาดูเรื่อง|ขอกลับมาที่เรื่อง|ขอกลับมาเรื่อง|กลับมาที่เรื่อง|กลับมาเรื่อง|กลับมาที่|กลับมา|ขอกลับไปที่เรื่อง|ขอกลับไปเรื่อง|กลับไปที่เรื่อง|กลับไปเรื่อง|กลับไปที่|กลับไป|สลับไปที่เรื่อง|สลับไปเรื่อง|สลับไปที่|สลับไป|เรื่อง|เกี่ยวกับ|เคส|ปัญหา|ไปที่)\s*(?:เรื่อง\s*)?([^\s,?!]+)/;
+
+/**
+ * Particles and question tails Thai glues onto a topic word ("ระบบล่ะคะ",
+ * "ยอดเงินหน่อยครับ", "เงินยืมหรือยัง"). Seen live 2026-09-18 (conversation
+ * 99961): "แล้วเรื่องระบบล่ะคะ" carried the topic "ระบบล่ะคะ", matched no
+ * subject, and the active case answered a question about the other one.
+ */
+const TOPIC_TAIL_PARTICLES =
+  /(?:หรือยัง|หรือเปล่า|รึยัง|รึเปล่า|ล่ะ|ละ|บ้าง|อ่ะ|อะ|นะ|น้า|คะ|ค่ะ|ครับ|คับ|ค้าบ|จ้า|จ๊ะ|จ้ะ|เหรอ|หรอ|มั้ย|ไหม|หน่อย|ด้วย|เอ่ย)+$/;
+
+/**
+ * Contrastive topic-shift phrasing — "แล้วเรื่อง X ล่ะ", "ส่วนเรื่อง X",
+ * "เรื่อง X ล่ะคะ" — means the customer is turning to ANOTHER subject. It
+ * counts as explicit switch intent (no active-case bias), and a named topic
+ * that fits none or several of the open cases is asked about, never guessed
+ * (operator decision 2026-09-18).
+ */
+const TOPIC_SHIFT_MARKER =
+  /(?:(?:^|\s)แล้ว\s*(?:เรื่อง|เคส|ปัญหา|ตั๋ว|ระบบ|ของ)|(?:^|\s)ส่วน\s*(?:เรื่อง|เคส|ปัญหา|ตั๋ว)|(?:ล่ะ|ละ)(?:\s*(?:คะ|ค่ะ|ครับ|คับ|ค้าบ|จ้า|จ๊ะ))?(?=\s|$|[?!.]))/;
+
+/** Pure: "ระบบล่ะคะ" → "ระบบ"; a generic word ("ด่วนมาก", "เดิม") → "". */
+export function normalizeTopic(raw: string): string {
+  let topic = String(raw || "").trim();
+  for (let i = 0; i < 4; i++) {
+    const next = topic.replace(TOPIC_TAIL_PARTICLES, "").replace(/^(?:เรื่อง|ของ)/, "").trim();
+    if (next === topic) break;
+    topic = next;
+  }
+  if (!topic || GENERIC_TOPIC_WORDS.test(topic)) return "";
+  return topic;
+}
+
+/** Pure: the normalized topic the message names, or "" when it names none. */
+export function referencedTopic(lowerText: string): string {
+  const m = String(lowerText || "").match(TOPIC_REFERENCE_PATTERN);
+  return m && m[1] ? normalizeTopic(m[1]) : "";
+}
+
+/** Pure: true for "แล้วเรื่อง X ล่ะ" / "ส่วนเรื่อง X" / "… ล่ะคะ" phrasing. */
+export function hasTopicShiftMarker(text: string): boolean {
+  return TOPIC_SHIFT_MARKER.test(String(text || ""));
+}
+
 export class CaseResolver {
   /**
    * Helper to construct a typed, deterministic CaseResolutionResult satisfying ISSUE-080 contract.
@@ -255,7 +315,9 @@ export class CaseResolver {
     // Phrases explicitly introducing an unrelated new issue
     // ─────────────────────────────────────────────────────────────
     const isNewProblemStatement =
-      /(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม)/i.test(
+      // Aligned with the flow's NEW_ISSUE_NET (2026-09-17): "มีอีกปัญหาครับ …" resolved to
+      // CONTINUE_ACTIVE_CASE and the hint could not tell the hub not to fold.
+      /(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม|(?:มี)?อีก\s*(?:ปัญหา|เคส|อย่าง)|เรื่องใหม่|ปัญหาใหม่|เคสใหม่|คนละเรื่อง|คนละปัญหา|คนละเคส|ไม่เกี่ยวกับเคส|อีกระบบ|another (?:issue|problem|case)|new (?:issue|problem|case)|separate (?:issue|case))/i.test(
         text
       );
 
@@ -263,7 +325,7 @@ export class CaseResolver {
       const initialSubject =
         text
           .replace(
-            /^(?:(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม)[,:\s]*)/i,
+            /^(?:(?:อีกเรื่องครับ|อีกเรื่องค่ะ|มีอีกเรื่อง|อีกเรื่องนึง|มีปัญหาใหม่อีกเรื่อง|แจ้งเรื่องใหม่|ขอเปิดเคสใหม่อีกเคส|นอกจากเรื่องเดิม|(?:มี)?อีก\s*(?:ปัญหา|เคส|อย่าง)(?:ครับ|ค่ะ|คับ|นะ)?|เรื่องใหม่|ปัญหาใหม่|เคสใหม่|คนละเรื่อง|คนละปัญหา|คนละเคส)[,:\s]*)/i,
             ""
           )
           .trim()
@@ -353,7 +415,11 @@ export class CaseResolver {
     // referencedTicketId = the case the customer is talking about
     // routingTicketId    = the case to which the new message/action may legally be applied
     // ─────────────────────────────────────────────────────────────
-    const hasExplicitSwitchWord = /(?:สลับ|เปลี่ยน|กลับไป|ไปที่|ดูเรื่อง|ตามเรื่อง|ขอเรื่อง)/i.test(text);
+    // "แล้วเรื่อง X ล่ะ" is a switch signal too (2026-09-18): the customer is
+    // turning to another subject, so the active case must not win by default.
+    const topicShift = hasTopicShiftMarker(text);
+    const hasExplicitSwitchWord = /(?:สลับ|เปลี่ยน|กลับไป|ไปที่|ดูเรื่อง|ตามเรื่อง|ขอเรื่อง)/i.test(text) || topicShift;
+    const namedTopic = referencedTopic(lowerText);
 
     const openScores = openCases.map((c) => {
       const evaluation = this.evaluateCandidateEvidence(lowerText, c);
@@ -485,6 +551,18 @@ export class CaseResolver {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // P6 — Topic shift that no open case explains
+    // "แล้วเรื่องอีเมลล่ะคะ" with several open cases: the customer named a
+    // topic while turning away from the current one and nothing above claimed
+    // it. Guessing the active case here is what sent a question about one
+    // case to the other on 2026-09-18 — ask instead (chips: each case + new).
+    // Short replies, images and messages naming no topic never reach this.
+    // ─────────────────────────────────────────────────────────────
+    if (topicShift && namedTopic && openCases.length > 1) {
+      return this.buildAmbiguityResult(openCases, `TOPIC_SHIFT_UNRESOLVED: "${namedTopic}"`);
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // P3 — Conversational Continuation of ACTIVE CASE
     // If active case is valid and open, and no explicit switch or stronger match was found,
     // continue the active case (P3).
@@ -598,10 +676,11 @@ export class CaseResolver {
 
     // 3. Explicit Switch Phrases ("เรื่อง...", "เกี่ยวกับ...", "กลับไป...", "ไปที่...", "ขอกลับมาดูเรื่อง...")
     const cleanText = lowerText.replace(/(?:ครับ|ค่ะ|คับ|นะคะ|นะครับ|หน่อย|ด้วย)$/g, "").trim();
-    const switchMatch = cleanText.match(/(?:ขอกลับมาดูเรื่อง|กลับมาดูเรื่อง|ขอกลับมาที่เรื่อง|ขอกลับมาเรื่อง|กลับมาที่เรื่อง|กลับมาเรื่อง|กลับมาที่|กลับมา|ขอกลับไปที่เรื่อง|ขอกลับไปเรื่อง|กลับไปที่เรื่อง|กลับไปเรื่อง|กลับไปที่|กลับไป|สลับไปที่เรื่อง|สลับไปเรื่อง|สลับไปที่|สลับไป|เรื่อง|เกี่ยวกับ|เคส|ปัญหา|ไปที่)\s*(?:เรื่อง\s*)?([^\s,]+)/);
+    const switchMatch = cleanText.match(TOPIC_REFERENCE_PATTERN);
     if (switchMatch && switchMatch[1]) {
-      let rawTopic = switchMatch[1].replace(/(?:ครับ|ค่ะ|คับ|นะคะ|นะครับ|หน่อย|ด้วย)$/g, "").trim();
-      rawTopic = rawTopic.replace(/^เรื่อง/, "").trim();
+      // Particles glued to the topic ("ระบบล่ะคะ") are stripped before the
+      // comparison; generic words ("ด่วนมาก") never count (2026-09-17/18).
+      const rawTopic = normalizeTopic(switchMatch[1]);
       if (
         rawTopic.length >= 2 &&
         (subject.includes(rawTopic) || summary.includes(rawTopic) || running.includes(rawTopic) || searchable.includes(rawTopic))

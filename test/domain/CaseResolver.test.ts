@@ -255,7 +255,54 @@ function testCaseResolver() {
   assert.strictEqual(resRecentContext.ticketId, 102);
   console.log("✅ Test 15 Passed: P4 Recent-context resolved ticket 102 from conversational history");
 
-  console.log("\nAll 15 CaseResolver unit tests passed!\n");
+  // 16. Generic topic words ("เคสด่วนมาก", "ปัญหาใหม่") never select a case (live defect 2026-09-17)
+  const resGenericTopic = resolver.resolve({
+    conversationId: 1,
+    activeTicketId: null,
+    messageText: "ขอแก้อาการเป็น เข้าใช้งานไม่ได้เลย และเป็นเคสด่วนมากครับ",
+    openCases: [],
+    closedCases: [
+      { id: 301, ticket_number: "TCK-2026-301", subject: "ระบบเว็บไซต์ - 401 Unauthorized เข้าใช้งานไม่ได้", summary: "เข้าใช้งานเว็บไซต์ไม่ได้ เป็นเรื่องด่วนมาก", status: "CLOSED" },
+    ],
+  });
+  assert.strictEqual(resGenericTopic.intent, "NEW_CASE", "urgency word must not reference the closed case");
+  assert.ok(!resGenericTopic.evidence.some((e) => e.startsWith("EXPLICIT_TOPIC_MATCH")), resGenericTopic.evidence.join(", "));
+  console.log("✅ Test 16 Passed: Generic topic word after 'เคส' is not an explicit topic match");
+
+  // 17-21. Live defect 2026-09-18 (conversation 99961): "แล้วเรื่องระบบล่ะคะ" with
+  // active case 731 continued 731 (P3) instead of asking; both subjects start
+  // with "ระบบ", so the topic identifies neither.
+  const liveOpen = [
+    { id: 731, ticket_number: "TCK-2026-86186", subject: "ระบบเว็บไซต์ - เข้าใช้งานไม่ได้ และเป็นเคสด่วนมาก", summary: "ลูกค้าแจ้งว่าไม่สามารถเข้าใช้งานระบบเว็บไซต์ได้และระบุเป็นเคสด่วนมาก", status: "TRIAGED" },
+    { id: 732, ticket_number: "TCK-2026-73046", subject: "ระบบชดใช้เงินยืม - ขอย้อนสถานะใบเสร็จเล่มที่ 05 เป็นค้างชำระ", summary: "ลูกค้าต้องการเปลี่ยนสถานะใบเสร็จเล่มที่ 05 จากชำระแล้วเป็นค้างชำระ", status: "TRIAGED" },
+  ];
+  const resTopicShift = resolver.resolve({ conversationId: 99961, activeTicketId: 731, messageText: "แล้วเรื่องระบบล่ะคะ มีใครดูให้หรือยัง", openCases: liveOpen, closedCases: [] });
+  assert.strictEqual(resTopicShift.intent, "AMBIGUOUS_CASE", resTopicShift.reason);
+  assert.deepStrictEqual(resTopicShift.candidates, [731, 732]);
+  console.log("✅ Test 17 Passed: 'แล้วเรื่องระบบล่ะคะ' with an active case asks (topic fits both cases)");
+
+  const resTopicOne = resolver.resolve({ conversationId: 99961, activeTicketId: 732, messageText: "เรื่องระบบเว็บไซต์ล่ะคะ มีใครดูให้หรือยัง", openCases: liveOpen, closedCases: [] });
+  assert.strictEqual(resTopicOne.intent, "SWITCH_EXISTING_CASE", resTopicOne.reason);
+  assert.strictEqual(resTopicOne.ticketId, 731);
+  console.log("✅ Test 18 Passed: a topic naming exactly one case switches to it despite the active case");
+
+  const resTopicNone = resolver.resolve({ conversationId: 99961, activeTicketId: 731, messageText: "แล้วเรื่องอีเมลล่ะคะ", openCases: liveOpen, closedCases: [] });
+  assert.strictEqual(resTopicNone.intent, "AMBIGUOUS_CASE", resTopicNone.reason);
+  assert.ok(resTopicNone.reason.startsWith("TOPIC_SHIFT_UNRESOLVED"), resTopicNone.reason);
+  console.log("✅ Test 19 Passed: a shifted topic that fits no open case asks instead of guessing the active case");
+
+  const resPlainFollowUp = resolver.resolve({ conversationId: 99961, activeTicketId: 731, messageText: "ปัญหาระบบยังไม่หายครับ", openCases: liveOpen, closedCases: [] });
+  assert.strictEqual(resPlainFollowUp.intent, "CONTINUE_ACTIVE_CASE", resPlainFollowUp.reason);
+  assert.strictEqual(resPlainFollowUp.ticketId, 731);
+  const resShortLive = resolver.resolve({ conversationId: 99961, activeTicketId: 731, messageText: "ยังไม่ได้ครับ", openCases: liveOpen, closedCases: [] });
+  assert.strictEqual(resShortLive.intent, "CONTINUE_ACTIVE_CASE");
+  console.log("✅ Test 20 Passed: follow-ups without a topic shift still continue the active case (never ask every time)");
+
+  const resSingleOpen = resolver.resolve({ conversationId: 99961, activeTicketId: 731, messageText: "แล้วเรื่องระบบล่ะคะ มีใครดูให้หรือยัง", openCases: [liveOpen[0]], closedCases: [] });
+  assert.strictEqual(resSingleOpen.intent, "CONTINUE_ACTIVE_CASE", resSingleOpen.reason);
+  console.log("✅ Test 21 Passed: with a single open case there is nothing to disambiguate");
+
+  console.log("\nAll 21 CaseResolver unit tests passed!\n");
 }
 
 testCaseResolver();

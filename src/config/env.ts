@@ -85,6 +85,11 @@ export const EnvSchema = z.object({
   // 15 s (operator decision, spec v2 Flow 1): consecutive DM messages are grouped
   // into one AI turn. Was 2000 ms in source while every environment set 15000.
   LINE_BATCH_WINDOW_MS: z.coerce.number().int().min(500).default(15000),
+  // A screenshot sent alone within this many minutes of the conversation's
+  // focus case being opened is attached to that case without asking
+  // (operator decision 2026-09-17: 60 for the test period). 0 disables it and
+  // every standalone screenshot is asked about, as before.
+  LINE_IMAGE_AUTO_ATTACH_MINUTES: z.coerce.number().int().min(0).max(1440).default(60),
   PROJECT_JOIN_CODE_PEPPER: z.string().min(16).optional(),
   PLANE_API_URL: z.string().url().default("https://api.plane.so"),
   PLANE_API_KEY: z.string().default("plane_mock_key"),
