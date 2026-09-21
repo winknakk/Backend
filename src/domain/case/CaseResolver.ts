@@ -532,10 +532,15 @@ export class CaseResolver {
 
     // 3. Only Closed Cases Matched (no open cases matched the text):
     // P5: Closed Case Reference. Decoupled: referencedTicketId = closed.id, routingTicketId = null.
-    if (matchingClosed.length > 0 && matchingClosed[0].score >= 0.50) {
+    if (matchingClosed.length > 0 && matchingClosed[0].score >= 0.45) {
       // If activeCase is set and message is conversational continuation without switch words,
       // preserve active open case focus rather than flipping to closed reference.
-      if (activeCase && !hasExplicitSwitchWord && this.isShortOrAffirmativeMessage(text)) {
+      const activeScore = activeCase ? openScores.find((s) => s.candidate.id === activeCase.id)?.score || 0 : 0;
+      if (
+        activeCase &&
+        !hasExplicitSwitchWord &&
+        this.hasContinuityEvidence(text, lowerText, activeCase, activeScore, hasAttachments, topicShift, hasExplicitSwitchWord)
+      ) {
         return this.createResult({
           decision: "CONTINUE_ACTIVE_CASE",
           ticketId: activeCase.id,
@@ -565,9 +570,21 @@ export class CaseResolver {
     // ─────────────────────────────────────────────────────────────
     // P3 — Conversational Continuation of ACTIVE CASE
     // If active case is valid and open, and no explicit switch or stronger match was found,
-    // continue the active case (P3).
+    // continue the active case ONLY if continuity evidence exists (ISSUE-080/081).
     // ─────────────────────────────────────────────────────────────
-    if (activeCase) {
+    if (
+      activeCase &&
+      !hasExplicitSwitchWord &&
+      this.hasContinuityEvidence(
+        text,
+        lowerText,
+        activeCase,
+        openScores.find((s) => s.candidate.id === activeCase.id)?.score || 0,
+        hasAttachments,
+        topicShift,
+        hasExplicitSwitchWord
+      )
+    ) {
       return this.createResult({
         decision: "CONTINUE_ACTIVE_CASE",
         ticketId: activeCase.id,
@@ -606,14 +623,50 @@ export class CaseResolver {
       }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // P3 / W3 Guard — Single Open Case Resolution
+    // An unrelated message must NOT blindly route into the only open ticket
+    // merely because it is the only one open (ISSUE-080/081 Critical Finding W3).
+    // ─────────────────────────────────────────────────────────────
     if (openCases.length === 1) {
+      const singleCase = openCases[0];
+      const singleScore = openScores.find((s) => s.candidate.id === singleCase.id)?.score || 0;
+      const hasCont = this.hasContinuityEvidence(
+        text,
+        lowerText,
+        singleCase,
+        singleScore,
+        hasAttachments,
+        topicShift,
+        hasExplicitSwitchWord
+      );
+
+      if (hasCont) {
+        return this.createResult({
+          decision: "CONTINUE_ACTIVE_CASE",
+          ticketId: singleCase.id,
+          ticketNumber: singleCase.ticket_number,
+          confidence: 0.85,
+          evidence: ["P3_SINGLE_OPEN_CASE_DEFAULT"],
+          reason: "SINGLE_OPEN_CASE_DEFAULT",
+        });
+      }
+
+      // No continuity evidence for the single open case!
+      // Check if a closed case matches:
+      if (matchingClosed.length > 0 && matchingClosed[0].score >= 0.35) {
+        const topClosed = matchingClosed[0];
+        return this.buildClosedCaseResult(topClosed.candidate, text, openCases, topClosed.evidence);
+      }
+
+      // Topic shift or new topic without continuity evidence -> NEW_CASE
       return this.createResult({
-        decision: "CONTINUE_ACTIVE_CASE",
-        ticketId: openCases[0].id,
-        ticketNumber: openCases[0].ticket_number,
-        confidence: 0.85,
-        evidence: ["P3_SINGLE_OPEN_CASE_DEFAULT"],
-        reason: "SINGLE_OPEN_CASE_DEFAULT",
+        decision: "NEW_CASE",
+        ticketId: null,
+        confidence: 0.82,
+        evidence: topicShift ? ["P0_TOPIC_SHIFT_NEW_CASE"] : ["SINGLE_OPEN_CASE_UNRELATED_NEW_CASE"],
+        initialSubject: text.slice(0, 80),
+        reason: topicShift ? "TOPIC_SHIFT_NEW_CASE" : "SINGLE_OPEN_CASE_UNRELATED_NEW_CASE",
       });
     }
 
@@ -827,15 +880,76 @@ export class CaseResolver {
    */
   private isShortOrAffirmativeMessage(text: string): boolean {
     const clean = text.trim();
-    if (clean.length <= 40) {
+    if (clean.length <= 60) {
       if (
-        /^(?:ยังไม่ได้(?:ครับ|ค่ะ|คับ)?|ได้แล้ว(?:ครับ|ค่ะ|คับ)?|โอเค(?:ครับ|ค่ะ)?|ok|yes|no|ใช่(?:ครับ|ค่ะ)?|ไม่ใช่|ขอบคุณ(?:ครับ|ค่ะ)?|เรียบร้อย(?:ครับ|ค่ะ)?|ส่งให้แล้ว(?:ครับ|ค่ะ)?|ตามนั้น(?:ครับ|ค่ะ)?|ครับ|ค่ะ|คับ|แนบรูป(?:ให้แล้ว|ครับ|ค่ะ)?|รูปครับ|รูปค่ะ|ลองแล้ว(?:ครับ|ค่ะ)?|ยังเหมือนเดิม(?:ครับ|ค่ะ)?|กำลังลอง(?:ครับ|ค่ะ)?|ทดสอบแล้ว(?:ครับ|ค่ะ)?|รอก่อน(?:ครับ|ค่ะ)?|ยังเลย(?:ครับ|ค่ะ)?|ยังไม่ได้รับ(?:ครับ|ค่ะ)?|เดี๋ยวลองใหม่(?:ครับ|ค่ะ)?|ได้ครับ|ได้ค่ะ|ยังมีปัญหาอยู่|อันนี้ครับ|อันนี้ค่ะ|นี่ครับ|นี่ค่ะ|ตามนี้ครับ|ตามนี้ค่ะ)$/i.test(
+        /^(?:ยังไม่ได้(?:เลย)?(?:ครับ|ค่ะ|คับ)?|ลองแล้ว(?:ครับ|ค่ะ|คับ)?\s*ยังไม่ได้|ลองทำแล้ว\s*ยังไม่ได้|ทำตามแล้ว\s*ยังไม่ได้|ได้แล้ว(?:ครับ|ค่ะ|คับ)?|โอเค(?:ครับ|ค่ะ)?|ok|yes|no|ใช่(?:ครับ|ค่ะ)?|ไม่ใช่|ขอบคุณ(?:ครับ|ค่ะ)?|เรียบร้อย(?:ครับ|ค่ะ)?|ส่งให้แล้ว(?:ครับ|ค่ะ)?|ตามนั้น(?:ครับ|ค่ะ)?|ครับ|ค่ะ|คับ|แนบรูป(?:ให้แล้ว|ครับ|ค่ะ)?|รูปครับ|รูปค่ะ|ลองแล้ว(?:ครับ|ค่ะ)?|ยังเหมือนเดิม(?:ครับ|ค่ะ)?|เหมือนเดิม(?:ครับ|ค่ะ)?|กำลังลอง(?:ครับ|ค่ะ)?|ทดสอบแล้ว(?:ครับ|ค่ะ)?|รอก่อน(?:ครับ|ค่ะ)?|ยังเลย(?:ครับ|ค่ะ)?|ยังไม่ได้รับ(?:ครับ|ค่ะ)?|เดี๋ยวลองใหม่(?:ครับ|ค่ะ)?|ได้ครับ|ได้ค่ะ|ยังมีปัญหาอยู่|ปัญหายังไม่หาย(?:ครับ|ค่ะ)?|ปัญหาระบบยังไม่หาย(?:ครับ|ค่ะ)?|ยังไม่หาย(?:เลย)?(?:ครับ|ค่ะ)?|ยังทำไม่ได้(?:ครับ|ค่ะ)?|ยังแก้ไม่ได้(?:ครับ|ค่ะ)?|แล้วต้องทำยังไงต่อ(?:ครับ|ค่ะ)?|ต้องทำยังไงต่อ(?:ครับ|ค่ะ)?|ยังไงต่อ(?:ครับ|ค่ะ)?|แล้วยังไงต่อ(?:ครับ|ค่ะ)?|อันนี้ครับ|อันนี้ค่ะ|นี่ครับ|นี่ค่ะ|ตามนี้ครับ|ตามนี้ค่ะ)$/i.test(
           clean
         )
       ) {
         return true;
       }
     }
+    return false;
+  }
+
+  /**
+   * Evaluates if there is credible evidence that the message continues the candidate case.
+   * Eliminates the bug where any message routes to the single open case without evidence.
+   */
+  private hasContinuityEvidence(
+    text: string,
+    lowerText: string,
+    c: CaseCandidate,
+    score: number,
+    hasAttachments: boolean,
+    topicShift: boolean,
+    hasExplicitSwitchWord: boolean
+  ): boolean {
+    // If there is an explicit topic shift or switch away from current topic, it's not a continuation
+    if (topicShift || hasExplicitSwitchWord) {
+      return false;
+    }
+
+    // 0. Explicit reference to the current / active case ("เคสนี้", "เรื่องนี้", "ตั๋วนี้", "อันนี้", "เคสเดิม", "เรื่องเดิม")
+    if (/(?:เคสนี้|เรื่องนี้|ตั๋วนี้|อันนี้|เคสเดิม|เรื่องเดิม)/i.test(text)) {
+      return true;
+    }
+
+    // 1. Short or affirmative continuation (e.g. "ยังไม่ได้เลยค่ะ", "โอเคครับ", "ลองแล้วยังไม่ได้")
+    if (this.isShortOrAffirmativeMessage(text)) {
+      return true;
+    }
+
+    // 2. Attachments without topic shift or explicit switch
+    if (hasAttachments) {
+      return true;
+    }
+
+    // 3. Substantive semantic overlap with the case (score >= 0.25)
+    if (score >= 0.25) {
+      return true;
+    }
+
+    // 4. Progress inquiry on THIS case (generic progress inquiry, or mentioning topic of this case)
+    const isGenericProgressInquiry =
+      /(?:ตามเรื่อง(?:นี้|เดิม)?|สถานะ(?:เป็นอย่างไร|เป็นไง|ถึงไหน)|มีความคืบหน้า(?:ไหม|มั้ย)|(?:คืบหน้า|อัปเดต|ถึงไหน)(?:แล้ว|บ้าง)|มีใครดู(?:ให้)?หรือยัง|ดำเนินการถึงไหน)/i.test(
+        text
+      );
+
+    if (isGenericProgressInquiry) {
+      const named = referencedTopic(lowerText);
+      // If no specific conflicting topic was named ("ตามเรื่องหน่อยค่ะ ถึงไหนแล้ว"), it continues the current case
+      if (!named) {
+        return true;
+      }
+      // If a topic was named, it only continues if the topic matches this case
+      const sub = (c.subject || "").toLowerCase();
+      const sum = (c.summary || "").toLowerCase();
+      if (sub.includes(named) || sum.includes(named)) {
+        return true;
+      }
+    }
+
     return false;
   }
 
