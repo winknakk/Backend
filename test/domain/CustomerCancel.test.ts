@@ -80,4 +80,27 @@ check("C-09 the 'ยกเลิกเคส TCK-…' chip from the which-case l
   assert.equal(r.ticketNumber, "TCK-2026-00042");
 });
 
+check("C-10 live 2026-09-18: vocative + numbered request + reason clause is a CANCEL_REQUEST carrying the reason", () => {
+  const r = detectCancelIntent("แอดมินคะ ขอยกเลิกเคส TCK-2026-73046 ให้หน่อยค่ะ คุยกับเจ้าหน้าที่แล้วไม่ต้องย้อนสถานะแล้วค่ะ");
+  assert.equal(r.kind, "CANCEL_REQUEST");
+  assert.equal(r.ticketNumber, "TCK-2026-73046");
+  assert.equal(r.reason, "คุยกับเจ้าหน้าที่แล้วไม่ต้องย้อนสถานะแล้วค่ะ");
+  const plain = detectCancelIntent("ขอยกเลิกเคส TCK-2026-12345 ค่ะ");
+  assert.equal(plain.kind, "CANCEL_REQUEST");
+  assert.equal(plain.reason ?? null, null);
+});
+
+check("C-11 a vocative alone does not break the whole-message rule; without a number no trailing clause is allowed", () => {
+  assert.equal(detectCancelIntent("แอดมินคะ ยกเลิกเคสให้หน่อยค่ะ").kind, "CANCEL_REQUEST");
+  assert.equal(detectCancelIntent("พี่แอดมินครับ ขอยกเลิกเคสนี้ครับ").kind, "CANCEL_REQUEST");
+  assert.equal(detectCancelIntent("แอดมินคะ ปุ่มยกเลิกเคสในหน้าจอกดไม่ได้ค่ะ").kind, "NONE");
+  assert.equal(detectCancelIntent("แอดมินคะ ยกเลิกเคสให้หน่อยค่ะ เพราะไม่ต้องแก้แล้ว").kind, "NONE");
+});
+
+check("C-12 the confirmation chip still wins over the reason rule", () => {
+  const r = detectCancelIntent("ยืนยันยกเลิกเคส TCK-2026-73046");
+  assert.equal(r.kind, "CONFIRM_CANCEL");
+  assert.equal(r.ticketNumber, "TCK-2026-73046");
+});
+
 console.log(`\n${passed} checks passed${process.exitCode ? ", with failures" : ""}`);

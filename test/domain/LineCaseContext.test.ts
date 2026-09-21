@@ -113,8 +113,10 @@ check("L-06 closed-reference chips: reopen chip only inside the re-open window",
   assert.equal(recent[1].text, "ยังมีปัญหาอยู่ TCK-2026-20201");
   const old = closedReferenceChips("TCK-2026-20201", new Date(Date.now() - 30 * 86_400_000), 7);
   assert.equal(old.length, 1);
-  assert.equal(old[0].text, "เปิดเคสใหม่");
+  // 2026-09-18: the tap names the closed case so the follow-up can be linked.
+  assert.equal(old[0].text, "เปิดเคสใหม่: ติดตามต่อจาก TCK-2026-20201");
   assert.equal(closedReferenceChips(null, null, 7).length, 1);
+  assert.equal(closedReferenceChips(null, null, 7)[0].text, "เปิดเคสใหม่");
 });
 
 check("L-07 pure switch commands are answered at the edge; content is forwarded", () => {

@@ -92,6 +92,10 @@ export const EnvSchema = z.object({
   LINE_IMAGE_AUTO_ATTACH_MINUTES: z.coerce.number().int().min(0).max(1440).default(60),
   PROJECT_JOIN_CODE_PEPPER: z.string().min(16).optional(),
   PLANE_API_URL: z.string().url().default("https://api.plane.so"),
+  // Browser-facing Plane host used for links written into work items
+  // ("open the related case"): <PLANE_WEB_URL>/<workspace>/projects/<id>/issues/<id>.
+  // Differs from PLANE_API_URL on Plane Cloud (api.plane.so vs the workspace's web host).
+  PLANE_WEB_URL: z.string().url().default("https://projects.oneweb.tech"),
   PLANE_API_KEY: z.string().default("plane_mock_key"),
   PLANE_PROJECT_ID: z.string().default("proj_id"),
   PLANE_WORKSPACE_SLUG: z.string().default("ws_id"),

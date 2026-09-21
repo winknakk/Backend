@@ -267,13 +267,40 @@ export interface CancelIntent {
   kind: CancelIntentKind;
   /** Ticket number found in the message, upper-cased, when present. */
   ticketNumber: string | null;
+  /**
+   * What the customer wrote after "ยกเลิกเคส TCK-…" — their own reason
+   * ("คุยกับเจ้าหน้าที่แล้วไม่ต้องย้อนสถานะแล้วค่ะ"). Only a numbered request
+   * may carry one; recorded on the case when the cancel is confirmed.
+   */
+  reason?: string | null;
 }
 
 const CANCEL_OBJECT = "(?:the\\s+)?(?:เคส|ตั๋ว|งาน|case|ticket)";
 
+/**
+ * How a Thai customer opens a request to a person: "แอดมินคะ", "พี่แอดมินครับ",
+ * "สวัสดีค่ะ แอดมิน". Seen live 2026-09-18: "แอดมินคะ ขอยกเลิกเคส TCK-… ให้หน่อยค่ะ …"
+ * missed the whole-message rule and the AI answered with the draft-cancel line.
+ */
+const VOCATIVE =
+  "(?:\\s*(?:สวัสดี|หวัดดี|แอดมิน|admin|พี่|คุณ|น้อง|ทีมงาน|เจ้าหน้าที่)(?:\\s*(?:คะ|ค่ะ|ครับ|คับ|ค้าบ|จ้า|จ๊ะ))?\\s*[,]?)*";
+
+const CANCEL_VERB = `(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ|จะ|please\\s+)?\\s*(?:ยกเลิก|cancel)\\s*${CANCEL_OBJECT}(?:\\s*(?:นี้|นั้น|เดิม|ที่แจ้ง(?:ไว้)?))?`;
+
 /** Whole-message cancel request. Exported so the pre-router can route on the same rule. */
 export const CANCEL_TICKET_PATTERN = new RegExp(
-  `^\\s*(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ|จะ|please\\s+)?\\s*(?:ยกเลิก|cancel)\\s*${CANCEL_OBJECT}(?:\\s*(?:นี้|นั้น|เดิม|ที่แจ้ง(?:ไว้)?))?${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  `^${VOCATIVE}\\s*${CANCEL_VERB}${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  "i"
+);
+
+/**
+ * A cancel request that names the case and goes on to say why. The number
+ * makes the object unambiguous, so the trailing clause is the customer's
+ * reason rather than a report that happens to contain "ยกเลิกเคส" (those stay
+ * with the whole-message rule above and are NONE without a number).
+ */
+const CANCEL_WITH_REASON_PATTERN = new RegExp(
+  `^${VOCATIVE}\\s*${CANCEL_VERB}\\s*(?:เคส|ticket|เลข|หมายเลข)?\\s*(TCK-\\d{4}-\\d{4,6})${TAIL}[\\s,.:;–-]*(.*)$`,
   "i"
 );
 
@@ -304,7 +331,12 @@ export function detectCancelIntent(text: string, cancelQuestionPending = false):
   const ticketNumber = num ? num[0].toUpperCase() : null;
 
   if (CONFIRM_CANCEL_RE.test(raw)) return { kind: "CONFIRM_CANCEL", ticketNumber };
-  if (CANCEL_TICKET_PATTERN.test(raw)) return { kind: "CANCEL_REQUEST", ticketNumber };
+  if (CANCEL_TICKET_PATTERN.test(raw)) return { kind: "CANCEL_REQUEST", ticketNumber, reason: null };
+  const withReason = raw.match(CANCEL_WITH_REASON_PATTERN);
+  if (withReason) {
+    const reason = String(withReason[2] || "").trim();
+    return { kind: "CANCEL_REQUEST", ticketNumber: withReason[1].toUpperCase(), reason: reason.length >= 4 ? reason : null };
+  }
 
   if (cancelQuestionPending) {
     if (DECLINE_CANCEL_RE.test(raw)) return { kind: "DECLINE_CANCEL", ticketNumber };

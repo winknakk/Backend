@@ -58,7 +58,11 @@ export type CustomerNotificationType =
   | "cancel_case_not_open"
   // Multi-case context answered at the edge on LINE (Flow 6, 2026-09-17):
   // the resolver's own clarification text, chips supplied by the caller.
-  | "case_context";
+  | "case_context"
+  // The [เปิดเคสใหม่จากเรื่องนี้] chip / a bare "เปิดเคสใหม่" (2026-09-18): ask for
+  // the report instead of letting the AI file the chip text as the subject.
+  | "follow_up_prompt"
+  | "new_case_prompt";
 
 /**
  * Facts the case card is built from. Loaded from `tickets` by ticket id when
@@ -113,7 +117,7 @@ export function customerStatusLabel(status: string | null | undefined): string {
     case "DONE":
       return "เสร็จสิ้น";
     case "CANCELLED":
-      return "ยกเลิก";
+      return "ยกเลิกแล้ว";
     default:
       return "อยู่ระหว่างดำเนินการ";
   }
@@ -434,11 +438,29 @@ export class CustomerNotificationService {
     "โอเคค่ะ ก่อนยกเลิกเคส {ticket}{about} แอดมินขอให้ยืนยันอีกครั้งนะคะ แตะ 'ยืนยันยกเลิกเคส' ข้างล่างนี้ได้เลยค่ะ",
   ] as const;
 
-  /** Closing line of the cancelled card. */
+  /**
+   * [เปิดเคสใหม่จากเรื่องนี้] tapped under the closed-case protection
+   * (2026-09-18): the new case will be linked to {ticket}; ask for the report.
+   */
+  private static readonly FOLLOW_UP_PROMPT_VARIANTS = [
+    "ได้เลยค่ะ จะเปิดเคสใหม่ต่อจาก {ticket}{about} ให้นะคะ เล่าอาการที่พบตอนนี้มาได้เลยค่ะ ส่งรูปหน้าจอมาด้วยก็ได้นะคะ",
+    "รับทราบค่ะ เปิดเคสใหม่อ้างอิงเคส {ticket} ให้นะคะ รบกวนพิมพ์อาการที่เจอตอนนี้มาได้เลยค่ะ มีรูปหน้าจอแนบมาด้วยยิ่งดีค่ะ",
+    "โอเคค่ะ เดี๋ยวแอดมินเปิดเคสใหม่ต่อจาก {ticket} ให้ค่ะ ปัญหาที่เจอตอนนี้เป็นแบบไหนคะ พิมพ์อาการหรือส่งรูปมาได้เลยค่ะ",
+  ] as const;
+
+  /** A bare "เปิดเคสใหม่" / [แจ้งเรื่องใหม่] with no case to link: just ask for the report. */
+  private static readonly NEW_CASE_PROMPT_VARIANTS = [
+    "ได้เลยค่ะ แจ้งรายละเอียดปัญหาที่พบมาได้เลยนะคะ ถ้ามีภาพหน้าจอแนบมาด้วยจะช่วยให้เช็กไวขึ้นค่ะ",
+    "รับทราบค่ะ เล่าอาการที่เจอมาได้เลยค่ะ เจอตรงไหน ขึ้นข้อความอะไร แอดมินจะเปิดเคสให้ใหม่ค่ะ",
+    "โอเคค่ะ ปัญหาใหม่เป็นแบบไหนคะ พิมพ์อาการหรือส่งรูปหน้าจอมาได้เลย เดี๋ยวแอดมินเปิดเคสให้ค่ะ",
+  ] as const;
+
+  /** Closing line of the cancelled card (operator-approved set, 2026-09-18). */
   private static readonly CANCELLED_CLOSERS = [
-    "ยกเลิกเคสให้เรียบร้อยแล้วนะคะ ทีมงานจะหยุดดำเนินการเคสนี้ค่ะ ถ้ามีเรื่องใหม่ทักมาได้เลยนะคะ",
-    "แอดมินยกเลิกเคสนี้ให้แล้วค่ะ ขอบคุณที่แจ้งนะคะ มีอะไรให้ช่วยอีกบอกได้เสมอค่ะ",
-    "เรียบร้อยค่ะ เคสนี้ถูกยกเลิกแล้วนะคะ หากกลับมาเจอปัญหาอีก แจ้งแอดมินได้ตลอดเลยค่ะ",
+    "หากต้องการแจ้งปัญหาใหม่ ทักมาได้เลยค่ะ",
+    "ยกเลิกเคสนี้ให้เรียบร้อยแล้วนะคะ มีเรื่องอื่นให้ช่วย แจ้งได้เสมอค่ะ",
+    "รับทราบและยกเลิกเคสให้แล้วค่ะ ถ้าเจอปัญหาอีก ทักแอดมินได้ตลอดนะคะ",
+    "เรียบร้อยค่ะ ขอบคุณที่แจ้งให้ทราบนะคะ มีอะไรเพิ่มเติมพิมพ์มาได้เลยค่ะ",
   ] as const;
 
   /** "ไม่ยกเลิก" — the case keeps going. */
@@ -675,6 +697,10 @@ export class CustomerNotificationService {
         // The case resolver composed the whole message (which case? closed
         // case?); `detail` is that text and the caller supplies the chips.
         return String(detail || "").trim() || "คุณลูกค้าหมายถึงเคสไหนคะ";
+      case "follow_up_prompt":
+        return this.fill(CustomerNotificationService.FOLLOW_UP_PROMPT_VARIANTS, seed, ticketNumber, subject);
+      case "new_case_prompt":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.NEW_CASE_PROMPT_VARIANTS, seed);
     }
   }
 

@@ -715,6 +715,8 @@ export class CaseResolver {
   ): CaseResolutionResult {
     const ticketNum = closedCase.ticket_number || `#${closedCase.id}`;
     const subject = closedCase.subject || closedCase.title || closedCase.summary || "เคสที่ปิดแล้ว";
+    // A case the customer cancelled reads differently from one the team closed (2026-09-18).
+    const cancelled = String(closedCase.status || "").toUpperCase() === "CANCELLED";
 
     const actions: Array<{ label: string; value: string; style?: "primary" | "default" }> = [
       { label: `➕ เปิดเคสใหม่จากเรื่องนี้`, value: `เปิดเคสใหม่: ติดตามต่อจาก ${ticketNum}`, style: "primary" },
@@ -737,7 +739,9 @@ export class CaseResolver {
       confidence: 0.98,
       evidence: [...evidence, `CLOSED_CASE_PROTECTION: ${ticketNum}`],
       reason: `CLOSED_CASE_PROTECTION: ${ticketNum}`,
-      clarificationPrompt: `เคส ${ticketNum} ("${subject}") ได้รับการปิดเรียบร้อยแล้วค่ะ\n\nระบบไม่สามารถเพิ่มข้อมูลลงในเคสที่ปิดแล้วได้ หากท่านต้องการความช่วยเหลือเพิ่มเติม สามารถเลือกเปิดเคสใหม่ได้ทันทีค่ะ`,
+      clarificationPrompt: cancelled
+        ? `เคส ${ticketNum} ("${subject}") ถูกยกเลิกไปแล้วค่ะ\n\nระบบไม่สามารถเพิ่มข้อมูลลงในเคสที่ยกเลิกแล้วได้ หากยังต้องการความช่วยเหลือ สามารถเลือกเปิดเคสใหม่ได้ทันทีค่ะ`
+        : `เคส ${ticketNum} ("${subject}") ได้รับการปิดเรียบร้อยแล้วค่ะ\n\nระบบไม่สามารถเพิ่มข้อมูลลงในเคสที่ปิดแล้วได้ หากท่านต้องการความช่วยเหลือเพิ่มเติม สามารถเลือกเปิดเคสใหม่ได้ทันทีค่ะ`,
       actions,
     };
   }

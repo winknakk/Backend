@@ -278,6 +278,28 @@ export class PlaneApiClient {
   }
 
   /**
+   * The project's short identifier ("EXAI" in EXAI-98), for human-readable
+   * cross-references (2026-09-18). Cached per project; null when unavailable.
+   */
+  private readonly projectIdentifierCache = new Map<string, string | null>();
+  async getProjectIdentifier(projectConfig: PlaneProjectConfig): Promise<string | null> {
+    const key = `${projectConfig.workspaceSlug}/${projectConfig.planeProjectId}`;
+    if (this.projectIdentifierCache.has(key)) return this.projectIdentifierCache.get(key) ?? null;
+    let identifier: string | null = null;
+    try {
+      const res = await this.httpClient.get(`${this.getProjectBaseUrl(projectConfig)}/`, {
+        headers: this.getHeaders(projectConfig),
+        timeout: 10000,
+      });
+      identifier = res?.data?.identifier ? String(res.data.identifier).trim() : null;
+    } catch (err: any) {
+      logger.warn({ key, error: err?.message }, "Could not read the Plane project identifier");
+    }
+    this.projectIdentifierCache.set(key, identifier);
+    return identifier;
+  }
+
+  /**
    * Copies customer evidence into Plane-owned storage. This deliberately does
    * not expose TicketX's short-lived signed media URLs in the work item.
    */
