@@ -692,7 +692,7 @@ export class CaseResolver {
 
     // 4. Distinctive Domain Terms & Semantic Clusters in Thai & English
     const domainTerms = [
-      "ใบแจ้งหนี้", "เข้าไม่ได้", "เข้าใช้งานไม่ได้", "เข้าสู่ระบบ", "ใบเสร็จ", "ยอดเงิน", "ยอดชำระ",
+      "ใบแจ้งหนี้", "เข้าไม่ได้", "เข้าสู่ระบบ", "ใบเสร็จ", "ยอดเงิน", "ยอดชำระ",
       "ที่อยู่", "แพ็กเกจ", "ราคา", "ภาษี", "เงินยืม", "สลิป", "ล็อกอิน", "รหัสผ่าน",
       "เว็บ", "เว็บไซต์", "website", "web",
       "login", "invoice", "receipt", "billing", "address", "tax", "pricing", "password"
@@ -708,11 +708,11 @@ export class CaseResolver {
     const domainClusters = [
       {
         name: "website",
-        terms: ["เว็บ", "เว็บไซต์", "website", "web", "เข้าไม่ได้", "เข้าใช้งานไม่ได้"],
+        terms: ["เว็บ", "เว็บไซต์", "website", "web", "เข้าไม่ได้"],
       },
       {
         name: "login",
-        terms: ["เข้าไม่ได้", "เข้าใช้งานไม่ได้", "เข้าสู่ระบบ", "เข้าระบบ", "ล็อกอิน", "รหัสผ่าน", "login", "password", "sign in", "signin", "auth"],
+        terms: ["เข้าไม่ได้", "เข้าสู่ระบบ", "เข้าระบบ", "ล็อกอิน", "รหัสผ่าน", "login", "password", "sign in", "signin", "auth"],
       },
       {
         name: "tax_invoice",
