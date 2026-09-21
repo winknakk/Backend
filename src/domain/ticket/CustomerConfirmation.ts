@@ -383,8 +383,18 @@ export function detectCancelIntent(text: string, cancelQuestionPending = false):
   const num = raw.match(TICKET_NUMBER_PATTERN);
   const ticketNumber = num ? num[0].toUpperCase() : null;
 
-  if (CONFIRM_CANCEL_RE.test(raw)) return { kind: "CONFIRM_CANCEL", ticketNumber };
-  if (CANCEL_TICKET_PATTERN.test(raw)) return { kind: "CANCEL_REQUEST", ticketNumber };
+  // Whole message first, then each clause — same rule as detectCloseIntent.
+  // This is the path conversation 99961 msg 4016 needed and did not get: the
+  // vocative "แอดมินคะ" defeated the ^…$ anchor, the turn reached the LLM, and
+  // the customer was told at 12:17:16 that the case had been cancelled while
+  // tickets.id=732 stayed untouched until 13:17:35.
+  //
+  // Lost once already, in the 2026-09-21 merge, which kept the close side and
+  // reverted this one. test-customer-intent-phrasing.ts covers all three
+  // phrasings that regressed, so a second silent revert fails the suite.
+  const clauses = splitCommandClauses(raw);
+  if (clauses.some((c) => CONFIRM_CANCEL_RE.test(c))) return { kind: "CONFIRM_CANCEL", ticketNumber };
+  if (clauses.some((c) => CANCEL_TICKET_PATTERN.test(c))) return { kind: "CANCEL_REQUEST", ticketNumber };
 
   if (cancelQuestionPending) {
     if (DECLINE_CANCEL_RE.test(raw)) return { kind: "DECLINE_CANCEL", ticketNumber };

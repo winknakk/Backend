@@ -327,10 +327,15 @@ export class LineCaseContextService {
         const pendingFollowUp = await caseFollowUpService.pending(conv.id);
         if (pendingFollowUp) {
           res = {
+            outcome: "NEW_CASE",
             decision: "NEW_CASE",
             intent: "NEW_CASE",
             type: "NEW_CASE",
+            // A new case routes nowhere and references nothing — the ISSUE-080
+            // contract requires both to be stated, not left undefined.
+            routingTicketId: null,
             ticketId: null,
+            referencedTicketId: null,
             confidence: 0.9,
             evidence: ["FOLLOW_UP_PENDING"],
             reason: `FOLLOW_UP_PENDING: parent ${pendingFollowUp.parentTicketId}`,

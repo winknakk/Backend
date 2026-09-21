@@ -12,10 +12,10 @@ import { CustomerNotificationService } from "./services/CustomerNotificationServ
 const N = "TCK-2026-02482";
 
 // --- 1. Explicit close confirmation (the chip and its typed forms) ---
-assert.deepEqual(detectCloseIntent(`ยืนยันปิดเคส ${N}`), { kind: "CONFIRM_CLOSE", ticketNumber: N });
-assert.deepEqual(detectCloseIntent("ยืนยันปิดเคส"), { kind: "CONFIRM_CLOSE", ticketNumber: null });
-assert.deepEqual(detectCloseIntent("ยืนยันปิดเคสค่ะ"), { kind: "CONFIRM_CLOSE", ticketNumber: null });
-assert.deepEqual(detectCloseIntent(`ยืนยัน ปิดเคส ${N} ครับ`), { kind: "CONFIRM_CLOSE", ticketNumber: N });
+assert.deepEqual(detectCloseIntent(`ยืนยันปิดเคส ${N}`), { kind: "CONFIRM_CLOSE", ticketNumber: N, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent("ยืนยันปิดเคส"), { kind: "CONFIRM_CLOSE", ticketNumber: null, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent("ยืนยันปิดเคสค่ะ"), { kind: "CONFIRM_CLOSE", ticketNumber: null, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent(`ยืนยัน ปิดเคส ${N} ครับ`), { kind: "CONFIRM_CLOSE", ticketNumber: N, isThisCaseRef: false });
 assert.equal(detectCloseIntent("ยืนยัน").kind, "NONE", "a bare ยืนยัน outside the close question is the AI's create confirmation");
 assert.equal(detectCloseIntent("ยืนยัน", true).kind, "CONFIRM_CLOSE", "…but right after the close question it closes");
 assert.equal(detectCloseIntent("ใช่ค่ะ", true).kind, "CONFIRM_CLOSE");
@@ -30,12 +30,12 @@ assert.equal(detectCloseIntent("ขอลองก่อนครับ", true).
 assert.equal(detectCloseIntent("ยกเลิก", false).kind, "NONE", "ยกเลิก outside the question belongs to the AI (cancel create)");
 
 // --- 3. Close requests (menu chip, typed, with or without a number) ---
-assert.deepEqual(detectCloseIntent("ปิดเคส"), { kind: "CLOSE_REQUEST", ticketNumber: null });
-assert.deepEqual(detectCloseIntent("ขอปิดเคสหน่อยค่ะ"), { kind: "CLOSE_REQUEST", ticketNumber: null });
-assert.deepEqual(detectCloseIntent(`ปิดเคส ${N}`), { kind: "CLOSE_REQUEST", ticketNumber: N });
-assert.deepEqual(detectCloseIntent(`รบกวนปิดเคส ${N} ให้หน่อยครับ`), { kind: "CLOSE_REQUEST", ticketNumber: N });
-assert.deepEqual(detectCloseIntent(`ปิดเคสให้หน่อย เคส ${N} นะคะ`), { kind: "CLOSE_REQUEST", ticketNumber: N });
-assert.deepEqual(detectCloseIntent("close ticket"), { kind: "CLOSE_REQUEST", ticketNumber: null });
+assert.deepEqual(detectCloseIntent("ปิดเคส"), { kind: "CLOSE_REQUEST", ticketNumber: null, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent("ขอปิดเคสหน่อยค่ะ"), { kind: "CLOSE_REQUEST", ticketNumber: null, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent(`ปิดเคส ${N}`), { kind: "CLOSE_REQUEST", ticketNumber: N, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent(`รบกวนปิดเคส ${N} ให้หน่อยครับ`), { kind: "CLOSE_REQUEST", ticketNumber: N, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent(`ปิดเคสให้หน่อย เคส ${N} นะคะ`), { kind: "CLOSE_REQUEST", ticketNumber: N, isThisCaseRef: false });
+assert.deepEqual(detectCloseIntent("close ticket"), { kind: "CLOSE_REQUEST", ticketNumber: null, isThisCaseRef: false });
 assert.equal(detectCloseIntent("ปิดเคสไม่ได้ครับ ระบบขึ้น error").kind, "NONE", "a report that mentions closing is not a close request");
 assert.equal(detectCloseIntent("ทำไมเคสยังไม่ปิด").kind, "NONE");
 assert.equal(detectCloseIntent(`${N} ครับ`, true).kind, "CLOSE_REQUEST", "a bare number answers the which-case list");

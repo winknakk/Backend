@@ -13,3 +13,6 @@ scratch/
 
 # SLA cadence console page: personal test tool, not part of the product build
 assets/sla-console/
+
+# Local-only test tree (deleted from the repo 2026-09-21, kept out deliberately)
+test/
