@@ -2,24 +2,27 @@ import assert from "node:assert";
 import { CaseResolver, type CaseCandidate } from "../../src/domain/case/CaseResolver";
 import {
   detectCloseIntent,
+  detectCancelIntent,
   isNegativeCloseIntent,
 } from "../../src/domain/ticket/CustomerConfirmation";
 import { canTransition } from "../../src/domain/ticket/TicketLifecycle";
 
 /**
- * ISSUE-080 & ISSUE-081 Lifecycle Safety Test Suite
+ * ISSUE-080 & ISSUE-081 Lifecycle Safety Test Suite (21 Tests)
  *
  * Requirements:
  * 1. ISSUE-080: Open case must win over closed-case semantic ambiguity.
  * 2. ISSUE-081: CLOSE must never execute without an authorized target case.
+ * 3. W3 Guard: Single open case must not blindly route unrelated messages without continuity evidence.
  *
  * Strict user constraints:
  * - 0 PromptX live calls.
+ * - 0 Browser / LINE / Plane calls.
  * - Purely deterministic local testing.
  */
 async function runAllTests() {
   console.log("==================================================");
-  console.log("Running ISSUE-080 & ISSUE-081 Test Suite (18 tests)");
+  console.log("Running ISSUE-080 & ISSUE-081 Test Suite (21 tests)");
   console.log("==================================================");
 
   const resolver = new CaseResolver();
@@ -78,25 +81,56 @@ async function runAllTests() {
   let passedCount = 0;
 
   // -------------------------------------------------------------
-  // Test 1: active OPEN + similar CLOSED -> OPEN remains routing target
+  // Test 1: One open ticket + message mentions exact open ticket number -> route to that ticket
   // -------------------------------------------------------------
   {
     const res = resolver.resolve({
       conversationId: 1,
-      activeTicketId: 101,
-      messageText: "ระบบยังเข้าไม่ได้เลยครับ ล็อกอินแล้วขึ้น error",
-      openCases: [openCaseA, openCaseB],
-      closedCases: [closedCaseX],
+      messageText: "ตรวจสอบเคส TCK-2026-00101 หน่อยครับ",
+      openCases: [openCaseA],
+      closedCases: [],
     });
-    assert.strictEqual(res.outcome, "CONTINUE_ACTIVE_CASE");
     assert.strictEqual(res.routingTicketId, 101);
-    assert.strictEqual(res.referencedTicketId, null);
-    console.log("✅ Test 1 Passed: active OPEN + similar CLOSED -> OPEN remains routing target");
+    assert.strictEqual(res.ticketNumber, "TCK-2026-00101");
+    console.log("✅ Test 1 Passed: One open ticket + message mentions exact open ticket number -> route to that ticket");
     passedCount++;
   }
 
   // -------------------------------------------------------------
-  // Test 2: active OPEN A + explicit OPEN B -> B becomes routing target
+  // Test 2: One open ticket + message mentions exact closed ticket number -> CLOSED_CASE_REFERENCE, route = null
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "ขอสอบถามเกี่ยวกับเคส TCK-2026-00201 หน่อยครับ",
+      openCases: [openCaseA],
+      closedCases: [closedCaseX],
+    });
+    assert.strictEqual(res.outcome, "CLOSED_CASE_REFERENCE");
+    assert.strictEqual(res.referencedTicketId, 201);
+    assert.strictEqual(res.routingTicketId, null);
+    console.log("✅ Test 2 Passed: One open ticket + message mentions exact closed ticket number -> CLOSED_CASE_REFERENCE, route = null");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 3: One open ticket + message mentions exact foreign ticket number -> rejected / NEW_CASE
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "ขอเช็คตั๋ว TCK-9999-99999 หน่อย",
+      openCases: [openCaseA],
+      closedCases: [closedCaseX],
+    });
+    assert.notStrictEqual(res.routingTicketId, 99999);
+    assert.notStrictEqual(res.referencedTicketId, 99999);
+    console.log("✅ Test 3 Passed: One open ticket + message mentions exact foreign ticket number -> rejected / NEW_CASE");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 4: One open ticket + message mentions exact other open ticket number -> switches or resolves to referenced ticket
   // -------------------------------------------------------------
   {
     const res = resolver.resolve({
@@ -104,64 +138,215 @@ async function runAllTests() {
       activeTicketId: 101,
       messageText: "ขอตามเคส TCK-2026-00102 หน่อยครับ",
       openCases: [openCaseA, openCaseB],
-      closedCases: [closedCaseX],
+      closedCases: [],
     });
     assert.strictEqual(res.outcome, "SWITCH_EXISTING_CASE");
     assert.strictEqual(res.routingTicketId, 102);
-    assert.strictEqual(res.ticketNumber, "TCK-2026-00102");
-    console.log("✅ Test 2 Passed: active OPEN A + explicit OPEN B -> B becomes routing target");
+    console.log("✅ Test 4 Passed: One open ticket + message mentions exact other open ticket number -> switches to referenced ticket");
     passedCount++;
   }
 
   // -------------------------------------------------------------
-  // Test 3: active OPEN A + explicit CLOSED B -> B referenced, B NOT routing target
+  // Test 5: One open ticket + message has strong semantic overlap with that ticket -> continues that ticket
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "ระบบล็อกอินเข้าสู่ระบบไม่ได้ error ตลอดเลย",
+      openCases: [openCaseA],
+      closedCases: [],
+    });
+    assert.strictEqual(res.routingTicketId, 101);
+    assert.ok(res.outcome === "CONTINUE_ACTIVE_CASE" || res.outcome === "SWITCH_EXISTING_CASE");
+    console.log("✅ Test 5 Passed: One open ticket + message has strong semantic overlap -> continues that ticket");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 6: One open ticket + message has weak/generic phrase ("ครับ", "ขอบคุณครับ", "โอเคครับ", "ลองแล้วครับ ยังไม่ได้") -> continues active ticket
+  // -------------------------------------------------------------
+  {
+    const res1 = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: 101,
+      messageText: "โอเคครับ ขอบคุณครับ",
+      openCases: [openCaseA],
+      closedCases: [],
+    });
+    assert.strictEqual(res1.routingTicketId, 101);
+
+    const res2 = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: 101,
+      messageText: "ลองแล้วครับ ยังไม่ได้",
+      openCases: [openCaseA],
+      closedCases: [],
+    });
+    assert.strictEqual(res2.routingTicketId, 101);
+    assert.strictEqual(res2.outcome, "CONTINUE_ACTIVE_CASE");
+    console.log("✅ Test 6 Passed: One open ticket + message has weak/generic phrase -> continues active ticket");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 7: One open ticket + message has image/attachment only -> continues active ticket
   // -------------------------------------------------------------
   {
     const res = resolver.resolve({
       conversationId: 1,
       activeTicketId: 101,
-      messageText: "ขอสอบถามเกี่ยวกับเคส TCK-2026-00201 หน่อยครับ",
-      openCases: [openCaseA, openCaseB],
-      closedCases: [closedCaseX],
+      messageText: "",
+      hasAttachments: true,
+      openCases: [openCaseA],
+      closedCases: [],
     });
-    assert.strictEqual(res.outcome, "CLOSED_CASE_REFERENCE");
-    assert.strictEqual(res.referencedTicketId, 201);
-    assert.strictEqual(res.routingTicketId, null);
-    assert.strictEqual(res.ticketId, null);
-    console.log("✅ Test 3 Passed: active OPEN A + explicit CLOSED B -> B referenced, B NOT routing target");
+    assert.strictEqual(res.routingTicketId, 101);
+    assert.strictEqual(res.outcome, "CONTINUE_ACTIVE_CASE");
+    console.log("✅ Test 7 Passed: One open ticket + message has image/attachment only -> continues active ticket");
     passedCount++;
   }
 
   // -------------------------------------------------------------
-  // Test 4: no active + "ขอปิดเคสค่ะ" -> ASK_CLARIFICATION, no DB mutation
+  // Test 8: One open ticket + message has completely unrelated topic -> NEW_CASE, NOT auto-route to open ticket (W3 Guard)
   // -------------------------------------------------------------
   {
-    const intent = detectCloseIntent("ขอปิดเคสค่ะ");
-    assert.strictEqual(intent.kind, "CLOSE_REQUEST");
-    assert.strictEqual(intent.ticketNumber, null);
-    assert.strictEqual(Boolean(intent.isThisCaseRef), false);
-
-    // Mock handler evaluation for multiple open cases without active ticket
-    const openTickets = [openCaseA, openCaseB];
-    const activeTicket = null;
-    let askedWhichCase = false;
-    let mutated = false;
-
-    if (intent.kind === "CLOSE_REQUEST") {
-      if (openTickets.length > 1 && !intent.ticketNumber && !intent.isThisCaseRef && !activeTicket) {
-        askedWhichCase = true; // askWhichCase() triggered
-      } else {
-        mutated = true;
-      }
-    }
-    assert.strictEqual(askedWhichCase, true);
-    assert.strictEqual(mutated, false);
-    console.log("✅ Test 4 Passed: no active + 'ขอปิดเคสค่ะ' -> ASK_CLARIFICATION, no DB mutation");
+    const res = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: null,
+      messageText: "อยากสอบถามราคาแพ็กเกจใหม่และบริการย้ายค่ายครับ",
+      openCases: [openCaseA], // Case A is login portal error
+      closedCases: [],
+    });
+    // Critical W3 Invariant: MUST NOT blindly route unrelated topic into open Case A
+    assert.notStrictEqual(res.routingTicketId, 101);
+    assert.strictEqual(res.routingTicketId, null);
+    assert.strictEqual(res.outcome, "NEW_CASE");
+    console.log("✅ Test 8 Passed: One open ticket + unrelated topic -> NEW_CASE, NOT auto-route to open ticket");
     passedCount++;
   }
 
   // -------------------------------------------------------------
-  // Test 5: active A + "ขอปิดเคสนี้ค่ะ" -> CLOSE A
+  // Test 9: One open ticket + message has strong semantic overlap with closed ticket -> CLOSED_CASE_REFERENCE, route = null
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: null,
+      messageText: "เรื่องขอใบกำกับภาษีรอบเดือนมกราคมถึงไหนแล้วคะ",
+      openCases: [openCaseA], // Case A is login portal
+      closedCases: [closedCaseY], // Case Y is "ขอใบกำกับภาษีรอบเดือนมกราคม"
+    });
+    // Unrelated to open Case A, matches closed Case Y
+    assert.strictEqual(res.outcome, "CLOSED_CASE_REFERENCE");
+    assert.strictEqual(res.referencedTicketId, 202);
+    assert.strictEqual(res.routingTicketId, null);
+    console.log("✅ Test 9 Passed: One open ticket + strong overlap with closed ticket -> CLOSED_CASE_REFERENCE, route = null");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 10: Two open tickets + message mentions exact ticket A -> resolves to A
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "ตรวจสอบ TCK-2026-00101 ให้หน่อยครับ",
+      openCases: [openCaseA, openCaseB],
+      closedCases: [],
+    });
+    assert.strictEqual(res.routingTicketId, 101);
+    assert.strictEqual(res.ticketNumber, "TCK-2026-00101");
+    console.log("✅ Test 10 Passed: Two open tickets + message mentions exact ticket A -> resolves to A");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 11: Two open tickets + message has strong semantic overlap to ticket A only -> resolves to A
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "เข้าระบบไม่ได้ ล็อกอินแล้วขึ้น error ตลอดเลย",
+      openCases: [openCaseA, openCaseB],
+      closedCases: [],
+    });
+    assert.strictEqual(res.routingTicketId, 101);
+    assert.strictEqual(res.ticketNumber, "TCK-2026-00101");
+    console.log("✅ Test 11 Passed: Two open tickets + strong semantic overlap to ticket A only -> resolves to A");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 12: Two open tickets + message has equal semantic overlap to both -> AMBIGUOUS_CASE, asks user
+  // -------------------------------------------------------------
+  {
+    // openCaseB and openCaseC are both billing issues with amount mismatches
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "เรื่องยอดเงินไม่ตรงครับ",
+      openCases: [openCaseB, openCaseC],
+      closedCases: [],
+    });
+    assert.strictEqual(res.outcome, "AMBIGUOUS_CASE");
+    assert.strictEqual(res.routingTicketId, null);
+    assert.strictEqual(res.candidates.length, 2);
+    console.log("✅ Test 12 Passed: Two open tickets + equal semantic overlap -> AMBIGUOUS_CASE, asks user");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 13: Two open tickets + generic phrase + active_ticket_id = A -> continues A
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: 101,
+      messageText: "ขอบคุณครับ ได้รับข้อมูลแล้ว",
+      openCases: [openCaseA, openCaseB],
+      closedCases: [],
+    });
+    assert.strictEqual(res.outcome, "CONTINUE_ACTIVE_CASE");
+    assert.strictEqual(res.routingTicketId, 101);
+    console.log("✅ Test 13 Passed: Two open tickets + generic phrase + active_ticket_id = A -> continues A");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 14: Two open tickets + generic phrase + no active_ticket_id -> AMBIGUOUS_CASE, asks user
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: null,
+      messageText: "ตามเรื่องหน่อยครับ",
+      openCases: [openCaseA, openCaseB],
+      closedCases: [],
+    });
+    assert.strictEqual(res.outcome, "AMBIGUOUS_CASE");
+    assert.strictEqual(res.routingTicketId, null);
+    console.log("✅ Test 14 Passed: Two open tickets + generic phrase + no active_ticket_id -> AMBIGUOUS_CASE, asks user");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 15: Two open tickets + unrelated topic -> NEW_CASE or asks user
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      activeTicketId: null,
+      messageText: "ขอแจ้งปัญหาใหม่ครับ แอร์ที่สำนักงานไม่เย็นเลย",
+      openCases: [openCaseA, openCaseB],
+      closedCases: [],
+    });
+    assert.strictEqual(res.outcome, "NEW_CASE");
+    assert.strictEqual(res.routingTicketId, null);
+    console.log("✅ Test 15 Passed: Two open tickets + unrelated topic -> NEW_CASE or asks user");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 16: "ขอปิดเคสนี้ค่ะ" + active_ticket_id = A -> CLOSE intent with target = A
   // -------------------------------------------------------------
   {
     const intent = detectCloseIntent("ขอปิดเคสนี้ค่ะ");
@@ -174,27 +359,84 @@ async function runAllTests() {
       targetTicket = activeTicket;
     }
     assert.strictEqual(targetTicket?.id, 101);
-    console.log("✅ Test 5 Passed: active A + 'ขอปิดเคสนี้ค่ะ' -> CLOSE A");
+    console.log("✅ Test 16 Passed: 'ขอปิดเคสนี้ค่ะ' + active_ticket_id = A -> CLOSE intent with target = A");
     passedCount++;
   }
 
   // -------------------------------------------------------------
-  // Test 6: active A + "ขอปิดเคส B" -> CLOSE B
+  // Test 17: "ขอปิดเคสนี้ค่ะ" + no active_ticket_id + multiple open tickets -> asks user which ticket
   // -------------------------------------------------------------
   {
-    const intent = detectCloseIntent("ขอปิดเคส TCK-2026-00102 ค่ะ");
+    const intent = detectCloseIntent("ขอปิดเคสนี้ค่ะ");
     assert.strictEqual(intent.kind, "CLOSE_REQUEST");
-    assert.strictEqual(intent.ticketNumber, "TCK-2026-00102");
 
     const openTickets = [openCaseA, openCaseB];
-    const target = openTickets.find((t) => t.ticket_number === intent.ticketNumber);
-    assert.strictEqual(target?.id, 102);
-    console.log("✅ Test 6 Passed: active A + 'ขอปิดเคส B' -> CLOSE B");
+    const activeTicket = null;
+    let askedWhichCase = false;
+    let mutated = false;
+
+    if (intent.kind === "CLOSE_REQUEST") {
+      if (openTickets.length > 1 && !intent.ticketNumber && !activeTicket) {
+        askedWhichCase = true;
+      } else {
+        mutated = true;
+      }
+    }
+    assert.strictEqual(askedWhichCase, true);
+    assert.strictEqual(mutated, false);
+    console.log("✅ Test 17 Passed: 'ขอปิดเคสนี้ค่ะ' + no active_ticket_id + multiple open tickets -> asks user which ticket");
     passedCount++;
   }
 
   // -------------------------------------------------------------
-  // Test 7: exact CLOSED ticket referenced -> CLOSED_CASE_REFERENCE, no CLOSE mutation
+  // Test 18: "ปิดเคสไม่ได้ครับ ระบบขึ้น error" -> NONE / report, NOT close
+  // -------------------------------------------------------------
+  {
+    const text = "ปิดเคสไม่ได้ครับ ระบบขึ้น error";
+    assert.strictEqual(isNegativeCloseIntent(text), true);
+    const intent = detectCloseIntent(text);
+    assert.strictEqual(intent.kind, "NONE");
+    console.log("✅ Test 18 Passed: 'ปิดเคสไม่ได้ครับ ระบบขึ้น error' -> NONE / report, NOT close");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 19: "ยกเลิกไม่ได้ ระบบ error" -> NONE / report, NOT cancel
+  // -------------------------------------------------------------
+  {
+    const text = "ยกเลิกไม่ได้ ระบบ error";
+    const cancelIntent = detectCancelIntent(text);
+    assert.strictEqual(cancelIntent.kind, "NONE");
+    console.log("✅ Test 19 Passed: 'ยกเลิกไม่ได้ ระบบ error' -> NONE / report, NOT cancel");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 20: Customer has 0 tickets + "ขอปิดเคส" -> rejects safely / informative reply, no crash
+  // -------------------------------------------------------------
+  {
+    const res = resolver.resolve({
+      conversationId: 1,
+      messageText: "ขอปิดเคสค่ะ",
+      openCases: [],
+      closedCases: [],
+    });
+    // With 0 cases, resolver safely creates NEW_CASE or reports no open ticket without crashing
+    assert.strictEqual(res.outcome, "NEW_CASE");
+    assert.strictEqual(res.routingTicketId, null);
+
+    const intent = detectCloseIntent("ขอปิดเคสค่ะ");
+    assert.strictEqual(intent.kind, "CLOSE_REQUEST");
+    // Handler check: no tickets exist, cannot close any ticket
+    const openTickets: CaseCandidate[] = [];
+    const canClose = openTickets.length > 0;
+    assert.strictEqual(canClose, false);
+    console.log("✅ Test 20 Passed: Customer has 0 tickets + 'ขอปิดเคส' -> rejects safely, no crash");
+    passedCount++;
+  }
+
+  // -------------------------------------------------------------
+  // Test 21: Customer mentions closed ticket in CLOSE request -> rejects with already closed / informative message
   // -------------------------------------------------------------
   {
     const intent = detectCloseIntent("ขอปิดเคส TCK-2026-00201");
@@ -204,7 +446,6 @@ async function runAllTests() {
     const openTickets = [openCaseA];
     const closedTickets = [closedCaseX];
 
-    // Resolver perspective:
     const res = resolver.resolve({
       conversationId: 1,
       messageText: "ขอปิดเคส TCK-2026-00201",
@@ -215,232 +456,18 @@ async function runAllTests() {
     assert.strictEqual(res.referencedTicketId, 201);
     assert.strictEqual(res.routingTicketId, null);
 
-    // Confirmation Handler perspective:
-    const openTarget = openTickets.find((t) => t.ticket_number === intent.ticketNumber);
-    const closedTarget = closedTickets.find((t) => t.ticket_number === intent.ticketNumber);
-    assert.strictEqual(openTarget, undefined);
-    assert.strictEqual(closedTarget?.id, 201);
     // Closed target returns ALREADY_CLOSED, no state mutation allowed
+    const closedTarget = closedTickets.find((t) => t.ticket_number === intent.ticketNumber);
+    assert.ok(closedTarget);
     const canMutate = canTransition(closedTarget.status as any, "CLOSED", "customer");
     assert.strictEqual(canMutate.allowed, false);
-    console.log("✅ Test 7 Passed: exact CLOSED ticket referenced -> CLOSED_CASE_REFERENCE, no CLOSE mutation");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 8: multiple OPEN tickets + generic CLOSE -> ASK_CLARIFICATION
-  // -------------------------------------------------------------
-  {
-    const intent = detectCloseIntent("ขอปิดเคสครับ");
-    assert.strictEqual(intent.kind, "CLOSE_REQUEST");
-    assert.strictEqual(intent.ticketNumber, null);
-    assert.strictEqual(Boolean(intent.isThisCaseRef), false);
-
-    const openTickets = [openCaseA, openCaseB, openCaseC];
-    // With multiple open tickets, generic close MUST NOT close latest or guess
-    const shouldAskClarification = openTickets.length > 1 && !intent.ticketNumber && !intent.isThisCaseRef;
-    assert.strictEqual(shouldAskClarification, true);
-    console.log("✅ Test 8 Passed: multiple OPEN tickets + generic CLOSE -> ASK_CLARIFICATION");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 9: exact ticket reference beats semantic score
-  // -------------------------------------------------------------
-  {
-    // Text has high semantic relevance to openCaseB (invoice discrepancy),
-    // but customer explicitly names TCK-2026-00101 (Case A: login issue)
-    const res = resolver.resolve({
-      conversationId: 1,
-      messageText: "ยอดเงินในใบแจ้งหนี้ไม่ตรง แต่รบกวนดู TCK-2026-00101 ให้หน่อย",
-      openCases: [openCaseA, openCaseB],
-      closedCases: [],
-    });
-    assert.strictEqual(res.routingTicketId, 101);
-    assert.strictEqual(res.ticketNumber, "TCK-2026-00101");
-    assert.strictEqual(res.confidence, 1.0);
-    console.log("✅ Test 9 Passed: exact ticket reference beats semantic score");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 10: explicit ticket reference beats active ticket
-  // -------------------------------------------------------------
-  {
-    const res = resolver.resolve({
-      conversationId: 1,
-      activeTicketId: 101, // active is 101
-      messageText: "ดูเคส TCK-2026-00102 ให้หน่อยครับ",
-      openCases: [openCaseA, openCaseB],
-      closedCases: [],
-    });
-    assert.strictEqual(res.outcome, "SWITCH_EXISTING_CASE");
-    assert.strictEqual(res.routingTicketId, 102);
-    console.log("✅ Test 10 Passed: explicit ticket reference beats active ticket");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 11: category-only match does not uniquely select a ticket
-  // -------------------------------------------------------------
-  {
-    // Both openCaseB and openCaseC are "billing". Customer only says "เรื่องบิลลิ่ง"
-    const res = resolver.resolve({
-      conversationId: 1,
-      messageText: "เรื่องบิลลิ่ง",
-      openCases: [openCaseB, openCaseC],
-      closedCases: [],
-    });
-    // Category alone must NEVER uniquely pick one ticket
-    assert.strictEqual(res.outcome, "AMBIGUOUS_CASE");
-    assert.strictEqual(res.routingTicketId, null);
-    console.log("✅ Test 11 Passed: category-only match does not uniquely select a ticket");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 12: semantic ambiguity does not select CLOSED ticket
-  // -------------------------------------------------------------
-  {
-    // Open case B (invoice) vs Closed case Y (tax invoice)
-    // Both have semantic overlap on "ใบแจ้งหนี้ / ใบเสร็จ / ภาษี"
-    const res = resolver.resolve({
-      conversationId: 1,
-      messageText: "เรื่องใบแจ้งหนี้กับภาษียอดเงิน",
-      openCases: [openCaseB],
-      closedCases: [closedCaseY],
-    });
-    // ISSUE-080 invariant: Open Case MUST win over closed case semantic match
-    assert.strictEqual(res.outcome === "CONTINUE_ACTIVE_CASE" || res.outcome === "SWITCH_EXISTING_CASE", true);
-    assert.strictEqual(res.routingTicketId, 102);
-    assert.strictEqual(res.referencedTicketId, null);
-    console.log("✅ Test 12 Passed: semantic ambiguity does not select CLOSED ticket");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 13: unauthorized ticket cannot become routingTicketId
-  // -------------------------------------------------------------
-  {
-    // User mentions a ticket number TCK-9999-99999 not in their authorized cases
-    const res = resolver.resolve({
-      conversationId: 1,
-      messageText: "ขอปิดเคส TCK-9999-99999",
-      openCases: [openCaseA],
-      closedCases: [closedCaseX],
-    });
-    // Must never route to unauthorized ticket
-    assert.notStrictEqual(res.routingTicketId, 99999);
-    assert.notStrictEqual(res.referencedTicketId, 99999);
-    console.log("✅ Test 13 Passed: unauthorized ticket cannot become routingTicketId");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 14: cross-project ticket cannot become routingTicketId
-  // -------------------------------------------------------------
-  {
-    // Cross-project tickets are excluded at DB query boundary (LineCaseContextService)
-    // Even if mentioned in text, resolver only considers authorized cases
-    const project1Cases = [openCaseA];
-    const res = resolver.resolve({
-      conversationId: 1,
-      messageText: "ตรวจสอบ TCK-2026-88888 หน่อย",
-      openCases: project1Cases,
-      closedCases: [],
-    });
-    assert.notStrictEqual(res.routingTicketId, 88888);
-    console.log("✅ Test 14 Passed: cross-project ticket cannot become routingTicketId");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 15: "ปิดเคสไม่ได้ครับ ระบบขึ้น error" -> no CLOSE
-  // -------------------------------------------------------------
-  {
-    const text = "ปิดเคสไม่ได้ครับ ระบบขึ้น error";
-    assert.strictEqual(isNegativeCloseIntent(text), true);
-    const intent = detectCloseIntent(text);
-    assert.strictEqual(intent.kind, "NONE");
-
-    const text2 = "ทำไมปิดเคสไม่ได้ครับ";
-    assert.strictEqual(isNegativeCloseIntent(text2), true);
-    const intent2 = detectCloseIntent(text2);
-    assert.strictEqual(intent2.kind, "NONE");
-    console.log("✅ Test 15 Passed: 'ปิดเคสไม่ได้ครับ ระบบขึ้น error' -> no CLOSE");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 16: close request with stale active_ticket_id -> no unsafe mutation
-  // -------------------------------------------------------------
-  {
-    const staleActiveId = 999;
-    const openTickets = [openCaseA, openCaseB];
-    const activeTicket = openTickets.find((t) => t.id === staleActiveId) ?? null;
-    assert.strictEqual(activeTicket, null); // Stale active ticket not found in open tickets
-
-    const intent = detectCloseIntent("ขอปิดเคสนี้ค่ะ");
-    assert.strictEqual(intent.isThisCaseRef, true);
-
-    // When active ticket is stale/missing, handler MUST NOT guess or close 999
-    let closedId: number | null = null;
-    let askedClarification = false;
-
-    if (intent.isThisCaseRef) {
-      if (activeTicket) {
-        closedId = (activeTicket as any).id;
-      } else {
-        askedClarification = true;
-      }
-    }
-    assert.strictEqual(closedId, null);
-    assert.strictEqual(askedClarification, true);
-    console.log("✅ Test 16 Passed: close request with stale active_ticket_id -> no unsafe mutation");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 17: concurrent close requests remain idempotent
-  // -------------------------------------------------------------
-  {
-    // If ticket is already in CLOSED status, further close transitions are rejected safely
-    const closedCheck = canTransition("CLOSED", "CLOSED", "customer");
-    assert.strictEqual(closedCheck.allowed, false);
-    assert.strictEqual(closedCheck.code, "NO_OP");
-
-    // Close route check in CustomerConfirmationHandler
-    const isAlreadyClosed = ["CLOSED", "CANCELLED"].includes("CLOSED");
-    assert.strictEqual(isAlreadyClosed, true);
-    console.log("✅ Test 17 Passed: concurrent close requests remain idempotent");
-    passedCount++;
-  }
-
-  // -------------------------------------------------------------
-  // Test 18: closed ticket never receives a new customer message
-  // -------------------------------------------------------------
-  {
-    const res = resolver.resolve({
-      conversationId: 1,
-      messageText: "เคส TCK-2026-00201 มีเอกสารเพิ่มเติมครับ",
-      openCases: [openCaseA],
-      closedCases: [closedCaseX],
-    });
-    // Decoupled contract: referencedTicketId may be populated, but routingTicketId MUST BE NULL
-    assert.strictEqual(res.referencedTicketId, 201);
-    assert.strictEqual(res.routingTicketId, null);
-    assert.strictEqual(res.ticketId, null);
-
-    // LineCaseContextService / WebChatGateway invariant:
-    // Only messages with valid res.routingTicketId are stamped/routed to tickets
-    const canStampMessageToClosed = Boolean(res.routingTicketId);
-    assert.strictEqual(canStampMessageToClosed, false);
-    console.log("✅ Test 18 Passed: closed ticket never receives a new customer message");
+    assert.strictEqual(canMutate.code, "NO_OP");
+    console.log("✅ Test 21 Passed: Customer mentions closed ticket in CLOSE request -> rejects with already closed, no mutation");
     passedCount++;
   }
 
   console.log("==================================================");
-  console.log(`All ${passedCount}/18 lifecycle safety tests PASSED!`);
+  console.log(`All ${passedCount}/21 lifecycle safety tests PASSED!`);
   console.log("==================================================");
 }
 

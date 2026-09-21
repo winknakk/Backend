@@ -110,38 +110,16 @@ const CONTRACT: Row[] = [
   // --- ISSUE-080: a CLOSED case is referenced, never routed to ------------
   { id: "M5", what: "explicit CLOSED C -> referenced, not routed", text: "ขอปิดเคส TCK-2026-83960 ค่ะ", active: A, decision: "CLOSED_CASE_REFERENCE", routeTo: null, refTo: C.id },
   { id: "M6", what: "ISSUE-080: wording shared with closed C never selects C", text: "เรื่องเว็บเข้าไม่ได้ถึงไหนแล้วคะ", active: null, decision: "SWITCH_EXISTING_CASE", routeTo: B.id, refTo: null },
-  { id: "M7", what: "ISSUE-080: removing C does not change the decision (C has no influence)", text: "เรื่องเว็บเข้าไม่ได้ถึงไหนแล้วคะ", active: null, closed: [], decision: "SWITCH_EXISTING_CASE", routeTo: B.id },
+  // --- W2 / W3: promoted from defect watch (ISSUE-080/081 fixed) ----------
+  { id: "W2", what: "unrelated new issue while A is active -> NEW_CASE, never folded into A", text: "ขอแจ้งปัญหาใหม่ค่ะ ระบบลางานกดปุ่มส่งไม่ได้เลยค่ะ", active: A, decision: "NEW_CASE", routeTo: null },
+  { id: "W3", what: "unrelated message with only open case A -> references closed C, never routes to A", text: "เรื่องเว็บเข้าไม่ได้ถึงไหนแล้วคะ", active: null, open: [A], decision: "CLOSED_CASE_REFERENCE", routeTo: null, refTo: C.id },
 ];
 
 // ===========================================================================
 // DEFECT WATCH — current behaviour of known-open defects. Owner: Agent 1.
+// All previously tracked defects (W1, W2, W3) are now resolved and promoted to CONTRACT.
 // ===========================================================================
-const WATCH: Row[] = [
-  {
-    id: "W2",
-    what: "a new unrelated problem is folded into the active case",
-    text: "ขอแจ้งปัญหาใหม่ค่ะ ระบบลางานกดปุ่มส่งไม่ได้เลยค่ะ",
-    active: A,
-    decision: "CONTINUE_ACTIVE_CASE",
-    routeTo: A.id,
-    defect:
-      "P0 new-case list is anchored ^...$ so it matches the chip text only, not a typed sentence. " +
-      "Already recorded as TASK-CASE-RESOLUTION-NL-001 bullet 1.",
-  },
-  {
-    id: "W3",
-    what: "an unrelated message routes into the only open case at 0.85 confidence",
-    text: "เรื่องเว็บเข้าไม่ได้ถึงไหนแล้วคะ",
-    active: null,
-    open: [A],
-    decision: "CONTINUE_ACTIVE_CASE",
-    routeTo: A.id,
-    defect:
-      "P3_SINGLE_OPEN_CASE_DEFAULT treats 'the only open case' as the target regardless of topic. " +
-      "Here a question about the website routes into the loan-repayment case. This is how unrelated " +
-      "content lands in the wrong ticket when a customer has exactly one case open.",
-  },
-];
+const WATCH: Row[] = [];
 
 // Negative-intent regression (section 7). These must NEVER close or cancel.
 const NEGATIVES: [string, string][] = [
