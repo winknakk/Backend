@@ -11,6 +11,7 @@
  */
 
 import assert from "node:assert";
+// @ts-ignore
 import WebSocket from "ws";
 import { pool } from "./adapters/postgres/PostgresAdapter";
 import { JwtUtil } from "./shared/jwt";
@@ -87,7 +88,7 @@ async function setupFixture(): Promise<TestContext> {
       role: "customer",
     },
     jwtSecret,
-    { expiresIn: "2h" }
+    7200
   );
 
   // 6. Create Foreign Ticket (different profile)
@@ -174,7 +175,7 @@ function sendWsMessage(token: string, payload: any): Promise<any[]> {
         ws.send(JSON.stringify(payload));
       });
 
-      ws.on("message", (raw) => {
+      ws.on("message", (raw: any) => {
         try {
           const parsed = JSON.parse(raw.toString());
           received.push(parsed);
@@ -207,7 +208,7 @@ function sendWsMessage(token: string, payload: any): Promise<any[]> {
         } catch {}
       });
 
-      ws.on("error", (err) => {
+      ws.on("error", (err: any) => {
         if (settleTimer) clearTimeout(settleTimer);
         clearTimeout(fallbackTimer);
         reject(err);

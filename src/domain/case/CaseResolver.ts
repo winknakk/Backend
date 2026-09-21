@@ -50,14 +50,18 @@ export type CaseResolutionType =
 
 export interface CaseResolutionResult {
   /** Canonical typed decision outcome */
+  outcome: CaseResolutionType;
+  /** Backward-compatible alias for outcome */
   decision: CaseResolutionType;
-  /** Backward-compatible alias for decision */
+  /** Backward-compatible alias for outcome */
   intent: CaseResolutionType;
   type: CaseResolutionType;
-  /** Resolved routing ticket ID (null for NEW_CASE, CLOSED_CASE_REFERENCE, or AMBIGUOUS_CASE) */
+  /** Canonical resolved routing ticket ID (null for NEW_CASE, CLOSED_CASE_REFERENCE, or AMBIGUOUS_CASE) */
+  routingTicketId: number | null;
+  /** Backward-compatible alias for routingTicketId */
   ticketId: number | null;
-  /** Decoupled referenced ticket ID if customer referenced a closed ticket */
-  referencedTicketId?: number | null;
+  /** Decoupled referenced ticket ID if customer referenced a closed ticket (null if none) */
+  referencedTicketId: number | null;
   ticketNumber?: string | null;
   confidence: number;
   candidates?: number[];
@@ -142,6 +146,46 @@ export function hasTopicShiftMarker(text: string): boolean {
 
 export class CaseResolver {
   /**
+   * Helper to construct a typed, deterministic CaseResolutionResult satisfying ISSUE-080 contract.
+   */
+  private createResult(params: {
+    decision: CaseResolutionType;
+    routingTicketId?: number | null;
+    ticketId?: number | null;
+    referencedTicketId?: number | null;
+    ticketNumber?: string | null;
+    confidence: number;
+    candidates?: number[];
+    candidatesDetails?: CaseCandidate[];
+    evidence: string[];
+    reason: string;
+    initialSubject?: string;
+    clarificationPrompt?: string;
+    actions?: Array<{ label: string; value: string; style?: "primary" | "default" }>;
+  }): CaseResolutionResult {
+    const resolvedRouting = params.routingTicketId !== undefined ? params.routingTicketId : (params.ticketId ?? null);
+    const resolvedRef = params.referencedTicketId ?? null;
+    return {
+      outcome: params.decision,
+      decision: params.decision,
+      intent: params.decision,
+      type: params.decision,
+      routingTicketId: resolvedRouting,
+      ticketId: resolvedRouting,
+      referencedTicketId: resolvedRef,
+      ticketNumber: params.ticketNumber ?? null,
+      confidence: params.confidence,
+      candidates: params.candidates,
+      candidatesDetails: params.candidatesDetails,
+      evidence: params.evidence,
+      reason: params.reason,
+      initialSubject: params.initialSubject,
+      clarificationPrompt: params.clarificationPrompt,
+      actions: params.actions,
+    };
+  }
+
+  /**
    * Resolves the customer's intent for the current turn using deterministic P0-P7 priorities.
    */
   resolve(input: CaseResolverInput): CaseResolutionResult {
@@ -158,42 +202,36 @@ export class CaseResolver {
     // ─────────────────────────────────────────────────────────────
     if (!rawText) {
       if (activeCase) {
-        return {
+        return this.createResult({
           decision: "CONTINUE_ACTIVE_CASE",
-          intent: "CONTINUE_ACTIVE_CASE",
-          type: "CONTINUE_ACTIVE_CASE",
           ticketId: activeCase.id,
           ticketNumber: activeCase.ticket_number,
           confidence: 0.98,
           evidence: ["EMPTY_OR_ATTACHMENT_ONLY_WITH_ACTIVE_CASE"],
           reason: hasAttachments ? "ATTACHMENT_ONLY_ACTIVE_CASE" : "EMPTY_TEXT_ACTIVE_CASE",
-        };
+        });
       }
       if (openCases.length === 1) {
-        return {
+        return this.createResult({
           decision: "CONTINUE_ACTIVE_CASE",
-          intent: "CONTINUE_ACTIVE_CASE",
-          type: "CONTINUE_ACTIVE_CASE",
           ticketId: openCases[0].id,
           ticketNumber: openCases[0].ticket_number,
           confidence: 0.95,
           evidence: ["ATTACHMENT_ONLY_SINGLE_OPEN_CASE"],
           reason: "ATTACHMENT_ONLY_SINGLE_OPEN_CASE",
-        };
+        });
       }
       if (openCases.length > 1) {
         return this.buildAmbiguityResult(openCases, "ATTACHMENT_WITHOUT_ACTIVE_TICKET");
       }
-      return {
+      return this.createResult({
         decision: "NEW_CASE",
-        intent: "NEW_CASE",
-        type: "NEW_CASE",
         ticketId: null,
         confidence: 0.75,
         evidence: ["ATTACHMENT_NO_OPEN_CASES"],
         reason: "ATTACHMENT_NO_OPEN_CASES",
         initialSubject: "เอกสารแนบจากลูกค้า",
-      };
+      });
     }
 
     const text = rawText;
@@ -223,16 +261,14 @@ export class CaseResolver {
         subject = text.slice(0, 80);
       }
 
-      return {
+      return this.createResult({
         decision: "NEW_CASE",
-        intent: "NEW_CASE",
-        type: "NEW_CASE",
         ticketId: null,
         confidence: 0.98,
         initialSubject: subject,
         evidence: ["P0_EXPLICIT_NEW_CASE_REQUEST"],
         reason: "EXPLICIT_NEW_CASE_REQUEST",
-      };
+      });
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -263,16 +299,14 @@ export class CaseResolver {
       );
       if (matchedOpen) {
         const isAlreadyActive = activeCase && activeCase.id === matchedOpen.id;
-        return {
+        return this.createResult({
           decision: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          intent: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          type: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
           ticketId: matchedOpen.id,
           ticketNumber: matchedOpen.ticket_number,
           confidence: 1.0,
           evidence: [`P1_EXACT_TICKET_NUMBER_MATCH: ${matchedOpen.ticket_number}`],
           reason: `EXACT_TICKET_NUMBER_MATCH: ${matchedOpen.ticket_number}`,
-        };
+        });
       }
     }
 
@@ -297,16 +331,14 @@ export class CaseResolver {
           .trim()
           .slice(0, 80) || "แจ้งปัญหาใหม่จากลูกค้า";
 
-      return {
+      return this.createResult({
         decision: "NEW_CASE",
-        intent: "NEW_CASE",
-        type: "NEW_CASE",
         ticketId: null,
         confidence: 0.95,
         initialSubject,
         evidence: ["P7_CLEARLY_NEW_ISSUE_STATEMENT"],
         reason: "CLEARLY_NEW_ISSUE_STATEMENT",
-      };
+      });
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -317,16 +349,14 @@ export class CaseResolver {
       if (openCases.length > ordinalIndex) {
         const targetCase = openCases[ordinalIndex];
         const isAlreadyActive = activeCase && activeCase.id === targetCase.id;
-        return {
+        return this.createResult({
           decision: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          intent: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          type: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
           ticketId: targetCase.id,
           ticketNumber: targetCase.ticket_number,
           confidence: 0.96,
           evidence: [`P2_ORDINAL_CASE_INDEX_MATCH: index ${ordinalIndex} -> ${targetCase.ticket_number}`],
           reason: `ORDINAL_CASE_INDEX_MATCH: index ${ordinalIndex} -> ${targetCase.ticket_number}`,
-        };
+        });
       } else if (openCases.length + closedCases.length > ordinalIndex) {
         const closedIdx = ordinalIndex - openCases.length;
         const targetClosed = closedCases[closedIdx];
@@ -340,16 +370,14 @@ export class CaseResolver {
     const slugMatchOpen = openCases.find((c) => this.matchSlug(lowerText, c));
     if (slugMatchOpen) {
       const isAlreadyActive = activeCase && activeCase.id === slugMatchOpen.id;
-      return {
+      return this.createResult({
         decision: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-        intent: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-        type: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
         ticketId: slugMatchOpen.id,
         ticketNumber: slugMatchOpen.ticket_number,
         confidence: 0.95,
         evidence: [`P2_SLUG_MATCH: ${slugMatchOpen.ticket_number}`],
         reason: `SLUG_LEGACY_IDENTIFIER_MATCH: ${slugMatchOpen.ticket_number}`,
-      };
+      });
     }
 
     const slugMatchClosed = closedCases.find((c) => this.matchSlug(lowerText, c));
@@ -363,24 +391,29 @@ export class CaseResolver {
     // ─────────────────────────────────────────────────────────────
     const isShortAffirmative = this.isShortOrAffirmativeMessage(text);
     if (activeCase && isShortAffirmative) {
-      return {
+      return this.createResult({
         decision: "CONTINUE_ACTIVE_CASE",
-        intent: "CONTINUE_ACTIVE_CASE",
-        type: "CONTINUE_ACTIVE_CASE",
         ticketId: activeCase.id,
         ticketNumber: activeCase.ticket_number,
         confidence: 0.94,
         evidence: ["P3_ACTIVE_CASE_SHORT_AFFIRMATIVE"],
         reason: "ACTIVE_CASE_DEFAULT_SHORT_AFFIRMATIVE",
-      };
+      });
     }
 
     // ─────────────────────────────────────────────────────────────
-    // P2 / P5 / P6 — Semantic Matching & Evidence Stacking
+    // P2 / P5 / P6 — Semantic Matching & Evidence Stacking (ISSUE-080)
     // Evaluates subject, title, summary, running_summary, original_problem_statement,
     // and searchable_text across all open and closed cases.
-    // NOTE: issue_category contributes evidence (+0.10) ONLY when other signals corroborate;
-    // it NEVER acts as a unique case identifier.
+    //
+    // Hard Rule (ISSUE-080):
+    // OPEN CASE MUST WIN OVER CLOSED CASE SEMANTIC AMBIGUITY.
+    // The resolver must NOT route customer actions into a CLOSED ticket merely
+    // because the CLOSED ticket has a higher semantic score.
+    //
+    // Distinguish:
+    // referencedTicketId = the case the customer is talking about
+    // routingTicketId    = the case to which the new message/action may legally be applied
     // ─────────────────────────────────────────────────────────────
     // "แล้วเรื่อง X ล่ะ" is a switch signal too (2026-09-18): the customer is
     // turning to another subject, so the active case must not win by default.
@@ -408,46 +441,57 @@ export class CaseResolver {
       };
     });
 
-    const allScores = [...openScores, ...closedScores]
+    const matchingOpen = openScores
       .filter((s) => s.score >= 0.45)
       .sort((a, b) => b.score - a.score);
 
-    if (allScores.length > 0) {
-      const topMatch = allScores[0];
+    const matchingClosed = closedScores
+      .filter((s) => s.score >= 0.45)
+      .sort((a, b) => b.score - a.score);
 
-      // P5: Closed Case Reference
-      if (topMatch.isClosed && topMatch.score >= 0.50) {
-        return this.buildClosedCaseResult(topMatch.candidate, text, openCases, topMatch.evidence);
+    // 1. ISSUE-080: Active Open Case Priority
+    // If activeCase is set and open, and the message continues or matches context without switch intent:
+    // Closed-case semantic similarity must NEVER hijack active open case continuation!
+    if (activeCase && !hasExplicitSwitchWord) {
+      const activeMatch = openScores.find((s) => s.candidate.id === activeCase.id);
+      if (activeMatch && activeMatch.score >= 0.35) {
+        return this.createResult({
+          decision: "CONTINUE_ACTIVE_CASE",
+          ticketId: activeCase.id,
+          ticketNumber: activeCase.ticket_number,
+          confidence: Math.max(0.88, activeMatch.score),
+          evidence: [...activeMatch.evidence, "ISSUE_080_ACTIVE_OPEN_CASE_WINS_OVER_CLOSED_SEMANTICS"],
+          reason: "ACTIVE_OPEN_CASE_CONTINUATION_OVER_CLOSED_SEMANTICS",
+        });
       }
+    }
+
+    // 2. ISSUE-080: Open Case Wins over Closed Case Semantic Ambiguity
+    // When OPEN cases match, they take precedence over closed cases.
+    if (matchingOpen.length > 0) {
+      const topOpen = matchingOpen[0];
 
       // Check for Ambiguity among competing open cases
-      const competingOpen = openScores.filter(
-        (s) => s.score >= 0.45 && s.score >= topMatch.score - 0.15
-      );
+      const competingOpen = matchingOpen.filter((s) => s.score >= topOpen.score - 0.15);
 
-      // Section 4 Hard Rule: If competing cases share the same issue_category
-      // and lack distinctive text evidence, they MUST trigger AMBIGUOUS_CASE.
       if (competingOpen.length > 1) {
         // Active Case Bias: If active case is one of the competitors AND customer
         // message does NOT have explicit switch intent, bias towards continuing active case.
         if (activeCase && !hasExplicitSwitchWord) {
           const activeCompeting = competingOpen.find((c) => c.candidate.id === activeCase.id);
           if (activeCompeting) {
-            return {
+            return this.createResult({
               decision: "CONTINUE_ACTIVE_CASE",
-              intent: "CONTINUE_ACTIVE_CASE",
-              type: "CONTINUE_ACTIVE_CASE",
               ticketId: activeCase.id,
               ticketNumber: activeCase.ticket_number,
               confidence: 0.88,
               evidence: [...activeCompeting.evidence, "ACTIVE_CASE_BIAS_OVER_AMBIGUOUS_MATCH"],
               reason: "ACTIVE_CASE_BIAS_OVER_AMBIGUOUS_MATCH",
-            };
+            });
           }
         }
 
         // Return intent (ขอกลับมา / กลับไป / เรื่องเดิม):
-        // If customer expresses intent to return to a previously discussed case, check conversational history
         const isReturnIntent = /(?:กลับมา|ขอกลับมา|กลับไป|ขอกลับไป|เรื่องเดิม|เคสเดิม)/i.test(text);
         if (isReturnIntent && recentMessages.length > 0) {
           const recentTicketIds = recentMessages
@@ -458,38 +502,57 @@ export class CaseResolver {
           );
           if (recentCompeting.length === 1) {
             const target = recentCompeting[0];
-            return {
+            return this.createResult({
               decision: "SWITCH_EXISTING_CASE",
-              intent: "SWITCH_EXISTING_CASE",
-              type: "SWITCH_EXISTING_CASE",
               ticketId: target.candidate.id,
               ticketNumber: target.candidate.ticket_number,
               confidence: 0.92,
               evidence: [...target.evidence, `RETURN_INTENT_RESOLVED_TO_RECENT_CASE: ${target.candidate.ticket_number}`],
               reason: `RETURN_INTENT_RESOLVED_TO_RECENT_CASE: ${target.candidate.ticket_number}`,
-            };
+            });
           }
         }
 
-        // True Ambiguity: P6 AMBIGUOUS_CASE
+        // True Ambiguity among open cases: P6 AMBIGUOUS_CASE
         const candidates = competingOpen.map((m) => m.candidate);
-        return this.buildAmbiguityResult(candidates, `AMBIGUOUS_EVIDENCE_BETWEEN_${candidates.length}_CASES`);
+        return this.buildAmbiguityResult(candidates, `AMBIGUOUS_EVIDENCE_BETWEEN_${candidates.length}_OPEN_CASES`);
       }
 
-      // P2: Strong Semantic Match on an Open Case
-      if (topMatch.score >= 0.45 && !topMatch.isClosed) {
-        const isAlreadyActive = activeCase && activeCase.id === topMatch.candidate.id;
-        return {
-          decision: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          intent: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          type: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
-          ticketId: topMatch.candidate.id,
-          ticketNumber: topMatch.candidate.ticket_number,
-          confidence: topMatch.score,
-          evidence: topMatch.evidence,
-          reason: `STRONG_CASE_SEMANTIC_MATCH: ${topMatch.candidate.ticket_number}`,
-        };
+      // Strong Semantic Match on a single Open Case: OPEN CASE WINS!
+      const isAlreadyActive = activeCase && activeCase.id === topOpen.candidate.id;
+      return this.createResult({
+        decision: isAlreadyActive ? "CONTINUE_ACTIVE_CASE" : "SWITCH_EXISTING_CASE",
+        ticketId: topOpen.candidate.id,
+        ticketNumber: topOpen.candidate.ticket_number,
+        confidence: topOpen.score,
+        evidence: [...topOpen.evidence, "ISSUE_080_OPEN_CASE_WINS_OVER_CLOSED_SEMANTICS"],
+        reason: `STRONG_OPEN_CASE_SEMANTIC_MATCH: ${topOpen.candidate.ticket_number}`,
+      });
+    }
+
+    // 3. Only Closed Cases Matched (no open cases matched the text):
+    // P5: Closed Case Reference. Decoupled: referencedTicketId = closed.id, routingTicketId = null.
+    if (matchingClosed.length > 0 && matchingClosed[0].score >= 0.45) {
+      // If activeCase is set and message is conversational continuation without switch words,
+      // preserve active open case focus rather than flipping to closed reference.
+      const activeScore = activeCase ? openScores.find((s) => s.candidate.id === activeCase.id)?.score || 0 : 0;
+      if (
+        activeCase &&
+        !hasExplicitSwitchWord &&
+        this.hasContinuityEvidence(text, lowerText, activeCase, activeScore, hasAttachments, topicShift, hasExplicitSwitchWord)
+      ) {
+        return this.createResult({
+          decision: "CONTINUE_ACTIVE_CASE",
+          ticketId: activeCase.id,
+          ticketNumber: activeCase.ticket_number,
+          confidence: 0.88,
+          evidence: ["P3_ACTIVE_CASE_CONTINUATION"],
+          reason: "CONTINUE_ACTIVE_CASE_FOCUS",
+        });
       }
+
+      const topClosed = matchingClosed[0];
+      return this.buildClosedCaseResult(topClosed.candidate, text, openCases, topClosed.evidence);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -507,19 +570,29 @@ export class CaseResolver {
     // ─────────────────────────────────────────────────────────────
     // P3 — Conversational Continuation of ACTIVE CASE
     // If active case is valid and open, and no explicit switch or stronger match was found,
-    // continue the active case (P3).
+    // continue the active case ONLY if continuity evidence exists (ISSUE-080/081).
     // ─────────────────────────────────────────────────────────────
-    if (activeCase) {
-      return {
+    if (
+      activeCase &&
+      !hasExplicitSwitchWord &&
+      this.hasContinuityEvidence(
+        text,
+        lowerText,
+        activeCase,
+        openScores.find((s) => s.candidate.id === activeCase.id)?.score || 0,
+        hasAttachments,
+        topicShift,
+        hasExplicitSwitchWord
+      )
+    ) {
+      return this.createResult({
         decision: "CONTINUE_ACTIVE_CASE",
-        intent: "CONTINUE_ACTIVE_CASE",
-        type: "CONTINUE_ACTIVE_CASE",
         ticketId: activeCase.id,
         ticketNumber: activeCase.ticket_number,
         confidence: 0.88,
         evidence: ["P3_ACTIVE_CASE_CONTINUATION"],
         reason: "CONTINUE_ACTIVE_CASE_FOCUS",
-      };
+      });
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -538,31 +611,63 @@ export class CaseResolver {
         const recentTicketId = Number(lastMsgWithCase.ticket_id);
         const targetRecentCase = openCases.find((c) => c.id === recentTicketId);
         if (targetRecentCase) {
-          return {
+          return this.createResult({
             decision: "SWITCH_EXISTING_CASE",
-            intent: "SWITCH_EXISTING_CASE",
-            type: "SWITCH_EXISTING_CASE",
             ticketId: targetRecentCase.id,
             ticketNumber: targetRecentCase.ticket_number,
             confidence: 0.85,
             evidence: [`P4_RECENT_CONTEXT_CASE: ${targetRecentCase.ticket_number}`],
             reason: `RECENT_CONTEXT_CASE_SWITCH: ${targetRecentCase.ticket_number}`,
-          };
+          });
         }
       }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // P3 / W3 Guard — Single Open Case Resolution
+    // An unrelated message must NOT blindly route into the only open ticket
+    // merely because it is the only one open (ISSUE-080/081 Critical Finding W3).
+    // ─────────────────────────────────────────────────────────────
     if (openCases.length === 1) {
-      return {
-        decision: "CONTINUE_ACTIVE_CASE",
-        intent: "CONTINUE_ACTIVE_CASE",
-        type: "CONTINUE_ACTIVE_CASE",
-        ticketId: openCases[0].id,
-        ticketNumber: openCases[0].ticket_number,
-        confidence: 0.85,
-        evidence: ["P3_SINGLE_OPEN_CASE_DEFAULT"],
-        reason: "SINGLE_OPEN_CASE_DEFAULT",
-      };
+      const singleCase = openCases[0];
+      const singleScore = openScores.find((s) => s.candidate.id === singleCase.id)?.score || 0;
+      const hasCont = this.hasContinuityEvidence(
+        text,
+        lowerText,
+        singleCase,
+        singleScore,
+        hasAttachments,
+        topicShift,
+        hasExplicitSwitchWord
+      );
+
+      if (hasCont) {
+        return this.createResult({
+          decision: "CONTINUE_ACTIVE_CASE",
+          ticketId: singleCase.id,
+          ticketNumber: singleCase.ticket_number,
+          confidence: 0.85,
+          evidence: ["P3_SINGLE_OPEN_CASE_DEFAULT"],
+          reason: "SINGLE_OPEN_CASE_DEFAULT",
+        });
+      }
+
+      // No continuity evidence for the single open case!
+      // Check if a closed case matches:
+      if (matchingClosed.length > 0 && matchingClosed[0].score >= 0.35) {
+        const topClosed = matchingClosed[0];
+        return this.buildClosedCaseResult(topClosed.candidate, text, openCases, topClosed.evidence);
+      }
+
+      // Topic shift or new topic without continuity evidence -> NEW_CASE
+      return this.createResult({
+        decision: "NEW_CASE",
+        ticketId: null,
+        confidence: 0.82,
+        evidence: topicShift ? ["P0_TOPIC_SHIFT_NEW_CASE"] : ["SINGLE_OPEN_CASE_UNRELATED_NEW_CASE"],
+        initialSubject: text.slice(0, 80),
+        reason: topicShift ? "TOPIC_SHIFT_NEW_CASE" : "SINGLE_OPEN_CASE_UNRELATED_NEW_CASE",
+      });
     }
 
     // If multiple open cases exist but no active ticket is set and message has no clear match:
@@ -571,16 +676,14 @@ export class CaseResolver {
     }
 
     // No open cases exist: P7 create a new case
-    return {
+    return this.createResult({
       decision: "NEW_CASE",
-      intent: "NEW_CASE",
-      type: "NEW_CASE",
       ticketId: null,
       confidence: 0.80,
       evidence: ["P7_NO_OPEN_CASES_NEW_CASE_FALLTHROUGH"],
       initialSubject: text.slice(0, 80),
       reason: "NO_OPEN_CASES_NEW_CASE_FALLTHROUGH",
-    };
+    });
   }
 
   /**
@@ -644,6 +747,7 @@ export class CaseResolver {
     const domainTerms = [
       "ใบแจ้งหนี้", "เข้าไม่ได้", "เข้าสู่ระบบ", "ใบเสร็จ", "ยอดเงิน", "ยอดชำระ",
       "ที่อยู่", "แพ็กเกจ", "ราคา", "ภาษี", "เงินยืม", "สลิป", "ล็อกอิน", "รหัสผ่าน",
+      "เว็บ", "เว็บไซต์", "website", "web",
       "login", "invoice", "receipt", "billing", "address", "tax", "pricing", "password"
     ];
     for (const term of domainTerms) {
@@ -655,6 +759,10 @@ export class CaseResolver {
 
     // 4.1 Domain Semantic Concept Clusters (e.g. "เข้าไม่ได้" matches "เข้าสู่ระบบ" / "LOGIN")
     const domainClusters = [
+      {
+        name: "website",
+        terms: ["เว็บ", "เว็บไซต์", "website", "web", "เข้าไม่ได้"],
+      },
       {
         name: "login",
         terms: ["เข้าไม่ได้", "เข้าสู่ระบบ", "เข้าระบบ", "ล็อกอิน", "รหัสผ่าน", "login", "password", "sign in", "signin", "auth"],
@@ -729,11 +837,9 @@ export class CaseResolver {
       });
     }
 
-    return {
+    return this.createResult({
       decision: "CLOSED_CASE_REFERENCE",
-      intent: "CLOSED_CASE_REFERENCE",
-      type: "CLOSED_CASE_REFERENCE",
-      ticketId: null, // Hard Invariant: message must NEVER be attached to closed case
+      ticketId: null, // Hard Invariant: routingTicketId is null
       referencedTicketId: closedCase.id,
       ticketNumber: ticketNum,
       confidence: 0.98,
@@ -743,7 +849,7 @@ export class CaseResolver {
         ? `เคส ${ticketNum} ("${subject}") ถูกยกเลิกไปแล้วค่ะ\n\nระบบไม่สามารถเพิ่มข้อมูลลงในเคสที่ยกเลิกแล้วได้ หากยังต้องการความช่วยเหลือ สามารถเลือกเปิดเคสใหม่ได้ทันทีค่ะ`
         : `เคส ${ticketNum} ("${subject}") ได้รับการปิดเรียบร้อยแล้วค่ะ\n\nระบบไม่สามารถเพิ่มข้อมูลลงในเคสที่ปิดแล้วได้ หากท่านต้องการความช่วยเหลือเพิ่มเติม สามารถเลือกเปิดเคสใหม่ได้ทันทีค่ะ`,
       actions,
-    };
+    });
   }
 
   /**
@@ -759,11 +865,10 @@ export class CaseResolver {
       value: `เปิดเคสใหม่`,
     });
 
-    return {
+    return this.createResult({
       decision: "AMBIGUOUS_CASE",
-      intent: "AMBIGUOUS_CASE",
-      type: "AMBIGUOUS_CASE",
       ticketId: null,
+      referencedTicketId: null,
       confidence: 0.50,
       evidence: [`AMBIGUOUS_BETWEEN_${candidates.length}_CASES`],
       reason,
@@ -771,7 +876,7 @@ export class CaseResolver {
       candidatesDetails: candidates,
       clarificationPrompt: `ได้ค่ะ ตอนนี้มี ${candidates.length} เคสที่กำลังดำเนินการอยู่ ต้องการแจ้งข้อมูลเพิ่มเติมเรื่องไหนคะ?`,
       actions,
-    };
+    });
   }
 
   /**
@@ -779,15 +884,76 @@ export class CaseResolver {
    */
   private isShortOrAffirmativeMessage(text: string): boolean {
     const clean = text.trim();
-    if (clean.length <= 40) {
+    if (clean.length <= 60) {
       if (
-        /^(?:ยังไม่ได้(?:ครับ|ค่ะ|คับ)?|ได้แล้ว(?:ครับ|ค่ะ|คับ)?|โอเค(?:ครับ|ค่ะ)?|ok|yes|no|ใช่(?:ครับ|ค่ะ)?|ไม่ใช่|ขอบคุณ(?:ครับ|ค่ะ)?|เรียบร้อย(?:ครับ|ค่ะ)?|ส่งให้แล้ว(?:ครับ|ค่ะ)?|ตามนั้น(?:ครับ|ค่ะ)?|ครับ|ค่ะ|คับ|แนบรูป(?:ให้แล้ว|ครับ|ค่ะ)?|รูปครับ|รูปค่ะ|ลองแล้ว(?:ครับ|ค่ะ)?|ยังเหมือนเดิม(?:ครับ|ค่ะ)?|กำลังลอง(?:ครับ|ค่ะ)?|ทดสอบแล้ว(?:ครับ|ค่ะ)?|รอก่อน(?:ครับ|ค่ะ)?|ยังเลย(?:ครับ|ค่ะ)?|ยังไม่ได้รับ(?:ครับ|ค่ะ)?|เดี๋ยวลองใหม่(?:ครับ|ค่ะ)?|ได้ครับ|ได้ค่ะ|ยังมีปัญหาอยู่|อันนี้ครับ|อันนี้ค่ะ|นี่ครับ|นี่ค่ะ|ตามนี้ครับ|ตามนี้ค่ะ)$/i.test(
+        /^(?:ยังไม่ได้(?:เลย)?(?:ครับ|ค่ะ|คับ)?|ลองแล้ว(?:ครับ|ค่ะ|คับ)?\s*ยังไม่ได้|ลองทำแล้ว\s*ยังไม่ได้|ทำตามแล้ว\s*ยังไม่ได้|ได้แล้ว(?:ครับ|ค่ะ|คับ)?|โอเค(?:ครับ|ค่ะ)?|ok|yes|no|ใช่(?:ครับ|ค่ะ)?|ไม่ใช่|ขอบคุณ(?:ครับ|ค่ะ)?|เรียบร้อย(?:ครับ|ค่ะ)?|ส่งให้แล้ว(?:ครับ|ค่ะ)?|ตามนั้น(?:ครับ|ค่ะ)?|ครับ|ค่ะ|คับ|แนบรูป(?:ให้แล้ว|ครับ|ค่ะ)?|รูปครับ|รูปค่ะ|ลองแล้ว(?:ครับ|ค่ะ)?|ยังเหมือนเดิม(?:ครับ|ค่ะ)?|เหมือนเดิม(?:ครับ|ค่ะ)?|กำลังลอง(?:ครับ|ค่ะ)?|ทดสอบแล้ว(?:ครับ|ค่ะ)?|รอก่อน(?:ครับ|ค่ะ)?|ยังเลย(?:ครับ|ค่ะ)?|ยังไม่ได้รับ(?:ครับ|ค่ะ)?|เดี๋ยวลองใหม่(?:ครับ|ค่ะ)?|ได้ครับ|ได้ค่ะ|ยังมีปัญหาอยู่|ปัญหายังไม่หาย(?:ครับ|ค่ะ)?|ปัญหาระบบยังไม่หาย(?:ครับ|ค่ะ)?|ยังไม่หาย(?:เลย)?(?:ครับ|ค่ะ)?|ยังทำไม่ได้(?:ครับ|ค่ะ)?|ยังแก้ไม่ได้(?:ครับ|ค่ะ)?|แล้วต้องทำยังไงต่อ(?:ครับ|ค่ะ)?|ต้องทำยังไงต่อ(?:ครับ|ค่ะ)?|ยังไงต่อ(?:ครับ|ค่ะ)?|แล้วยังไงต่อ(?:ครับ|ค่ะ)?|อันนี้ครับ|อันนี้ค่ะ|นี่ครับ|นี่ค่ะ|ตามนี้ครับ|ตามนี้ค่ะ)$/i.test(
           clean
         )
       ) {
         return true;
       }
     }
+    return false;
+  }
+
+  /**
+   * Evaluates if there is credible evidence that the message continues the candidate case.
+   * Eliminates the bug where any message routes to the single open case without evidence.
+   */
+  private hasContinuityEvidence(
+    text: string,
+    lowerText: string,
+    c: CaseCandidate,
+    score: number,
+    hasAttachments: boolean,
+    topicShift: boolean,
+    hasExplicitSwitchWord: boolean
+  ): boolean {
+    // If there is an explicit topic shift or switch away from current topic, it's not a continuation
+    if (topicShift || hasExplicitSwitchWord) {
+      return false;
+    }
+
+    // 0. Explicit reference to the current / active case ("เคสนี้", "เรื่องนี้", "ตั๋วนี้", "อันนี้", "เคสเดิม", "เรื่องเดิม")
+    if (/(?:เคสนี้|เรื่องนี้|ตั๋วนี้|อันนี้|เคสเดิม|เรื่องเดิม)/i.test(text)) {
+      return true;
+    }
+
+    // 1. Short or affirmative continuation (e.g. "ยังไม่ได้เลยค่ะ", "โอเคครับ", "ลองแล้วยังไม่ได้")
+    if (this.isShortOrAffirmativeMessage(text)) {
+      return true;
+    }
+
+    // 2. Attachments without topic shift or explicit switch
+    if (hasAttachments) {
+      return true;
+    }
+
+    // 3. Substantive semantic overlap with the case (score >= 0.25)
+    if (score >= 0.25) {
+      return true;
+    }
+
+    // 4. Progress inquiry on THIS case (generic progress inquiry, or mentioning topic of this case)
+    const isGenericProgressInquiry =
+      /(?:ตามเรื่อง(?:นี้|เดิม)?|สถานะ(?:เป็นอย่างไร|เป็นไง|ถึงไหน)|มีความคืบหน้า(?:ไหม|มั้ย)|(?:คืบหน้า|อัปเดต|ถึงไหน)(?:แล้ว|บ้าง)|มีใครดู(?:ให้)?หรือยัง|ดำเนินการถึงไหน)/i.test(
+        text
+      );
+
+    if (isGenericProgressInquiry) {
+      const named = referencedTopic(lowerText);
+      // If no specific conflicting topic was named ("ตามเรื่องหน่อยค่ะ ถึงไหนแล้ว"), it continues the current case
+      if (!named) {
+        return true;
+      }
+      // If a topic was named, it only continues if the topic matches this case
+      const sub = (c.subject || "").toLowerCase();
+      const sum = (c.summary || "").toLowerCase();
+      if (sub.includes(named) || sum.includes(named)) {
+        return true;
+      }
+    }
+
     return false;
   }
 

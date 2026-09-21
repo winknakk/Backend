@@ -714,6 +714,15 @@ async function bootstrap() {
         const localConvId = resolvedConvId || await memoryService.ensureConversation(resolvedSenderRef, convProjectId, "WebChat");
         serverLogger.info(`[BullMQ Worker] Ensured local conversation (ID: ${localConvId}) for customer: ${resolvedSenderRef} in Project: ${convProjectId}`);
 
+        // SAFEGUARD: Block automated test suites from firing live PromptX / LLM workflows to save credits
+        if (
+          process.env.DISABLE_PROMPTX_WEBHOOK === "true" ||
+          (resolvedSenderRef && (resolvedSenderRef.startsWith("test_") || resolvedSenderRef.startsWith("f6")))
+        ) {
+          serverLogger.info(`[BullMQ Worker] BLOCKED PromptX Flow dispatch for test customer: ${resolvedSenderRef} (Credit Safeguard Active)`);
+          return { text: "Mock response: PromptX dispatch blocked for test run", recipientId: resolvedSenderRef, channel: "WebChat" };
+        }
+
         serverLogger.info(`[BullMQ Worker] Forwarding WebChat message to PromptX Flow: ${webhookUrl}`);
 
         const promptxPayload: any = {

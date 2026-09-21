@@ -7,6 +7,8 @@ import { ConfigLoaderService } from "../services/ConfigLoaderService";
 import { BackupManager } from "../adapters/postgres/BackupManager";
 import { BullMQEventPublisher } from "../infrastructure/queue/BullMQEventPublisher";
 import { TicketInput, ExecutionResult } from "../schemas/validation";
+import { isCommandOnlySubject, COMMAND_ONLY_SUBJECT_ERROR } from "../domain/ticket/TicketSubject";
+import { randomUUID } from "crypto";
 import { DatabaseAdapter } from "../adapters/types";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
 import { mapPlanePriorityToTicketPriority } from "../services/planeWebhookService";
@@ -30,6 +32,20 @@ export class TicketService {
 
   async createTicket(input: TicketInput): Promise<ExecutionResult> {
     try {
+      // A subject that only repeats the customer's trigger ("เปิดเคสใหม่") files
+      // an empty case and syncs it to Plane. Refuse before anything is written;
+      // the agent's job is to ask what the problem is. See TicketSubject.ts for
+      // the runtime evidence (ticket #746, TCK-2026-81490).
+      if (isCommandOnlySubject(input.subject)) {
+        return {
+          success: false,
+          data: null,
+          error: COMMAND_ONLY_SUBJECT_ERROR,
+          source: "validation",
+          executionId: randomUUID(),
+        };
+      }
+
       let projectIdNum = parseInt(input.projectId, 10) || 1;
       const conversationIdNum = parseInt(input.conversationId, 10);
 
