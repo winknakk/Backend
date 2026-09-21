@@ -558,6 +558,28 @@ export class LineProjectOnboardingService {
           replyText: `กลับมาแล้วนะคะ 😊 ตอนนี้บัญชีเชื่อมกับโปรเจกต์ “${ready.project_name}” อยู่ แจ้งเรื่องที่อยากให้ช่วยมาได้เลยค่ะ`,
         };
       }
+      // Menu opened ("เมนู" / "เริ่มใช้งาน"), then the customer typed instead of
+      // tapping a card (2026-09-18, live: the question was answered with the
+      // carousel again, reason choice_required). For an already-linked user
+      // the carousel is a convenience, not a gate: close the menu, keep the
+      // linked project and let the message through. A project code still
+      // takes the code path below; relink commands were handled above.
+      if (input.type === "message" && session?.state === "AWAITING_CHOICE") {
+        const typed = String(input.messageText || "").trim();
+        const possibleCode = LineProjectOnboardingService.normalizeCode(typed);
+        const looksLikeCode = possibleCode.startsWith("TX") && possibleCode.length >= 8;
+        if (typed.length > 0 && !looksLikeCode) {
+          await this.completeSession(client, orgId, input, Number(ready.project_id));
+          return {
+            action: "PASS_TO_AI",
+            state: "COMPLETED",
+            reason: "menu_dismissed_by_message",
+            projectId: Number(ready.project_id),
+            projectName: ready.project_name,
+            conversationId: Number(ready.conversation_id),
+          };
+        }
+      }
       if (input.type === "message" && !ACTIVE_ONBOARDING_STATES.has(String(session?.state || ""))) {
         const shouldRecallCarousel = await this.recordDmActivityAndCheckCarouselRecall(
           client,

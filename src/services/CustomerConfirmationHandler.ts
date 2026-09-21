@@ -414,10 +414,38 @@ export class CustomerConfirmationHandler {
     return { handled: true, reason: "CANCEL_WHICH_CASE" };
   }
 
-  /** Asks "ต้องการยกเลิกเคส … ใช่ไหมคะ". Nothing changes until the confirmation chip. */
-  private async askCancel(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket): Promise<ConfirmationOutcome> {
+  /**
+   * Asks "ต้องการยกเลิกเคส … ใช่ไหมคะ". Nothing changes until the confirmation
+   * chip. The request (and the customer's own reason, when the message carried
+   * one) is recorded as a `CANCEL_REQUESTED` event so the confirm step can
+   * copy it into `cancellation_reason` (2026-09-18).
+   */
+  private async askCancel(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket, reason: string | null = null): Promise<ConfirmationOutcome> {
+    await pool
+      .query(
+        `INSERT INTO ticket_events (ticket_id, event_type, actor, source, correlation_id, payload, created_at)
+         VALUES ($1, 'CANCEL_REQUESTED', 'customer', 'customer_reply', $2, $3, NOW())`,
+        [ticket.id, input.correlationId || null, JSON.stringify({ conversation_id: input.conversationId, reason: reason || null })]
+      )
+      .catch((err) => logger.warn({ ticketId: ticket.id, error: err.message }, "Could not record CANCEL_REQUESTED"));
     await this.notify(input, ticket, "cancel_confirmation_request", this.eventKey(input, `cancel_ask:${ticket.id}`));
     return { handled: true, ticketId: ticket.id, from: ticket.status, to: ticket.status, reason: "CANCEL_QUESTION_ASKED" };
+  }
+
+  /** The reason the customer gave with the most recent cancel request for this case, if any. */
+  private async requestedCancelReason(ticketId: number): Promise<string | null> {
+    try {
+      const { rows } = await pool.query<{ reason: string | null }>(
+        `SELECT payload->>'reason' AS reason FROM ticket_events
+          WHERE ticket_id = $1 AND event_type = 'CANCEL_REQUESTED' AND COALESCE(payload->>'reason', '') <> ''
+          ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [ticketId]
+      );
+      return rows[0]?.reason?.trim() || null;
+    } catch (err: any) {
+      logger.warn({ ticketId, error: err.message }, "Could not read the requested cancel reason");
+      return null;
+    }
   }
 
   /**
@@ -440,10 +468,11 @@ export class CustomerConfirmationHandler {
       logger.warn({ ticketId: ticket.id, from: ticket.status, code: r.code }, "Customer cancel could not be applied");
       return { handled: false, ticketId: ticket.id, from: ticket.status, reason: r.code };
     }
+    const customerReason = await this.requestedCancelReason(ticket.id);
     await pool
       .query(
         `UPDATE tickets SET cancellation_reason = COALESCE(cancellation_reason, $2), updated_at = NOW() WHERE id = $1`,
-        [ticket.id, "Cancelled by the customer (confirmation chip)"]
+        [ticket.id, customerReason ? `ลูกค้าแจ้ง: ${customerReason.slice(0, 500)}` : "Cancelled by the customer (confirmation chip)"]
       )
       .catch((err) => logger.warn({ ticketId: ticket.id, error: err.message }, "Could not record cancellation_reason"));
     await this.notify(input, ticket, "cancelled", r.eventId ? `ticket_event:${r.eventId}` : `ticket:${ticket.id}:cancelled`, { quickReplies: [] });
@@ -562,7 +591,7 @@ export class CustomerConfirmationHandler {
       }
       if (!target) return this.askWhichCaseToCancel(input, tickets);
       if (target.status === "RESOLVED" || target.status === "CUSTOMER_CONFIRMED") return this.askClose(input, target);
-      return this.askCancel(input, target);
+      return this.askCancel(input, target, cancel.reason ?? null);
     }
 
     // 1. "ยืนยันปิดเคส [TCK]" — the only thing that closes.

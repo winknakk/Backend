@@ -3,8 +3,9 @@ import { config } from "../config/env";
 import { createLogger } from "../observability/logger";
 import { caseResolver, type CaseCandidate, type CaseResolutionResult, type CaseResolutionType } from "../domain/case/CaseResolver";
 import { shouldDeferToPendingIntake, type PendingIntakeKind } from "../domain/case/PendingIntake";
-import { customerNotificationService, type NotificationQuickReply } from "./CustomerNotificationService";
+import { customerNotificationService, thaiDateStamp, type NotificationQuickReply } from "./CustomerNotificationService";
 import { conversationFocusService } from "./ConversationFocusService";
+import { caseFollowUpService, parseNewCaseCommand } from "./CaseFollowUpService";
 
 const logger = createLogger("line-case-context");
 
@@ -47,6 +48,34 @@ export interface LineCaseTurnResult {
    * "which part to change?" question). The turn belongs to the AI gate's draft.
    */
   pendingIntake?: PendingIntakeKind | null;
+  /**
+   * Set when the customer tapped [เปิดเคสใหม่จากเรื่องนี้] (2026-09-18, operator
+   * decision B): the turn is forwarded to the AI gate as a ready-made report
+   * built from the closed case, so the summary card appears at once with the
+   * old subject instead of asking the customer to describe the problem again.
+   * The webhook replaces the forwarded message text with this.
+   */
+  forwardText?: string;
+}
+
+/**
+ * Pure: the report the gate receives for a follow-up of a closed case. Names
+ * the case (the gate's `parent_ticket_number` picks it up for the hub) and
+ * carries the old subject + summary so the confirmation card is complete.
+ */
+export function followUpReportText(parent: Pick<CaseCandidate, "ticket_number" | "subject" | "title" | "summary" | "status"> & { closed_at?: Date | string | null }): string {
+  const subject = String(parent.subject || parent.title || "").replace(/\s+/g, " ").trim();
+  const summary = String(parent.summary || "").replace(/\s+/g, " ").trim();
+  const cancelled = String(parent.status || "").toUpperCase() === "CANCELLED";
+  const ended = cancelled ? "ที่ยกเลิกไปแล้ว" : "ที่ปิดไปแล้ว";
+  const lines = [`เปิดเคสใหม่ต่อจากเคส ${parent.ticket_number} ${ended}`];
+  if (subject) lines.push(`เรื่อง: ${subject}`);
+  if (summary && summary !== subject) lines.push(`รายละเอียด: ${summary.length > 600 ? `${summary.slice(0, 600)}…` : summary}`);
+  // "เคสเดิม: TCK-… (ยกเลิกเมื่อ dd/mm/yy เวลา hh:mm น.)" — the flow's confirmation card
+  // (Main AI Core step_prepare_friday_context) prints this line as-is.
+  const when = thaiDateStamp(parent.closed_at ?? null);
+  lines.push(`เคสเดิม: ${parent.ticket_number}${when ? ` (${cancelled ? "ยกเลิกเมื่อ" : "ปิดเมื่อ"} ${when})` : ""}`);
+  return lines.join("\n");
 }
 
 /** LINE quick-reply labels are limited to 20 characters and 13 items. */
@@ -126,8 +155,16 @@ export function ambiguityMessage(candidates: CaseCandidate[]): string {
  * a fresh intake; within the re-open window the "ยังมีปัญหาอยู่ <TCK>" chip
  * routes to the Flow 4 protocol in CustomerConfirmationHandler instead.
  */
-export function closedReferenceChips(ticketNumber: string | null, closedAt: Date | string | null | undefined, reopenDays: number): NotificationQuickReply[] {
-  const chips: NotificationQuickReply[] = [{ label: "เปิดเคสใหม่จากเรื่องนี้", text: "เปิดเคสใหม่" }];
+export function closedReferenceChips(ticketNumber: string | null, closedAt: Date | string | null | undefined, reopenDays: number, status?: string | null): NotificationQuickReply[] {
+  // The tap names the closed case (same text WebChat sends), so the edge can
+  // link the follow-up even if the protection message has scrolled away.
+  const chips: NotificationQuickReply[] = [
+    { label: "เปิดเคสใหม่จากเรื่องนี้", text: ticketNumber ? `เปิดเคสใหม่: ติดตามต่อจาก ${ticketNumber}` : "เปิดเคสใหม่" },
+  ];
+  // A case the customer cancelled is never re-opened from here (operator
+  // decision 2026-09-18): the re-open protocol only takes CLOSED cases, and
+  // the chip used to lead to a misleading "ปิดไปเกิน 7 วัน" answer.
+  if (String(status || "").toUpperCase() === "CANCELLED") return chips;
   const closed = closedAt ? new Date(closedAt) : null;
   const withinWindow = Boolean(ticketNumber && closed && !isNaN(closed.getTime()) && reopenDays > 0 && Date.now() - closed.getTime() <= reopenDays * 86_400_000);
   if (withinWindow) chips.push({ label: "ยังมีปัญหาอยู่", text: `ยังมีปัญหาอยู่ ${ticketNumber}` });
@@ -216,6 +253,54 @@ export class LineCaseContextService {
         if (st === "CLOSED" || st === "CANCELLED") closedCases.push(row);
         else openCases.push(row);
       }
+      // [เปิดเคสใหม่จากเรื่องนี้] / [แจ้งเรื่องใหม่] / a bare "เปิดเคสใหม่" (2026-09-18):
+      // answered here. Forwarded to the gate, the chip text itself became the
+      // filed subject ("เรื่อง: เปิดเคสใหม่", TCK-2026-81490). The closed case the
+      // customer was just told about is remembered so the next report is
+      // linked to it (parent_ticket_id + Plane "Related case").
+      const newCaseCmd = parseNewCaseCommand(text);
+      if (newCaseCmd) {
+        let parent = newCaseCmd.ticketNumber
+          ? closedCases.find((c) => String(c.ticket_number || "").toUpperCase() === newCaseCmd.ticketNumber) ?? null
+          : null;
+        if (!parent) {
+          const refId = await caseFollowUpService.recentClosedReference(conv.id);
+          if (refId) parent = closedCases.find((c) => Number(c.id) === refId) ?? null;
+        }
+        const promptBase = {
+          conversationId: conv.id,
+          projectId: conv.project_id,
+          correlationId: input.correlationId,
+          idempotencyKey: `${input.correlationId || `conv:${conv.id}:${Date.now()}`}:new_case_prompt`,
+          quickReplies: [] as NotificationQuickReply[],
+        };
+        if (parent) {
+          await caseFollowUpService.markRequested(parent.id, conv.id, input.correlationId);
+          if (parent.subject || parent.title) {
+            // Operator decision B (2026-09-18): no questions — the gate gets a
+            // report made from the closed case and shows the summary card at
+            // once; the customer confirms or edits it there.
+            return {
+              handled: false,
+              hint: { intent: "NEW_CASE", ticketId: null, ticketNumber: null, forceNew: openCases.length > 0, confidence: 0.95, reason: `FOLLOW_UP_OF: ${parent.ticket_number}` },
+              reason: `FOLLOW_UP_FORWARDED: ${parent.ticket_number}`,
+              forwardText: followUpReportText(parent),
+            };
+          }
+          // No subject to carry over: ask for the report instead.
+          await customerNotificationService.send({
+            ...promptBase,
+            notificationType: "follow_up_prompt",
+            ticketId: parent.id,
+            ticketNumber: parent.ticket_number,
+            subject: null,
+          });
+          return { handled: true, hint: null, reason: `FOLLOW_UP_PROMPTED: ${parent.ticket_number}` };
+        }
+        await customerNotificationService.send({ ...promptBase, notificationType: "new_case_prompt", ticketId: null, ticketNumber: null });
+        return { handled: true, hint: null, reason: "NEW_CASE_PROMPTED" };
+      }
+
       if (openCases.length === 0 && closedCases.length === 0) return { handled: false, hint: null, reason: "NO_CASES" };
 
       const recentRes = await pool.query<{ id: number; role: string; content: string; ticket_id: number | null }>(
@@ -224,7 +309,7 @@ export class LineCaseContextService {
       );
       const recentMessages = recentRes.rows.reverse();
 
-      const res = caseResolver.resolve({
+      let res = caseResolver.resolve({
         conversationId: conv.id,
         activeTicketId: conv.active_ticket_id ?? null,
         messageText: text,
@@ -232,6 +317,27 @@ export class LineCaseContextService {
         closedCases,
         recentMessages,
       });
+      // A follow-up request is pending (the customer tapped [เปิดเคสใหม่จากเรื่องนี้]
+      // a moment ago): this report is the new case even when its words look
+      // like an open case — or like ANOTHER closed one (live 2026-09-18 15:01:
+      // "ใบเสร็จเล่ม 05 ยังขึ้นชำระแล้วอยู่ค่ะ" matched closed TCK-2026-34776 by a
+      // single domain term and got its protection message). Explicit TCK
+      // references and switch commands still win.
+      if (!/TCK-\d{4}-\d{4,6}/i.test(text) && !isPureSwitchCommand(text) && res.type !== "NEW_CASE") {
+        const pendingFollowUp = await caseFollowUpService.pending(conv.id);
+        if (pendingFollowUp) {
+          res = {
+            decision: "NEW_CASE",
+            intent: "NEW_CASE",
+            type: "NEW_CASE",
+            ticketId: null,
+            confidence: 0.9,
+            evidence: ["FOLLOW_UP_PENDING"],
+            reason: `FOLLOW_UP_PENDING: parent ${pendingFollowUp.parentTicketId}`,
+            initialSubject: text.slice(0, 80),
+          };
+        }
+      }
       const hint = buildCaseHint(res, openCases.length);
       const notifyBase = { conversationId: conv.id, projectId: conv.project_id, correlationId: input.correlationId, idempotencyKey: `${input.correlationId || `conv:${conv.id}:${Date.now()}`}:case_context` };
 
@@ -285,7 +391,7 @@ export class LineCaseContextService {
           ticketId: null,
           ticketNumber: referenced?.ticket_number ?? res.ticketNumber ?? null,
           detail: res.clarificationPrompt || "เคสที่อ้างถึงปิดเรียบร้อยแล้วค่ะ หากยังต้องการความช่วยเหลือ เปิดเคสใหม่ได้เลยนะคะ",
-          quickReplies: closedReferenceChips(referenced?.ticket_number ?? null, referenced?.closed_at ?? null, config.REOPEN_AFTER_CLOSE_DAYS),
+          quickReplies: closedReferenceChips(referenced?.ticket_number ?? null, referenced?.closed_at ?? null, config.REOPEN_AFTER_CLOSE_DAYS, referenced?.status ?? null),
         });
         return { handled: true, hint, resolution: res, reason: "CLOSED_CASE_PROTECTED" };
       }

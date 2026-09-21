@@ -928,6 +928,13 @@ export function registerLineWebhookRoutes(
                 });
                 caseContext = caseTurn.hint;
                 pendingIntake = caseTurn.pendingIntake ?? null;
+                // [เปิดเคสใหม่จากเรื่องนี้] (2026-09-18): the AI gate receives a
+                // report built from the closed case, not the chip text, so the
+                // summary card carries the old subject. The persisted row above
+                // keeps what the customer actually sent.
+                if (caseTurn.forwardText && event?.message) {
+                  event.message.text = caseTurn.forwardText;
+                }
                 logger.info(
                   { webhookEventId, conversationId: decision.conversationId, handled: caseTurn.handled, reason: caseTurn.reason, intent: caseTurn.hint?.intent, ticket: caseTurn.hint?.ticketNumber },
                   "Case context resolved"
