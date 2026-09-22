@@ -1671,7 +1671,8 @@ export default async function WebChatGateway(fastify: FastifyInstance) {
               },
               recipientId: channelRef,
             });
-            edgeReplyText = `สลับมาที่เคส **${validatedTicketNumber}** (${targetCase.subject || "เคสที่เลือก"}) ให้เรียบร้อยแล้วค่ะ มีข้อมูลเพิ่มเติมสามารถแจ้งได้เลยนะคะ`;
+            const displayNum = validatedTicketNumber || (targetCase.id ? `#${targetCase.id}` : "ที่เลือก");
+            edgeReplyText = `สลับมาที่เคส **${displayNum}** (${targetCase.subject || "เคสที่เลือก"}) ให้เรียบร้อยแล้วค่ะ มีข้อมูลเพิ่มเติมสามารถแจ้งได้เลยนะคะ`;
           }
         } else if (caseRes.type === "CLOSED_CASE_REFERENCE") {
           // Hard Invariant: System MUST NOT write message to closed case and MUST NOT implicitly reopen it
