@@ -58,6 +58,16 @@ export interface PlaneReverseSyncSummary {
 }
 
 /**
+ * A Plane version is safe to checkpoint only after the payload was understood
+ * and matched to a TicketX ticket. Checkpointing an unsupported payload makes
+ * the poller skip that remote version forever, even though no transition was
+ * applied and no customer notification was created.
+ */
+export function shouldCheckpointPlaneVersion(result: PlaneWebhookSyncResult): boolean {
+  return result.processed && result.matched;
+}
+
+/**
  * Normalises a Plane state NAME to the vocabulary TicketLifecycle understands.
  *
  * The Excise project (2026-09-07) defines: Backlog, Re-Open (backlog group),
@@ -613,14 +623,28 @@ export class PlaneWebhookService {
 
             if (syncRes.matched) summary.updated += 1;
 
-            // Record the version we just applied, so the next cycle can skip
-            // this item. Written even when nothing matched: the remote
-            // version has still been observed, and re-fetching it changes
-            // nothing.
-            if (remoteUpdatedAt && !Number.isNaN(remoteUpdatedAt.getTime())) {
+            // Checkpoint only a version that was understood and matched. An
+            // unresolved state is retryable: advancing the cursor there would
+            // permanently hide the transition and its customer notification.
+            if (
+              remoteUpdatedAt &&
+              !Number.isNaN(remoteUpdatedAt.getTime()) &&
+              shouldCheckpointPlaneVersion(syncRes)
+            ) {
               await pool.query(
                 `UPDATE tickets SET plane_last_seen_updated_at = $1 WHERE id = $2`,
                 [remoteUpdatedAt.toISOString(), ticket.id]
+              );
+            } else if (!shouldCheckpointPlaneVersion(syncRes)) {
+              summary.failed += 1;
+              logger.warn(
+                {
+                  issueId,
+                  ticketId: ticket.id,
+                  ticketNumber: ticket.ticket_number,
+                  reason: syncRes.reason,
+                },
+                "Plane version was not applied; cursor left unchanged for retry"
               );
             }
           } catch (err: any) {

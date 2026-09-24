@@ -33,6 +33,18 @@ const REJECTION_MARKERS = [
   "ยังไม่หาย",
   "ยังเข้าไม่ได้",
   "ไม่หาย",
+  "ยังไม่ขึ้น",
+  "ไม่ขึ้นให้เลือก",
+  "ยังกดไม่ได้",
+  "ยังส่งไม่ได้",
+  "ยังค้าง",
+  "ยังติด",
+  "ยังเป็นอยู่",
+  "ยังไม่ผ่าน",
+  "ยังไม่เรียบร้อย",
+  "ยังไม่สำเร็จ",
+  "ยังเออเร่อ",
+  "ยัง error",
   "still not",
   "still broken",
   "still failing",
@@ -217,7 +229,7 @@ export type ReopenScope =
  */
 /** Explicit "same problem" wording — the chip, or the customer's own words. */
 export const SAME_ISSUE_PATTERN =
-  /^(?:เป็น)?(?:ปัญหา|อาการ|เรื่อง)เดิม|ปัญหาเดิม|อาการเดิม|เรื่องเดิม|ยังเหมือนเดิม|เหมือนเดิมเลย|error\s*เดิม|same (?:bug|issue|problem|error)/i;
+  /(?:^(?:เป็น)?(?:ปัญหา|อาการ|เรื่อง|อัน|เคส)เดิม|(?:^|\s)(?:ปัญหา|อาการ|เรื่อง|อัน|เคส)เดิม|ยังเหมือนเดิม|เหมือนเดิม(?:เลย|ครับ|ค่ะ)?|error\s*เดิม|same (?:bug|issue|problem|error)|อาการเดิมยังไม่หาย|ยังไม่หาย|ยังเป็นอยู่)/i;
 
 /**
  * SAME and NEW need the customer's own words for it (the chips carry them).
@@ -226,15 +238,11 @@ export const SAME_ISSUE_PATTERN =
  * message that praises the fix while complaining about something else
  * ("อันเดิมใช้ได้แล้ว แต่หน้ารายงานจอขาว") is AMBIGUOUS and is asked the same way.
  */
-export function detectReopenScope(text: string): ReopenScope {
+export function detectReopenScope(text: string, scopePending = false): ReopenScope {
   const raw = String(text || "").replace(/\s+/g, " ").trim();
   const t = normalize(raw);
   if (!t) return "NONE";
-  const hasNew = NEW_ISSUE_PATTERN.test(raw) || /^(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(raw);
-  const hasSame = SAME_ISSUE_PATTERN.test(raw);
-  if (hasNew && !hasSame) return "NEW";
-  if (hasSame && !hasNew) return "SAME";
-  if (hasNew && hasSame) return "AMBIGUOUS";
+
   const hasReject = REJECTION_MARKERS.some((m) => t.includes(normalize(m)));
   // Confirmation words are looked for only outside the rejection phrases:
   // "ไม่ผ่านค่ะ" contains "ผ่านค่ะ" and must not read as praise + complaint.
@@ -242,6 +250,18 @@ export function detectReopenScope(text: string): ReopenScope {
   const hasConfirm = CONFIRMATION_MARKERS.some((m) => tSansReject.includes(normalize(m)));
   if (hasConfirm && hasReject) return "AMBIGUOUS";
   if (hasConfirm && /แต่|ส่วน|ทว่า|ยกเว้น|however|but /i.test(raw)) return "AMBIGUOUS";
+
+  const hasNew = NEW_ISSUE_PATTERN.test(raw) || /^(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(raw);
+  const hasSame = SAME_ISSUE_PATTERN.test(raw);
+  if (hasNew && !hasSame) return "NEW";
+  if (hasSame && !hasNew) return "SAME";
+  if (hasNew && hasSame) return "AMBIGUOUS";
+
+  if (scopePending) {
+    if (hasReject && !hasNew) return "SAME";
+    if (!hasNew && raw.length >= 6) return "SAME";
+  }
+
   return "NONE";
 }
 
@@ -329,7 +349,7 @@ export interface CancelIntent {
   reason?: string | null;
 }
 
-const CANCEL_OBJECT = "(?:the\\s+)?(?:เคส|ตั๋ว|งาน|case|ticket)";
+const CANCEL_OBJECT = "(?:the\\s+)?(?:การเปิดเคส|เปิดเคส|การแจ้งเคส|แจ้งเคส|เคส|ตั๋ว|งาน|case|ticket)";
 
 /**
  * How a Thai customer opens a request to a person: "แอดมินคะ", "พี่แอดมินครับ",
@@ -341,9 +361,17 @@ const VOCATIVE =
 
 const CANCEL_VERB = `(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ|จะ|please\\s+)?\\s*(?:ยกเลิก|cancel)\\s*${CANCEL_OBJECT}(?:\\s*(?:นี้|นั้น|เดิม|ที่แจ้ง(?:ไว้)?))?`;
 
+/**
+ * Negative cancel markers: statements that mention cancelling negatively or as an error/question,
+ * not an actual intent to cancel the ticket.
+ */
+export function isNegativeCancelIntent(text: string): boolean {
+  return /(?:ยกเลิก(?:เคส|ตั๋ว|งาน)?ไม่ได้|ทำไมยกเลิก(?:เคส|ตั๋ว|งาน)?ไม่ได้|ยกเลิก(?:เคส|ตั๋ว|งาน)?ไม่สำเร็จ|error|ขึ้น error|กด(?:ปุ่ม)?ยกเลิก(?:เคส|ตั๋ว|งาน)?ไม่ได้|ยกเลิกตั๋วไม่ได้|ไม่ต้องยกเลิก|อย่า(?:เพิ่ง)?ยกเลิก|ทำไม(?:เคส|ตั๋ว)ถึงถูกยกเลิก)/i.test(text);
+}
+
 /** Whole-message cancel request. Exported so the pre-router can route on the same rule. */
 export const CANCEL_TICKET_PATTERN = new RegExp(
-  `^${VOCATIVE}\\s*${CANCEL_VERB}${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  `^${VOCATIVE}\\s*${CANCEL_VERB}(?:\\s*[^\\n,.:;–-]*?)?${TICKET}${TAIL}${TICKET}${TAIL}$`,
   "i"
 );
 
@@ -366,7 +394,7 @@ const CONFIRM_CANCEL_RE = new RegExp(
 
 /** A refusal to cancel, meaningful only while the cancel question is pending. */
 const DECLINE_CANCEL_RE = new RegExp(
-  `^\\s*(?:ไม่ยกเลิก|ไม่ต้องยกเลิก|ยังไม่ยกเลิก|อย่าเพิ่งยกเลิก|อย่ายกเลิก|ไม่ยกเลิกแล้ว|เก็บไว้ก่อน|ทำต่อ(?:เลย|ได้เลย)?|ไม่ใช่|ไม่|ยังก่อน|เดี๋ยวก่อน|no|nope|keep\\s+it|❌)${TAIL}$`,
+  `^\\s*(?:ไม่ยกเลิก|ไม่ต้องยกเลิก|ยังไม่ยกเลิก|อย่าเพิ่งยกเลิก|อย่ายกเลิก|ไม่ยกเลิกแล้ว|เก็บไว้ก่อน|ทำต่อ(?:เลย|ได้เลย)?|ดำเนินการต่อ|ไม่ใช่|ไม่|ยังก่อน|เดี๋ยวก่อน|no|nope|keep\\s+it|❌)${TAIL}$`,
   "i"
 );
 
@@ -384,18 +412,18 @@ export function detectCancelIntent(text: string, cancelQuestionPending = false):
   const num = raw.match(TICKET_NUMBER_PATTERN);
   const ticketNumber = num ? num[0].toUpperCase() : null;
 
+  if (isNegativeCancelIntent(raw)) {
+    return { kind: "NONE", ticketNumber };
+  }
+
   // Whole message first, then each clause — same rule as detectCloseIntent.
-  // This is the path conversation 99961 msg 4016 needed and did not get: the
-  // vocative "แอดมินคะ" defeated the ^…$ anchor, the turn reached the LLM, and
-  // the customer was told at 12:17:16 that the case had been cancelled while
-  // tickets.id=732 stayed untouched until 13:17:35.
-  //
-  // Lost once already, in the 2026-09-21 merge, which kept the close side and
-  // reverted this one. test-customer-intent-phrasing.ts covers all three
-  // phrasings that regressed, so a second silent revert fails the suite.
   const clauses = splitCommandClauses(raw);
   if (clauses.some((c) => CONFIRM_CANCEL_RE.test(c))) return { kind: "CONFIRM_CANCEL", ticketNumber };
   if (clauses.some((c) => CANCEL_TICKET_PATTERN.test(c))) return { kind: "CANCEL_REQUEST", ticketNumber };
+  if (CANCEL_WITH_REASON_PATTERN.test(raw)) {
+    const m = raw.match(CANCEL_WITH_REASON_PATTERN);
+    return { kind: "CANCEL_REQUEST", ticketNumber: m?.[1]?.toUpperCase() || ticketNumber, reason: m?.[2]?.trim() || null };
+  }
 
   if (cancelQuestionPending) {
     if (DECLINE_CANCEL_RE.test(raw)) return { kind: "DECLINE_CANCEL", ticketNumber };

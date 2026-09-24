@@ -15,6 +15,7 @@ import {
 import { createLogger } from "../../observability/logger";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
 import { resolveLineWebhookPayload, verifyLineSignature } from "../../services/lineWebhookSecurity";
+import { findAccompanyingCustomerText } from "../../services/LineImageTextPairingService";
 import {
   buildLineChoicePrompt,
   buildLineOnboardingCarousel,
@@ -30,17 +31,12 @@ import { LineTypingIndicatorService } from "../../services/LineTypingIndicatorSe
 import { lineCaseContextService, type CaseContextHint } from "../../services/LineCaseContextService";
 import type { PendingIntakeKind } from "../../domain/case/PendingIntake";
 import { lineImageAutoAttachService } from "../../services/LineImageAutoAttachService";
+import { recordBackendActivity } from "./backendConsole";
 
 const logger = createLogger("line-webhook");
 
 /**
  * Shared keep-alive agent for outbound LINE / PromptX calls.
- *
- * Every reply, push and loading-indicator request used to open its own TCP +
- * TLS connection: measured against api.line.me that is ~155 ms of handshake
- * (connect 78 ms, TLS 137 ms, first byte 275 ms) paid again on every single
- * call, and one webhook event can make three of them. Reusing sockets removes
- * that handshake for everything after the first call.
  */
 const lineHttpsAgent = new https.Agent({
   keepAlive: true,
@@ -451,6 +447,21 @@ export function registerLineWebhookRoutes(
             }
 
             await sendLineReply(String(event.replyToken || ""), decision);
+            // "แจ้งปัญหา" menu card (2026-09-24): the customer's next message is a new
+            // report. It is recorded in the notification ledger (not in messages, see
+            // below) so LineCaseContextService files it as a new case instead of
+            // asking "which case?" when several cases are open.
+            if (decision.reason === "report_issue_prompt" && decision.conversationId) {
+              await pool
+                .query(
+                  `INSERT INTO customer_notifications
+                     (conversation_id, project_id, notification_type, idempotency_key, channel, status, body, correlation_id, sent_at)
+                   VALUES ($1, $2, 'report_prompt', $3, 'line', 'sent', $4, $5, NOW())
+                   ON CONFLICT (notification_type, idempotency_key) DO NOTHING`,
+                  [decision.conversationId, decision.projectId ?? null, `${webhookEventId}:report_prompt`, decision.replyText ?? null, webhookEventId]
+                )
+                .catch((err: any) => logger.warn({ error: err.message, webhookEventId }, "Could not record the report-menu prompt"));
+            }
             // The close-menu exchange must reach the AI's conversation history:
             // the gate can only route the customer's follow-up ("TCK-... ครับ")
             // to CLOSE when it can see that the previous assistant turn asked
@@ -602,21 +613,18 @@ export function registerLineWebhookRoutes(
                     // Debounce window (10s): wait in background to see if customer sends accompanying text
                     await new Promise((resolve) => setTimeout(resolve, 10000));
 
-                    // Check if customer sent a text message in the last 30 seconds (before or after the image)
-                    const recentText = await pool.query(
-                      `SELECT id, content, created_at FROM messages
-                        WHERE conversation_id = $1::integer
-                          AND role = 'customer'
-                          AND message_type = 'text'
-                          AND created_at >= NOW() - INTERVAL '30 seconds'
-                        ORDER BY created_at DESC LIMIT 1`,
-                      [convId]
-                    );
+                    // Pair against the image timestamp, not the time this delayed
+                    // lookup happens. The old NOW()-30s predicate ran after a 10s
+                    // wait, so text sent 21-30s before the image was incorrectly
+                    // treated as absent and triggered image_need_context.
+                    const accompanyingText = ingestedMessageId
+                      ? await findAccompanyingCustomerText(pool, Number(convId), ingestedMessageId)
+                      : null;
 
                     // If text accompanied the image in this turn (within 30s), the AI flow handles both together — do not prompt
-                    if (recentText.rows.length > 0) {
+                    if (accompanyingText) {
                       logger.info(
-                        { convId, text: recentText.rows[0].content },
+                        { convId, imageMessageId: ingestedMessageId, text: accompanyingText.content },
                         "Image accompanied by recent customer text within 30 seconds; AI flow handling turn"
                       );
                       return;
@@ -1012,6 +1020,15 @@ export function registerLineWebhookRoutes(
             // produce different wording.
             if (decision.conversationId && webhookEventId && event?.type === "message" && !confirmationHandled) {
               const msgText = String(event?.message?.text || "").trim();
+              if (msgText) {
+                recordBackendActivity({
+                  category: "webhook",
+                  status: "info",
+                  title: `ลูกค้าส่งข้อความ: "${msgText.length > 50 ? msgText.slice(0, 50) + "…" : msgText}"`,
+                  detail: `Conv #${decision.conversationId} · User: ${event?.source?.userId ? String(event.source.userId).slice(-8) : "N/A"}`,
+                  meta: { conversationId: decision.conversationId, incomingText: msgText, userId: event?.source?.userId, webhookEventId },
+                });
+              }
               const tailPattern = "(?:[\\s.,!ๆ555คะครับค่ะคับค้าบคร้าบจ้าจ้ะงับฮะฮับนะน้าอ้วนผมวะอ่ะแอดมินพี่คุณ]*)$";
               const isActionTurn =
                 new RegExp(`^(?:ครับ|ค่ะ|คับ|ค้าบ|คร้าบ|ค่า|ค๊า|ฮับ|ฮะ|งับ|จ้า|จ้ะ|จร้า|อือ|อื้อ|เค|k|ok|yes|yup|yep|sure|confirm|จัดไป|ลุย|ลุยเลย|เอาเลย|ตามนั้น|เปิดเลย|เปิดเคสเลย|จัดการเลย|จัดให้หน่อย|ถูก|ถูกต้อง|ถูกแล้ว|ใช่|ใช่เลย|ใช่แล้ว|ช่าย|โอเค|ได้|ได้เลย|ได้หมด|ยกเลิก|cancel|ไม่เอา|ไม่ต้อง|ไม่แจ้ง|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|หายแล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไร|อย่าเพิ่ง|no|nope|❌|👍|✅)${tailPattern}`, "i").test(msgText) ||
@@ -1041,6 +1058,22 @@ export function registerLineWebhookRoutes(
                   correlationId: webhookEventId,
                 })
                 .then((ackResult: any) => {
+                  const replyText = ackResult?.body || (ackResult?.sent ? "รับเรื่องแล้วนะคะ ขอเวลาสักครู่ค่ะ" : "");
+                  recordBackendActivity({
+                    category: "fast-ack",
+                    status: ackResult?.sent ? "ok" : "info",
+                    title: `Fast Ack (${ackType}) ${ackResult?.sent ? "ส่งตอบกลับแล้ว ⚡" : "ข้าม/ซ้ำ"}`,
+                    detail: replyText ? `"${replyText}"` : `Conv #${decision.conversationId}`,
+                    meta: {
+                      conversationId: decision.conversationId,
+                      ackType,
+                      incomingText: msgText,
+                      replyText,
+                      sent: ackResult?.sent,
+                      userRef: ackUserId,
+                      webhookEventId,
+                    },
+                  });
                   // Phase B of the typing indicator. The ack push just
                   // dismissed the indicator armed at receipt, and the batch
                   // debounce (15 s) plus queue hand-off are silent otherwise.
@@ -1051,12 +1084,19 @@ export function registerLineWebhookRoutes(
                   }
                   return undefined;
                 })
-                .catch((ackErr: any) =>
+                .catch((ackErr: any) => {
+                  recordBackendActivity({
+                    category: "error",
+                    status: "error",
+                    title: `Fast Ack (${ackType}) ล้มเหลว`,
+                    detail: `Conv #${decision.conversationId} · Err: ${ackErr.message}`,
+                    meta: { conversationId: decision.conversationId, webhookEventId, error: ackErr.message },
+                  });
                   logger.error(
                     { error: ackErr.message, webhookEventId },
                     "Failed to send customer acknowledgement"
-                  )
-                );
+                  );
+                });
             }
 
             if (confirmationHandled) {
@@ -1068,6 +1108,13 @@ export function registerLineWebhookRoutes(
             }
 
             if (config.LINE_BATCH_ENABLED && event?.source?.userId) {
+              recordBackendActivity({
+                category: "batch",
+                status: "info",
+                title: "Enqueued to Message Batch",
+                detail: `User: ${String(event.source.userId).slice(-8)} · Conv #${decision.conversationId}`,
+                meta: { userId: event.source.userId, conversationId: decision.conversationId },
+              });
               // Enqueue for debounced batch forwarding.
               // This is synchronous (no await) — webhook returns HTTP 200 to LINE immediately.
               batchingService.enqueue(

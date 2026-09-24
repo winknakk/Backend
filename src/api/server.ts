@@ -41,6 +41,7 @@ import { registerAdminPlaneIntegrationRoutes } from "./routes/adminPlaneIntegrat
 import { registerPortalRoutes } from "./routes/portal";
 import { registerLineWebhookRoutes } from "./routes/lineWebhook";
 import { registerSlaConsoleRoutes } from "./routes/slaConsole";
+import { registerBackendConsoleRoutes } from "./routes/backendConsole";
 import { LineMessageBatchingService } from "../services/LineMessageBatchingService";
 import { AgentSessionQueueService } from "../services/AgentSessionQueueService";
 import { AgentSessionQueueWorker } from "../services/AgentSessionQueueWorker";
@@ -631,6 +632,11 @@ async function bootstrap() {
   // Register the job processor callback
   jobQueue.process(async (job) => {
     if (job.data.channel === "WebChat") {
+      let convProjectId = "1";
+      let convOrgId = "org_default";
+      let resolvedSenderRef = job.data.senderId;
+      let resolvedConvId: string | null = null;
+      let localConvId: any = null;
       try {
         const webhookUrl = `${config.PROMPTX_FLOW_WEBHOOK_URL}/sync`;
 
@@ -643,10 +649,6 @@ async function bootstrap() {
         // the customer's own open WebChat conversation, falling back to the old
         // literals only when nothing resolves, so behaviour is unchanged for
         // anyone who really is in project 1.
-        let convProjectId = "1";
-        let convOrgId = "org_default";
-        let resolvedSenderRef = job.data.senderId;
-        let resolvedConvId: string | null = null;
         try {
           const targetConvIdNum = job.data.conversationId ? parseInt(String(job.data.conversationId), 10) : 0;
           if (targetConvIdNum > 0) {
@@ -719,7 +721,7 @@ async function bootstrap() {
         }
 
         // Ensure local conversation and identity exist first for the stable customer identity
-        const localConvId = resolvedConvId || await memoryService.ensureConversation(resolvedSenderRef, convProjectId, "WebChat");
+        localConvId = resolvedConvId || await memoryService.ensureConversation(resolvedSenderRef, convProjectId, "WebChat");
         serverLogger.info(`[BullMQ Worker] Ensured local conversation (ID: ${localConvId}) for customer: ${resolvedSenderRef} in Project: ${convProjectId}`);
 
         // SAFEGUARD: Block automated test suites from firing live PromptX / LLM workflows to save credits
@@ -915,6 +917,30 @@ async function bootstrap() {
       } catch (err: any) {
         const responseData = err.response?.data;
         serverLogger.error({ error: err.message, responseData }, "[BullMQ Worker] Failed calling PromptX Flow webhook");
+        const isTimeout = err.code === "ECONNABORTED" || String(err.message || "").toLowerCase().includes("timeout");
+        if (isTimeout) {
+          try {
+            const fallbackConvId = resolvedConvId || localConvId;
+            if (fallbackConvId && resolvedSenderRef) {
+              const timeoutPayload = {
+                conversationId: String(fallbackConvId),
+                recipientId: resolvedSenderRef,
+                channel: "WebChat",
+                id: randomUUID(),
+                text: "ขออภัยด้วยนะคะ ขณะนี้ระบบ AI ใช้เวลาประมวลผลนานกว่าปกติ คุณลูกค้าสามารถแตะลองใหม่อีกครั้ง หรือเลือกติดต่อเจ้าหน้าที่ได้เลยค่ะ",
+                role: "ai",
+                sentAt: new Date().toISOString(),
+                actions: [
+                  { label: "🔄 ลองใหม่อีกครั้ง", value: job.data.text },
+                  { label: "👤 ติดต่อเจ้าหน้าที่", value: "ขอคุยกับเจ้าหน้าที่" },
+                ],
+              };
+              await publishOutbound("webchat:outbound", JSON.stringify(timeoutPayload));
+            }
+          } catch (pubErr: any) {
+            serverLogger.warn({ error: pubErr.message }, "[BullMQ Worker] Failed broadcasting timeout fallback to WebChat");
+          }
+        }
         throw err;
       }
     } else {
@@ -3236,11 +3262,11 @@ const agentSessionQueueService = new AgentSessionQueueService(pool);
 const lineTypingIndicatorService = new LineTypingIndicatorService(pool, config.LINE_CHANNEL_ACCESS_TOKEN || "");
 const agentSessionQueueWorker = new AgentSessionQueueWorker(agentSessionQueueService, {
   dmGatewayUrl: config.LINE_DM_GATEWAY_WEBHOOK_URL,
-  leaseDurationMs: 120000,
+  leaseDurationMs: 610000,
   maxAttempts: 2,
   watchdogIntervalMs: 30000,
   typingIndicator: lineTypingIndicatorService,
-  turnCompletionTimeoutMs: 90000,
+  turnCompletionTimeoutMs: 600000,
 });
 const lineMessageBatchingService = new LineMessageBatchingService(
   {
@@ -3261,6 +3287,13 @@ registerLineWebhookRoutes(
 );
 // Standalone SLA cadence console (page under the public media prefix, data under /api/v1/admin/sla/*).
 registerSlaConsoleRoutes(fastify, slaCadenceService);
+// Standalone Backend Operations & Fast Ack Monitor (page under /api/v1/media/backend-console, data under /api/v1/admin/backend-monitor/*).
+registerBackendConsoleRoutes(fastify, {
+  lineMessageBatchingService,
+  agentSessionQueueService,
+  agentSessionQueueWorker,
+  slaCadenceService,
+});
 
 // Flush any in-flight LINE message batches and gracefully stop worker before server closes
 fastify.addHook("onClose", async () => {

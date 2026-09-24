@@ -144,6 +144,32 @@ export function hasTopicShiftMarker(text: string): boolean {
   return TOPIC_SHIFT_MARKER.test(String(text || ""));
 }
 
+/** Wording that describes something broken or wrong in the system. */
+const SYMPTOM_MARKER =
+  /(?:ไม่แสดง|ไม่ขึ้น|ไม่ออก|ไม่ถูกต้อง|ไม่ถูก|ไม่ตรง|ไม่สามารถ|ไม่ได้|ใช้งานไม่ได้|เข้าไม่ได้|หาย|ผิด|เพี้ยน|ค้าง|ล่ม|พัง|error|null|ขึ้น\s*\d{3}\b|\b[45]\d\d\b)/i;
+
+/**
+ * Wording that points back at a case the customer already has: progress,
+ * close / cancel / reopen, "เรื่องที่แจ้งไป", "เคสเดิม", or a problem that is
+ * "still" there. Such a message is about an existing case even when it names
+ * a symptom, so it is asked about, never filed as new.
+ */
+const EXISTING_CASE_MARKER =
+  /(?:ถึงไหน|คืบหน้า|อัปเดต|อัพเดท|สถานะ|ตามเรื่อง|มีใครดู|ปิดเคส|ยกเลิก|เปิดเคส(?:เดิม)?อีกครั้ง|ที่แจ้ง(?:ไป|ไว้)|เคสเดิม|เรื่องเดิม|เคสนี้|เรื่องนี้|ตั๋วนี้|ยัง(?:ไม่)?(?:หาย|ได้|เหมือนเดิม|เป็น(?:อยู่)?|มีปัญหา))/i;
+
+/**
+ * Pure: the message reads as a fresh problem report — it describes a symptom
+ * and does not point back at an existing case or turn to another topic.
+ * Used when several cases are open and none of them matches the report
+ * (operator decision 2026-09-24: file it as a new case instead of asking
+ * "which case?" about a problem that belongs to none of them).
+ */
+export function isFreshProblemReport(text: string): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  return SYMPTOM_MARKER.test(t) && !EXISTING_CASE_MARKER.test(t) && !hasTopicShiftMarker(t);
+}
+
 export class CaseResolver {
   /**
    * Helper to construct a typed, deterministic CaseResolutionResult satisfying ISSUE-080 contract.
@@ -667,6 +693,21 @@ export class CaseResolver {
         evidence: topicShift ? ["P0_TOPIC_SHIFT_NEW_CASE"] : ["SINGLE_OPEN_CASE_UNRELATED_NEW_CASE"],
         initialSubject: text.slice(0, 80),
         reason: topicShift ? "TOPIC_SHIFT_NEW_CASE" : "SINGLE_OPEN_CASE_UNRELATED_NEW_CASE",
+      });
+    }
+
+    // Several open cases and none of them matches a message that reports a
+    // problem: it is a new case (operator decision 2026-09-24). Asking "which
+    // case?" here looped live — conversation 100134 answered the picker three
+    // times for a report that belonged to neither open case.
+    if (openCases.length > 1 && isFreshProblemReport(text)) {
+      return this.createResult({
+        decision: "NEW_CASE",
+        ticketId: null,
+        confidence: 0.8,
+        evidence: ["UNMATCHED_PROBLEM_REPORT_NEW_CASE"],
+        initialSubject: text.slice(0, 80),
+        reason: "UNMATCHED_PROBLEM_REPORT_NEW_CASE",
       });
     }
 

@@ -3,6 +3,7 @@ import { AgentSessionQueueService, QueueItem } from "./AgentSessionQueueService"
 import { createLogger } from "../observability/logger";
 import { tokenForContext } from "../domain/execution/ExecutionContextService";
 import { LineTypingIndicatorService } from "./LineTypingIndicatorService";
+import { customerNotificationService } from "./CustomerNotificationService";
 
 const logger = createLogger("agent-session-worker");
 
@@ -175,6 +176,23 @@ export class AgentSessionQueueWorker {
               ? "[agent-worker] Agent turn reply observed"
               : "[agent-worker] Agent turn reply not observed before timeout; releasing turn"
           );
+
+          if (!waited.replied) {
+            // AD-14: Send fallback message to customer instead of leaving them silent
+            try {
+              await customerNotificationService.send({
+                conversationId,
+                notificationType: "ai_timeout_fallback",
+                idempotencyKey: `timeout:${conversationId}:${queueItemId}`,
+                correlationId: `timeout:${conversationId}:${queueItemId}`,
+              });
+            } catch (notifyErr: any) {
+              logger.warn(
+                { conversationId, error: notifyErr.message },
+                "[agent-worker] Failed sending timeout fallback notification"
+              );
+            }
+          }
         }
 
         // Atomically complete this item and claim the next item if available

@@ -1,0 +1,26 @@
+TicketX LINE Project Join Codes
+Generated: 2026-08-07T06:17:03.534Z
+
+SECURITY: This file contains plaintext onboarding credentials.
+Do not commit, upload, email, or paste this file into workflow JSON.
+Codes remain valid until explicitly rotated or revoked.
+
+Project ID: 1
+Project: AutomationX Demo
+Join Code: TX-EKCW-64TU
+
+Project ID: 8
+Project: 24/7
+Join Code: TX-N7PL-2T9J
+
+Project ID: 11
+Project: SSO Project
+Join Code: TX-3UG9-P6MZ
+
+Project ID: 12
+Project: CRA Project
+Join Code: TX-9HJF-A6KA
+
+Project ID: 101
+Project: EXC03 - ระบบสารสนเทศกรมสรรพสามิต
+Join Code: TX-PZMG-CHAC

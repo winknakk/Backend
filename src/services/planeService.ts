@@ -1062,7 +1062,14 @@ export class PlaneService {
           `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
              FROM message_attachments ma
              JOIN messages m ON m.id = ma.message_id
-            WHERE m.conversation_id = $1::integer
+            WHERE (
+                m.conversation_id = $1::integer
+                OR m.conversation_id IN (
+                  SELECT c.id FROM conversations c
+                   WHERE c.identity_id = (SELECT identity_id FROM conversations WHERE id = $1::integer)
+                     AND c.project_id = (SELECT project_id FROM conversations WHERE id = $1::integer)
+                )
+              )
               AND m.role = 'customer'
               AND m.external_id = $2
               AND ma.attachment_status = 'READY'
@@ -1081,7 +1088,14 @@ export class PlaneService {
           `SELECT ma.id, m.external_id, ma.storage_key, ma.file_name, ma.file_type, ma.file_size
              FROM message_attachments ma
              JOIN messages m ON m.id = ma.message_id
-            WHERE m.conversation_id = $1::integer
+            WHERE (
+                m.conversation_id = $1::integer
+                OR m.conversation_id IN (
+                  SELECT c.id FROM conversations c
+                   WHERE c.identity_id = (SELECT identity_id FROM conversations WHERE id = $1::integer)
+                     AND c.project_id = (SELECT project_id FROM conversations WHERE id = $1::integer)
+                )
+              )
               AND m.role = 'customer'
               AND ma.attachment_status = 'READY'
               AND ma.storage_key IS NOT NULL
