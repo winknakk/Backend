@@ -63,6 +63,8 @@ export type CustomerNotificationType =
   // the report instead of letting the AI file the chip text as the subject.
   | "follow_up_prompt"
   | "new_case_prompt"
+  // The "แจ้งปัญหา" menu card's reply, recorded by lineWebhook (never sent through send()).
+  | "report_prompt"
   // AI timeout fallback (AD-14): informs customer when AI reply takes longer than expected.
   | "ai_timeout_fallback";
 
@@ -734,6 +736,7 @@ export class CustomerNotificationService {
       case "follow_up_prompt":
         return this.fill(CustomerNotificationService.FOLLOW_UP_PROMPT_VARIANTS, seed, ticketNumber, subject);
       case "new_case_prompt":
+      case "report_prompt":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.NEW_CASE_PROMPT_VARIANTS, seed);
       case "ai_timeout_fallback":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.AI_TIMEOUT_FALLBACK_VARIANTS, seed);

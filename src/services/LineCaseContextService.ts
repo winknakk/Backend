@@ -10,6 +10,27 @@ import { caseFollowUpService, parseNewCaseCommand } from "./CaseFollowUpService"
 const logger = createLogger("line-case-context");
 
 /**
+ * Ledger types (`customer_notifications`) that ask the customer for a NEW
+ * problem: [แจ้งเรื่องใหม่] / a bare "เปิดเคสใหม่", the re-open "new issue"
+ * answer, and the "แจ้งปัญหา" menu card (recorded by lineWebhook).
+ */
+export const NEW_CASE_PROMPT_TYPES = ["new_case_prompt", "reopen_new_issue_prompt", "report_prompt"];
+
+/** Receipts that may follow the prompt without ending the new-case window. */
+const NEW_CASE_WINDOW_IGNORED_TYPES = [
+  "acknowledgement",
+  "acknowledgement_action",
+  "acknowledgement_edit",
+  "greeting",
+  "thanks",
+  "image_attached",
+  "image_need_context",
+  "image_auto_attached",
+  "image_auto_attach_pending",
+  "unsupported_file",
+];
+
+/**
  * What the AI gate is told about the case this turn is about. Carried out of
  * band in `payload.ticketx.caseContext`, forwarded by Channel Gateway - LINE
  * as `case_intent` / `case_ticket_number` / `case_force_new`, and consumed by
@@ -342,6 +363,25 @@ export class LineCaseContextService {
             reason: `FOLLOW_UP_PENDING: parent ${pendingFollowUp.parentTicketId}`,
             initialSubject: text.slice(0, 80),
           };
+        } else if (await this.newCaseRequested(conv.id)) {
+          // The bot's last word was "tell me the new problem" — [แจ้งเรื่องใหม่],
+          // a bare "เปิดเคสใหม่", or the "แจ้งปัญหา" menu (2026-09-24). Nothing
+          // remembered that before, so the report that answered it was resolved
+          // from scratch and got the case picker again (conversation 100134
+          // looped three times).
+          res = {
+            outcome: "NEW_CASE",
+            decision: "NEW_CASE",
+            intent: "NEW_CASE",
+            type: "NEW_CASE",
+            routingTicketId: null,
+            ticketId: null,
+            referencedTicketId: null,
+            confidence: 0.9,
+            evidence: ["NEW_CASE_REQUESTED"],
+            reason: "NEW_CASE_REQUESTED",
+            initialSubject: text.slice(0, 80),
+          };
         }
       }
       const hint = buildCaseHint(res, openCases.length);
@@ -421,6 +461,47 @@ export class LineCaseContextService {
     } catch (err: any) {
       logger.error({ error: err.message, conversationId: input.conversationId }, "Case context resolution failed; turn continues without a hint");
       return { handled: false, hint: null, reason: "ERROR" };
+    }
+  }
+
+  /**
+   * True when the last thing the bot told this conversation (acknowledgements
+   * and image receipts aside) was a request for a NEW problem, within the last
+   * two hours, and no real AI reply has come since. The customer's next report
+   * answers that request, so it is a new case.
+   */
+  private async newCaseRequested(conversationId: number): Promise<boolean> {
+    try {
+      const { rows } = await pool.query<{ notification_type: string }>(
+        `SELECT n.notification_type
+           FROM customer_notifications n
+          WHERE n.conversation_id = $1::integer
+            AND n.notification_type <> ALL($2::text[])
+          ORDER BY n.created_at DESC, n.id DESC
+          LIMIT 1`,
+        [conversationId, NEW_CASE_WINDOW_IGNORED_TYPES]
+      );
+      if (!rows[0] || !NEW_CASE_PROMPT_TYPES.includes(rows[0].notification_type)) return false;
+      const open = await pool.query(
+        `SELECT 1
+           FROM customer_notifications n
+          WHERE n.conversation_id = $1::integer
+            AND n.notification_type = ANY($2::text[])
+            AND n.created_at >= NOW() - INTERVAL '2 hours'
+            AND NOT EXISTS (
+              SELECT 1 FROM messages m
+               WHERE m.conversation_id = n.conversation_id
+                 AND LOWER(m.role) IN ('ai', 'assistant')
+                 AND COALESCE(m.message_purpose, '') <> 'notification'
+                 AND m.created_at > n.created_at)
+          ORDER BY n.created_at DESC, n.id DESC
+          LIMIT 1`,
+        [conversationId, NEW_CASE_PROMPT_TYPES]
+      );
+      return open.rows.length > 0;
+    } catch (err: any) {
+      logger.warn({ conversationId, error: err.message }, "Could not read the new-case request; resolving normally");
+      return false;
     }
   }
 

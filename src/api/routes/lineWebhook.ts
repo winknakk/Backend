@@ -447,6 +447,21 @@ export function registerLineWebhookRoutes(
             }
 
             await sendLineReply(String(event.replyToken || ""), decision);
+            // "แจ้งปัญหา" menu card (2026-09-24): the customer's next message is a new
+            // report. It is recorded in the notification ledger (not in messages, see
+            // below) so LineCaseContextService files it as a new case instead of
+            // asking "which case?" when several cases are open.
+            if (decision.reason === "report_issue_prompt" && decision.conversationId) {
+              await pool
+                .query(
+                  `INSERT INTO customer_notifications
+                     (conversation_id, project_id, notification_type, idempotency_key, channel, status, body, correlation_id, sent_at)
+                   VALUES ($1, $2, 'report_prompt', $3, 'line', 'sent', $4, $5, NOW())
+                   ON CONFLICT (notification_type, idempotency_key) DO NOTHING`,
+                  [decision.conversationId, decision.projectId ?? null, `${webhookEventId}:report_prompt`, decision.replyText ?? null, webhookEventId]
+                )
+                .catch((err: any) => logger.warn({ error: err.message, webhookEventId }, "Could not record the report-menu prompt"));
+            }
             // The close-menu exchange must reach the AI's conversation history:
             // the gate can only route the customer's follow-up ("TCK-... ครับ")
             // to CLOSE when it can see that the previous assistant turn asked
