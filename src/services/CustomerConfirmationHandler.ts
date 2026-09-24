@@ -8,6 +8,8 @@ import {
   detectReopenScope,
   detectReopenConfirmation,
   TICKET_NUMBER_PATTERN,
+  NEW_ISSUE_PATTERN,
+  SAME_ISSUE_PATTERN,
 } from "../domain/ticket/CustomerConfirmation";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import { isPendingCreatePrompt } from "../domain/case/PendingIntake";
@@ -159,7 +161,7 @@ export class CustomerConfirmationHandler {
     const m = content.match(TICKET_NUMBER_PATTERN);
     const num = m ? m[0].toUpperCase() : null;
     if (/ยกเลิกเคสไหน/.test(content)) return { kind: "cancel_which_case", ticketNumber: null };
-    if (/ต้องการยกเลิกเคส|ยืนยันยกเลิกเคส|ยกเลิกเคส[^\n]{0,80}ใช่ไหม/.test(content)) return { kind: "cancel", ticketNumber: num };
+    if (/ต้องการยกเลิกเคส|ยืนยันยกเลิกเคส|ยกเลิกเคส[^\n]{0,80}ใช่ไหม|ระบบตรวจพบคำขอยกเลิกเคส/.test(content)) return { kind: "cancel", ticketNumber: num };
     if (/แตะเลือกข้างล่างนี้|แตะเลือกได้เลย/.test(content)) return { kind: "which_case", ticketNumber: null };
     if (/(?:ปัญหาเดิม|อาการเดิม)[^\n]{0,80}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
     if (/ยืนยันเปิดเคสอีกครั้ง|เปิดเคส[^\n]{0,80}อีกครั้งใช่ไหม/.test(content)) return { kind: "reopen", ticketNumber: num };
@@ -486,7 +488,7 @@ export class CustomerConfirmationHandler {
   private feedbackFrom(text: string): string | null {
     const stripped = String(text || "")
       .replace(TICKET_NUMBER_PATTERN, "")
-      .replace(/ยังมีปัญหาอยู่|อาการเดิมยังไม่หาย|(?:เป็น)?(?:ปัญหา|เรื่อง|อัน)เดิม|อาการเดิม|ยังมีปัญหา|ยังไม่หาย|ครับ|ค่ะ|คับ|นะคะ|นะครับ/g, "")
+      .replace(/ยังมีปัญหาอยู่|อาการเดิมยังไม่หาย|(?:เป็น)?(?:ปัญหา|เรื่อง|อาการ|อัน|เคส)เดิม|อาการเดิม|ยังมีปัญหา|ยังไม่หาย|ครับ|ค่ะ|คับ|นะคะ|นะครับ/g, "")
       .replace(/\s+/g, " ")
       .trim();
     return stripped.length >= 6 ? String(text).trim() : null;
@@ -581,6 +583,13 @@ export class CustomerConfirmationHandler {
         return { handled: true, reason: "NO_OPEN_CASE" };
       }
       let target = byNumber(cancel.ticketNumber) ?? (!cancel.ticketNumber && tickets.length === 1 ? tickets[0] : null);
+      if (!target && !cancel.ticketNumber && activeTicket) {
+        const matchBySubject = tickets.find((t) => {
+          const sub = String(t.subject || "").trim().toLowerCase();
+          return sub && text.toLowerCase().includes(sub);
+        });
+        target = matchBySubject ?? activeTicket;
+      }
       if (!target && cancel.ticketNumber) {
         const old = await this.loadClosedByNumber(input.conversationId, cancel.ticketNumber);
         if (old) {
@@ -699,7 +708,7 @@ export class CustomerConfirmationHandler {
       return this.askWhichCase(input, tickets);
     }
 
-    const scope = detectReopenScope(text);
+    const scope = detectReopenScope(text, pending?.kind === "scope");
     const intent = detectConfirmationIntent(text);
 
     // 4. Feedback right after a re-open: goes to the engineer, not to the AI.
@@ -792,11 +801,27 @@ export class CustomerConfirmationHandler {
       target = awaiting[0];
     }
 
-    // While the "ปัญหาเดิมหรือปัญหาใหม่" question is pending, a one-word answer counts.
+    // While the "ปัญหาเดิมหรือปัญหาใหม่" question is pending, resolve natural phrasing.
     let effectiveScope = scope;
-    if (pending?.kind === "scope" && scope === "NONE") {
-      if (/^\s*(?:เป็น)?(?:ปัญหา|เรื่อง|อาการ|อัน)?\s*เดิม/.test(text)) effectiveScope = "SAME";
-      else if (/^\s*(?:เป็น)?(?:ปัญหา|เรื่อง)?\s*ใหม่/.test(text)) effectiveScope = "NEW";
+    if (pending?.kind === "scope") {
+      if (effectiveScope === "NONE" || effectiveScope === "AMBIGUOUS") {
+        const hasNew = NEW_ISSUE_PATTERN.test(text) || /(?:^|\s)(?:เป็น)?(?:ปัญหา|เรื่อง|เคส)?\s*ใหม่/i.test(text);
+        const hasSame =
+          SAME_ISSUE_PATTERN.test(text) ||
+          /(?:^|\s)(?:เป็น)?(?:ปัญหา|เรื่อง|อาการ|อัน|เคส)?\s*เดิม/i.test(text) ||
+          intent === "REJECTED";
+        if (hasNew && !hasSame) {
+          effectiveScope = "NEW";
+        } else if (hasSame && !hasNew) {
+          effectiveScope = "SAME";
+        } else if (!hasNew && text.trim().length >= 6) {
+          // Customer answered the scope question by describing the failure/symptoms
+          // (e.g. "ตรวจสอบที่ Production แล้ว ระดับการศึกษา ปวส. ยังไม่ขึ้นให้เลือกเลยค่ะ").
+          // When answering "ปัญหาเดิมหรือปัญหาใหม่" with symptoms and without new-issue markers,
+          // treat as SAME issue to avoid asking twice (AD-08).
+          effectiveScope = "SAME";
+        }
+      }
     }
 
     if (effectiveScope === "NEW") {
@@ -815,9 +840,10 @@ export class CustomerConfirmationHandler {
     if (effectiveScope === "SAME") {
       return this.reopenTicket(input, target, this.feedbackFrom(text));
     }
-    if (effectiveScope === "AMBIGUOUS" || intent === "REJECTED") {
+    if (effectiveScope === "AMBIGUOUS" || (intent === "REJECTED" && pending?.kind !== "scope")) {
       // Same problem or a new one? Two chips decide (operator decision
       // 2026-09-08: always ask; the chip "ยังมีปัญหาอยู่" lands here).
+      // Only ask on the initial report, never repeatedly if already pending.
       await this.notify(input, target, "reopen_which_kind", this.eventKey(input, "which_kind"));
       return { handled: true, ticketId: target.id, reason: "REOPEN_SCOPE_ASKED" };
     }

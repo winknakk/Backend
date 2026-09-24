@@ -62,7 +62,9 @@ export type CustomerNotificationType =
   // The [เปิดเคสใหม่จากเรื่องนี้] chip / a bare "เปิดเคสใหม่" (2026-09-18): ask for
   // the report instead of letting the AI file the chip text as the subject.
   | "follow_up_prompt"
-  | "new_case_prompt";
+  | "new_case_prompt"
+  // AI timeout fallback (AD-14): informs customer when AI reply takes longer than expected.
+  | "ai_timeout_fallback";
 
 /**
  * Facts the case card is built from. Loaded from `tickets` by ticket id when
@@ -261,6 +263,15 @@ export class CustomerNotificationService {
   ] as const;
 
   /**
+   * AI timeout fallback (AD-14): informs customer when AI reply takes longer than expected,
+   * with action chips to track status or request human assistance without duplicating tickets.
+   */
+  private static readonly AI_TIMEOUT_FALLBACK_VARIANTS = [
+    "ขออภัยด้วยนะคะ ขณะนี้ระบบ AI ใช้เวลาประมวลผลนานกว่าปกติ คุณลูกค้าสามารถแตะตรวจสอบสถานะ หรือเลือกติดต่อเจ้าหน้าที่ได้เลยค่ะ",
+    "ขออภัยในความล่าช้านะคะ ขณะนี้ระบบกำลังเร่งประมวลผลข้อมูล สามารถแตะปุ่มด้านล่างเพื่อตรวจสอบสถานะเคสได้เลยนะคะ",
+  ] as const;
+
+  /**
    * Case card (operator decision 2026-09-10). Every status message the
    * customer receives has the same shape, so it is recognised at a glance:
    *
@@ -433,6 +444,7 @@ export class CustomerNotificationService {
 
   /** "ยกเลิกเคส" received: confirm before anything changes. */
   private static readonly CANCEL_QUESTION_VARIANTS = [
+    "ระบบตรวจพบคำขอยกเลิกเคส {ticket}{about}\nเพื่อความถูกต้อง ต้องการยืนยันการยกเลิกเคสนี้ใช่ไหมคะ",
     "ต้องการยกเลิกเคส {ticket}{about} ใช่ไหมคะ ถ้าใช่แตะ 'ยืนยันยกเลิกเคส' ข้างล่างนี้ได้เลยค่ะ ถ้ายังอยากให้ทีมงานดูต่อ แตะ 'ไม่ยกเลิก' นะคะ",
     "รับทราบค่ะ ขอเช็คอีกครั้งนะคะ จะยกเลิกเคส {ticket}{about} เลยใช่ไหมคะ แตะ 'ยืนยันยกเลิกเคส' ได้เลยค่ะ หรือแตะ 'ไม่ยกเลิก' ถ้าเปลี่ยนใจนะคะ",
     "โอเคค่ะ ก่อนยกเลิกเคส {ticket}{about} แอดมินขอให้ยืนยันอีกครั้งนะคะ แตะ 'ยืนยันยกเลิกเคส' ข้างล่างนี้ได้เลยค่ะ",
@@ -529,6 +541,28 @@ export class CustomerNotificationService {
   private static subjectLine(subject?: string | null): string {
     const raw = String(subject || "").replace(/\s+/g, " ").trim();
     return raw.length > 1000 ? `${raw.slice(0, 1000)}…` : raw;
+  }
+
+  /**
+   * Pure rendering of notification text for previewing, formatting, or testing
+   * without hitting database or sending real messages.
+   */
+  static renderContent(options: {
+    notificationType: CustomerNotificationType;
+    ticketNumber?: string | null;
+    subject?: string | null;
+    detail?: string | null;
+    seed?: string | null;
+    facts?: CaseFacts | null;
+  }): string {
+    return customerNotificationService.body(
+      options.notificationType,
+      options.ticketNumber,
+      options.seed,
+      options.subject,
+      options.detail,
+      options.facts
+    );
   }
 
   /** Wording is deliberately conservative — see rule 2 above. */
@@ -701,6 +735,8 @@ export class CustomerNotificationService {
         return this.fill(CustomerNotificationService.FOLLOW_UP_PROMPT_VARIANTS, seed, ticketNumber, subject);
       case "new_case_prompt":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.NEW_CASE_PROMPT_VARIANTS, seed);
+      case "ai_timeout_fallback":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.AI_TIMEOUT_FALLBACK_VARIANTS, seed);
     }
   }
 
@@ -789,6 +825,11 @@ export class CustomerNotificationService {
         return [
           { label: "ยืนยันยกเลิกเคส", text: `ยืนยันยกเลิกเคส${n}` },
           { label: "ไม่ยกเลิก", text: "ไม่ยกเลิก" },
+        ];
+      case "ai_timeout_fallback":
+        return [
+          { label: "ตรวจสอบสถานะ", text: "ตรวจสอบสถานะ" },
+          { label: "ติดต่อเจ้าหน้าที่", text: "ขอคุยกับเจ้าหน้าที่" },
         ];
       default:
         return [];

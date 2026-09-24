@@ -239,4 +239,19 @@ export class LineMessageBatchingService {
   getPendingCount(): number {
     return this.batches.size;
   }
+
+  /**
+   * Returns summary of active pending batches for the monitor console.
+   */
+  getActiveBatchesSummary(): Array<{ key: string; eventCount: number; destination: string }> {
+    const list: Array<{ key: string; eventCount: number; destination: string }> = [];
+    for (const [key, entry] of this.batches.entries()) {
+      list.push({
+        key,
+        eventCount: entry.events.length,
+        destination: entry.destination,
+      });
+    }
+    return list;
+  }
 }

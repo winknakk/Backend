@@ -61,11 +61,18 @@ assert.equal(
 
 // --- cancel: real phrasing that must route deterministically ---------------
 expectCancel("ขอยกเลิกเคส TCK-2026-73046 ให้หน่อยค่ะ", "CANCEL_REQUEST", "already worked before");
+expectCancel("ขอยกเลิกเคสใบเบิกเงินสดย่อยหน่อยนะคะ", "CANCEL_REQUEST", "cancel with subject name without TCK");
+expectCancel(
+  "แอดมินคะ ขอยกเลิกเคสใบเบิกเงินสดย่อยเมื่อกี้หน่อยนะคะ พอดีเช็กกับพี่การเงินแล้ว ยอดเดินทางตัวที่ซ้ำเขาไปหักลบในรอบถัดไปให้เรียบร้อยแล้วค่ะ หนูเข้าใจผิดไปเอง ขอโทษที่รบกวนนะคะ ขอบคุณมากค่ะ",
+  "CANCEL_REQUEST",
+  "long cancel with subject and reason"
+);
 expectCancel("แอดมินคะ ขอยกเลิกเคสหน่อยค่ะ", "CANCEL_REQUEST", "vocative prefix");
 expectCancel("สวัสดีค่ะ ขอยกเลิกเคส TCK-2026-73046 ค่ะ", "CANCEL_REQUEST", "greeting prefix");
 expectCancel("ยกเลิกเคสให้หน่อยค่ะ ไม่ต้องดำเนินการต่อแล้วค่ะ", "CANCEL_REQUEST", "trailing reason");
 expectCancel("ยืนยันยกเลิกเคส TCK-2026-73046", "CONFIRM_CANCEL", "chip text unchanged");
 expectCancel("แอดมินคะ ยืนยันยกเลิกเคส TCK-2026-73046 ค่ะ", "CONFIRM_CANCEL", "chip text with vocative");
+expectCancel("ดำเนินการต่อ", "DECLINE_CANCEL", "continue button text", true);
 
 // --- cancel: must still NOT fire -------------------------------------------
 expectCancel("กดปุ่มยกเลิกเคสไม่ได้ค่ะ", "NONE", "a bug report about the cancel button");

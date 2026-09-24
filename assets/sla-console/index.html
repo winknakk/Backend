@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="th" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SLA Cadence Console</title>
+<style>
+  :root {
+    --bg:#f5f6fa; --panel:#ffffff; --sunken:#f2f4f9; --line:#e4e8f0; --line-soft:#eef1f7;
+    --text:#161c2b; --text-2:#48526a; --muted:#7b849b;
+    --ok:#0f7a45; --ok-bg:#e7f6ee; --bad:#c62a2f; --bad-bg:#fdecec; --warn:#9a6612; --warn-bg:#fdf3e2;
+    --accent:#4759c9; --accent-bg:#ecefff; --accent-text:#ffffff;
+    --shadow:0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.04);
+  }
+  [data-theme="dark"] {
+    --bg:#0d111b; --panel:#151b28; --sunken:#111726; --line:#232c3f; --line-soft:#1c2434;
+    --text:#e9edf7; --text-2:#b7c0d4; --muted:#7d879e;
+    --ok:#4ade80; --ok-bg:#12281d; --bad:#ff7b7b; --bad-bg:#2a1618; --warn:#f0b755; --warn-bg:#2a2113;
+    --accent:#7d8cf8; --accent-bg:#1b2340; --accent-text:#0d111b; --shadow:none;
+  }
+  * { box-sizing:border-box; min-width:0; }
+  html, body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,"Segoe UI","Noto Sans Thai",Roboto,sans-serif; -webkit-font-smoothing:antialiased; }
+  body { overflow-wrap:break-word; }
+  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+
+  header { display:flex; gap:9px; align-items:center; padding:10px 20px; background:var(--panel);
+    border-bottom:1px solid var(--line); position:sticky; top:0; z-index:10; flex-wrap:wrap; }
+  .brand { font-size:14px; font-weight:650; margin-right:4px; white-space:nowrap; }
+  .spacer { flex:1 1 auto; }
+  input, select, button, textarea { font:inherit; color:var(--text); }
+  input[type=text], input[type=password], input[type=number], input[type=search], select {
+    background:var(--sunken); border:1px solid var(--line); border-radius:8px; padding:6.5px 10px; outline:none; width:100%; }
+  input:focus, select:focus { border-color:var(--accent); }
+  button { background:var(--accent); color:var(--accent-text); border:1px solid transparent; border-radius:8px;
+    padding:6.5px 12px; cursor:pointer; font-weight:550; white-space:nowrap; transition:filter .12s; }
+  button:hover:not(:disabled) { filter:brightness(1.08); }
+  button.ghost { background:var(--sunken); color:var(--text); border-color:var(--line); }
+  button.danger { background:transparent; color:var(--bad); border-color:var(--bad); }
+  button.icon { background:transparent; color:var(--muted); border-color:var(--line); padding:6px 9px; font-weight:500; }
+  button.icon.on { color:var(--accent); border-color:var(--accent); }
+  button.tiny { padding:2px 8px; font-size:11.5px; font-weight:500; background:var(--sunken); color:var(--muted); border-color:var(--line); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+
+  main { display:grid; grid-template-columns:340px minmax(0,1fr); gap:16px; align-items:start;
+    padding:18px 20px 56px; max-width:1560px; margin:0 auto; }
+  @media (max-width:1040px) { main { grid-template-columns:1fr; } }
+  .rail, .col { display:grid; gap:14px; }
+  @media (min-width:1041px) { .rail { position:sticky; top:64px; max-height:calc(100vh - 78px); overflow:auto; padding-right:2px; } }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:15px 17px; box-shadow:var(--shadow); overflow:hidden; }
+  .card > h2 { display:flex; align-items:center; gap:7px; font-size:11.5px; letter-spacing:.07em; text-transform:uppercase;
+    color:var(--muted); margin:0 0 11px; font-weight:700; }
+  .card > h2 .spacer { flex:1; }
+  .kv { display:grid; grid-template-columns:auto minmax(0,1fr); gap:5px 14px; align-items:baseline; }
+  .kv > div:nth-child(odd) { color:var(--muted); white-space:nowrap; }
+  .kv > div:nth-child(even) { color:var(--text-2); }
+  .num { font-variant-numeric:tabular-nums; font-weight:700; letter-spacing:-.02em; }
+  .num.xl { font-size:26px; } .num.lg { font-size:19px; }
+  .label { font-size:11.5px; color:var(--muted); letter-spacing:.03em; }
+
+  .chip { display:inline-flex; align-items:center; gap:5px; padding:2.5px 9px; border-radius:999px;
+    background:var(--sunken); border:1px solid var(--line); font-size:12px; font-weight:550; white-space:nowrap; }
+  .chip.ok { color:var(--ok); background:var(--ok-bg); border-color:transparent; }
+  .chip.bad { color:var(--bad); background:var(--bad-bg); border-color:transparent; }
+  .chip.warn { color:var(--warn); background:var(--warn-bg); border-color:transparent; }
+  .chip.accent { color:var(--accent); background:var(--accent-bg); border-color:transparent; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); } .muted { color:var(--muted); }
+
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:10px; }
+  .tile { background:var(--sunken); border:1px solid var(--line-soft); border-radius:10px; padding:11px 13px; }
+  .tile .sub { font-size:12px; color:var(--muted); margin-top:2px; }
+
+  ul.checks { list-style:none; padding:0; margin:0; display:grid; gap:7px; }
+  ul.checks li { display:grid; grid-template-columns:18px minmax(0,1fr); gap:8px; align-items:start; }
+  ul.checks .mark { font-weight:700; line-height:1.5; }
+  ul.checks small { color:var(--muted); display:block; font-size:12px; }
+
+  .tbl-wrap { overflow-x:auto; margin:0 -17px -15px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 17px; border-top:1px solid var(--line-soft); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:11.5px; letter-spacing:.05em; text-transform:uppercase; border-top:0; }
+  tbody tr:hover { background:var(--sunken); }
+  tbody tr.clickable { cursor:pointer; }
+  td.when { white-space:nowrap; color:var(--text-2); font-variant-numeric:tabular-nums; }
+  td.detail { color:var(--text-2); }
+  tr.fresh { animation:flash 2.4s ease-out; }
+  @keyframes flash { 0% { background:var(--accent-bg); } 100% { background:transparent; } }
+
+  .picklist { display:grid; gap:5px; max-height:330px; overflow:auto; margin:0 -4px; padding:1px 4px; }
+  .pick { display:grid; grid-template-columns:auto minmax(0,1fr); gap:7px; align-items:center; width:100%;
+    background:transparent; border:1px solid transparent; border-radius:9px; padding:1px 5px; }
+  .pick:hover { background:var(--sunken); }
+  .pick.active { background:var(--accent-bg); border-color:var(--accent); }
+  .pick.picked { background:var(--accent-bg); }
+  .pickmain { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; align-items:baseline; width:100%;
+    text-align:left; background:transparent; color:var(--text); border:0; border-radius:7px;
+    padding:6px 3px; cursor:pointer; font-weight:500; font-size:inherit; font-family:inherit; }
+  input[type=checkbox].sel { width:15px; height:15px; margin:0; cursor:pointer; accent-color:var(--accent); flex:none; }
+  .bulkbar { display:none; margin-top:9px; padding:9px; border:1px solid var(--accent); border-radius:10px;
+    background:var(--accent-bg); }
+  .bulkbar.on { display:block; }
+  .bulkbar .n { font-weight:700; }
+  .bulkbar .row { margin-top:7px; }
+  .bulkbar button { font-size:12px; padding:5px 9px; }
+  .pick .t { font-variant-numeric:tabular-nums; font-weight:600; }
+  .pick .s { color:var(--muted); font-size:12px; display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  code { background:var(--sunken); border:1px solid var(--line-soft); padding:1px 6px; border-radius:5px;
+    font-size:12px; font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace; overflow-wrap:anywhere; }
+  .hint { color:var(--muted); font-size:12px; margin-top:8px; overflow-wrap:anywhere; }
+  .hint.bad { color:var(--bad); }
+  .empty { color:var(--muted); padding:20px 0; text-align:center; font-size:13px; }
+  .divider { height:1px; background:var(--line-soft); margin:12px 0; }
+  .cad { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; }
+  details > summary { cursor:pointer; color:var(--muted); font-size:12px; list-style:none; }
+  details > summary::-webkit-details-marker { display:none; }
+  details > summary:hover { color:var(--text); }
+
+  #toasts { position:fixed; right:18px; bottom:18px; display:grid; gap:9px; max-width:min(420px,calc(100vw - 36px)); z-index:30; }
+  .toast { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent);
+    padding:11px 14px; border-radius:10px; font-size:13px; box-shadow:0 10px 30px rgba(0,0,0,.2);
+    white-space:pre-wrap; overflow-wrap:anywhere; animation:pop .16s ease-out; }
+  .toast.ok { border-left-color:var(--ok); } .toast.bad { border-left-color:var(--bad); }
+  .toast b { display:block; margin-bottom:2px; }
+  @keyframes pop { from { transform:translateY(8px); opacity:0 } to { transform:none; opacity:1 } }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--muted); display:inline-block; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  kbd { background:var(--sunken); border:1px solid var(--line); border-bottom-width:2px; border-radius:5px; padding:0 5px; font-size:11px; font-family:inherit; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">⏱ SLA Cadence Console</span>
+  <div style="width:190px"><input id="apiKey" type="password" placeholder="API key (Bearer)" autocomplete="off"></div>
+  <button id="saveKey" class="ghost">บันทึกคีย์</button>
+  <span class="chip" id="conn"><span class="dot"></span> ยังไม่เชื่อมต่อ</span>
+  <div class="spacer"></div>
+  <button onclick="window.location.href='/api/v1/media/backend-console'" class="ghost" style="padding:5px 11px;font-size:12.5px" title="สลับไปหน้า Backend Operations & Fast Ack Monitor">⚡ Backend Monitor</button>
+  <span class="muted num" id="serverClock" style="font-size:13px"></span>
+  <button id="pauseBtn" class="icon" title="หยุด/เล่น การรีเฟรชอัตโนมัติ">⏸</button>
+  <button id="themeBtn" class="icon" title="สลับธีมสว่าง/มืด">☾</button>
+</header>
+
+<main>
+  <aside class="rail">
+    <div class="card">
+      <h2>เครื่องยนต์</h2>
+      <div class="tile">
+        <div class="label">ตื่นครั้งถัดไปใน</div>
+        <div class="num xl" id="nextRunCountdown">—</div>
+        <div class="sub" id="engineStateLine">กำลังโหลด…</div>
+      </div>
+      <div class="row" style="margin-top:11px">
+        <button id="runNow">ตรวจตอนนี้</button>
+        <button id="dryRun" class="ghost">Dry run</button>
+        <button id="refreshEngine" class="ghost">รีเฟรช</button>
+      </div>
+      <div class="hint" id="lastRun"></div>
+      <div class="divider"></div>
+      <div class="kv" id="engineKv"></div>
+      <div class="divider"></div>
+      <details id="runLogBox"><summary>ประวัติการรัน 20 รอบล่าสุด ▾</summary><div id="runLog" style="margin-top:8px"></div></details>
+    </div>
+
+    <div class="card">
+      <h2><label style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-size:inherit"
+             title="เลือก / ไม่เลือกทุกเคสในรายการนี้">
+            <input type="checkbox" class="sel" id="pickAll"><span>เลือกเคส</span></label>
+          <span class="spacer"></span><span class="muted" id="pickCount"></span></h2>
+      <div class="grid2">
+        <select id="fScope" title="ขอบเขต">
+          <option value="cadence">ที่เครื่องยนต์จะเตือน</option>
+          <option value="open">เปิดอยู่ทั้งหมด</option>
+          <option value="closed">ปิด/ยกเลิกแล้ว</option>
+          <option value="all">ทั้งหมด</option>
+          <option value="deleted">ลบแล้ว (กู้คืนได้)</option>
+        </select>
+        <select id="fSort" title="เรียงตาม">
+          <option value="recent">ใหม่สุดก่อน</option>
+          <option value="next">ใกล้ถึงรอบเตือน</option>
+          <option value="due">ใกล้เลยกำหนด</option>
+        </select>
+        <select id="fPriority" title="ความสำคัญ">
+          <option value="">ทุกความสำคัญ</option>
+          <option value="Urgent">🔴 Urgent</option>
+          <option value="High">🟠 High</option>
+          <option value="Medium">🟡 Medium</option>
+          <option value="Low">🟢 Low</option>
+          <option value="None">⚪ None</option>
+        </select>
+        <select id="fChannel" title="ช่องทาง">
+          <option value="">ทุกช่องทาง</option>
+          <option value="line">LINE</option>
+          <option value="webchat">WebChat</option>
+          <option value="other">อื่นๆ</option>
+        </select>
+      </div>
+      <div style="margin-top:8px"><select id="fProject"><option value="">ทุกโปรเจกต์</option></select></div>
+      <div style="margin-top:8px"><input id="fq" type="search" placeholder="ค้นหาเลขเคส / หัวข้อ  (กด / )"></div>
+      <div class="picklist" id="picklist" style="margin-top:9px"><div class="empty">ใส่ API key เพื่อเริ่ม</div></div>
+      <div class="bulkbar" id="bulkBar">
+        <div>เลือกไว้ <span class="n" id="bulkCount">0</span> เคส</div>
+        <div class="row">
+          <button id="bulkClose" class="danger">ปิดเคสที่เลือก</button>
+          <button id="bulkCancel" class="danger">ยกเลิกเคสที่เลือก</button>
+        </div>
+        <div class="row">
+          <button id="bulkDelete" class="danger">ลบเคสที่เลือก</button>
+          <button id="bulkRestore" class="ghost">กู้คืน</button>
+          <button id="bulkClear" class="ghost">ล้างการเลือก</button>
+        </div>
+        <div class="hint">ลบ = ซ่อนออกจากทุกหน้าจอและหยุดแจ้งเตือน ประวัติและการ์ดใน Plane ยังอยู่ · กู้คืนได้จากขอบเขต "ลบแล้ว"</div>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <button id="openBoard" class="ghost">ดูภาพรวมทั้งหมด</button>
+        <button id="reloadList" class="ghost">โหลดรายการใหม่</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>ปุ่มบังคับ · เคสที่เลือก</h2>
+      <div class="row" style="flex-wrap:nowrap">
+        <div style="width:76px"><input id="shiftMin" type="number" value="61" min="1" max="1440"></div>
+        <span class="muted">นาที</span>
+        <button id="shiftClock" class="danger">ย้อนเวลา</button>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <button id="forceDev" class="ghost">ทดสอบเมล Dev</button>
+        <button id="forceUser" class="ghost">ทดสอบ LINE</button>
+        <button id="deliverTicket" class="ghost" title="เปลี่ยนเป็น Delivery to Customer (RESOLVED) และส่ง LINE ให้ลูกค้ายืนยันเหมือน Plane ส่งมาจริง">ส่งมอบให้ลูกค้า</button>
+      </div>
+      <div class="row" style="margin-top:9px">
+        <button id="resetTicket" class="danger">ล้างข้อมูลเทส</button>
+        <button id="cancelTicket" class="danger">ยกเลิกเคส</button>
+        <button id="closeTicket" class="danger">ปิดเคส</button>
+      </div>
+      <div class="hint" id="writesNote"></div>
+      <div class="hint">คีย์ลัด <kbd>/</kbd> ค้นหา · <kbd>r</kbd> รีเฟรช · <kbd>d</kbd> dry run · <kbd>Esc</kbd> กลับภาพรวม</div>
+    </div>
+  </aside>
+
+  <section class="col" id="mainArea">
+    <div class="card"><h2>ภาพรวม</h2><div class="empty">ใส่ API key ด้านบนเพื่อเริ่มใช้งาน</div></div>
+  </section>
+</main>
+<div id="toasts"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const BASE = window.location.origin;
+  const store = {
+    get: (k) => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} },
+  };
+  let apiKey = store.get("slaConsoleApiKey");
+  $("apiKey").value = apiKey;
+  let clockOffsetMs = 0, engine = null, currentRef = "", listRows = [], paused = false;
+  let lastHistorySig = "", lastTicketData = null;
+
+  // ---------- theme ----------
+  const applyTheme = (t) => {
+    document.documentElement.setAttribute("data-theme", t);
+    $("themeBtn").textContent = t === "dark" ? "☀" : "☾";
+    store.set("slaConsoleTheme", t);
+  };
+  applyTheme(store.get("slaConsoleTheme") || (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"));
+  $("themeBtn").onclick = () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+
+  // ---------- helpers ----------
+  const serverNow = () => new Date(Date.now() + clockOffsetMs);
+  const two = (n) => String(n).padStart(2, "0");
+  const bkk = (d) => new Date(d.getTime() + 7 * 3600000);
+  const fmt = (v) => {
+    if (!v) return "—";
+    const d = new Date(v); if (isNaN(d.getTime())) return "—";
+    const b = bkk(d);
+    return `${b.getUTCDate()}/${b.getUTCMonth() + 1} ${two(b.getUTCHours())}:${two(b.getUTCMinutes())}:${two(b.getUTCSeconds())}`;
+  };
+  const fmtTime = (v) => { const s = fmt(v); return s === "—" ? s : s.split(" ")[1]; };
+  const fmtDur = (ms) => {
+    if (ms === null || ms === undefined || isNaN(ms)) return "—";
+    const neg = ms < 0; ms = Math.abs(ms);
+    const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const txt = (h ? h + " ชม. " : "") + m + " นาที " + two(sec) + " วิ";
+    return neg ? "เลยมา " + txt : txt;
+  };
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const toast = (title, body = "", kind = "", ms = 7000) => {
+    const el = document.createElement("div");
+    el.className = "toast " + kind;
+    el.innerHTML = `<b>${esc(title)}</b>${body ? esc(body) : ""}`;
+    $("toasts").appendChild(el);
+    setTimeout(() => el.remove(), ms);
+  };
+  const copy = (text, what) => {
+    navigator.clipboard?.writeText(text).then(() => toast("คัดลอกแล้ว", what || text, "ok", 2500))
+      .catch(() => toast("คัดลอกไม่ได้", "เบราว์เซอร์ไม่อนุญาต", "bad", 3000));
+  };
+  window.__copy = copy;
+  async function api(path, opts = {}) {
+    const res = await fetch(BASE + path, { ...opts, headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey, ...(opts.headers || {}) } });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      $("conn").innerHTML = '<span class="dot bad"></span> คีย์ไม่ถูกต้อง'; $("conn").className = "chip bad";
+      throw new Error("unauthorized");
+    }
+    if (!res.ok) throw new Error(body.error || body.data?.reason || ("HTTP " + res.status));
+    return body.data;
+  }
+
+  const BADGE = { Urgent: "🔴", High: "🟠", Medium: "🟡", Low: "🟢", None: "⚪" };
+  const TONE = { Urgent: "bad", High: "warn", Medium: "warn", Low: "ok", None: "" };
+  const intervalText = (i) => !i ? "ไม่มีรอบอัตโนมัติ" : (i.unit === "hours" ? `ทุก ${i.every} ชั่วโมง` : `ทุก ${i.every} วันทำการ`);
+  const PHASE = {
+    due_now: ["ถึงรอบแล้ว รอเครื่องยนต์ตื่น", "warn"],
+    slot_sent: ["รอบนี้ส่งแล้ว", "ok"],
+    missed_boundary: ["พ้นช่วง grace รอรอบถัดไป", ""],
+    waiting_first_boundary: ["ยังไม่ถึงรอบแรก", ""],
+  };
+  const STATUS_TH = { pending: "กำลังส่ง", sent: "ส่งแล้ว", skipped: "ข้าม", failed: "ล้มเหลว" };
+  const NOTIFY_TH = { progress_update: "รายงานความคืบหน้า", acknowledgement: "รับเรื่อง", acknowledgement_action: "รับทราบ",
+    ticket_created: "แจ้งเลขเคส", resolution_confirmation: "แจ้งแก้ไขเสร็จ", closed: "แจ้งปิดเคส", reopened: "แจ้งเปิดเคสใหม่" };
+  const EMAIL_TH = { SlaDevReminderEmailClaimed: "เมลเตือนซ้ำ → ทีม Dev", PlaneUrgentDevEmailClaimed: "เมลเคสด่วน → ทีม Dev",
+    PlaneDoneEmailNotificationClaimed: "เมลแจ้งปิดงาน → ลูกค้า" };
+
+  // ---------- engine ----------
+  async function loadEngine() {
+    try {
+      engine = await api("/api/v1/admin/sla/engine");
+      clockOffsetMs = new Date(engine.serverNow).getTime() - Date.now();
+      $("conn").innerHTML = '<span class="dot ok"></span> เชื่อมต่อแล้ว'; $("conn").className = "chip ok";
+      $("engineStateLine").innerHTML = engine.running
+        ? `<span class="ok">กำลังเดิน</span> · ${engine.nextRunReason === "boundary" ? "ตื่นตรงรอบเคส" : "ตรวจซ้ำ"} · ตรวจซ้ำทุก ${Math.round(engine.intervalMs / 60000)} นาที${engine.isProcessing ? ' · <span class="warn">กำลังประมวลผล</span>' : ""}`
+        : `<span class="bad">หยุด</span>${engine.enabled ? "" : " · SLA_CADENCE_ENABLED=false"}`;
+      $("engineKv").innerHTML = [
+        ["กรอบย้อนหลัง", `${engine.lookbackDays} วัน`],
+        ["เพดานส่ง/รอบ", `${engine.maxSendsPerRun} ครั้ง`],
+        ["Grace", `${engine.catchUpGraceMinutes} นาที`],
+        ["Webhook เมล", engine.webhookConfigured ? `<span class="ok">${esc(engine.webhookHost)}</span>` : '<span class="bad">ยังไม่ตั้ง</span>'],
+        ["เมล fallback", esc(engine.fallbackDevEmail)],
+        ["ปุ่มบังคับ", engine.writesAllowed ? '<span class="ok">เปิด</span>' : '<span class="bad">ปิด</span>'],
+      ].map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("");
+      const r = engine.lastRunResult;
+      $("lastRun").className = "hint" + (engine.lastRunError ? " bad" : "");
+      $("lastRun").innerHTML = engine.lastRunAt
+        ? `รอบล่าสุด ${fmtTime(engine.lastRunAt)} (${engine.lastRunDurationMs} ms${engine.lastRunDryRun ? " · dry run" : ""}) · ตรวจ ${r?.evaluated ?? 0} เคส · เมล ${r?.devAlertsSent ?? 0} · LINE ${r?.userUpdatesSent ?? 0}`
+          + (engine.lastRunError ? `<br><b>ผิดพลาด:</b> ${esc(engine.lastRunError)}` : "")
+        : "ยังไม่เคยรันในโปรเซสนี้";
+      const logs = engine.runLog || [];
+      $("runLogBox").querySelector("summary").textContent = `ประวัติการรัน ${logs.length} รอบล่าสุด ▾`;
+      $("runLog").innerHTML = logs.length ? `<table><thead><tr><th>เวลา</th><th>ผล</th></tr></thead><tbody>${logs.map((l) => {
+        const tone = l.error ? "bad" : l.result.devAlertsSent + l.result.userUpdatesSent > 0 ? "ok" : "";
+        const what = l.error ? "ผิดพลาด: " + l.error
+          : `ตรวจ ${l.result.evaluated} · เมล ${l.result.devAlertsSent} · LINE ${l.result.userUpdatesSent}${l.dryRun ? " · dry run" : ""}${l.trigger === "manual" ? " · สั่งเอง" : ""}`;
+        return `<tr><td class="when">${fmtTime(l.at)}</td><td class="detail ${tone}">${esc(what)}</td></tr>`;
+      }).join("")}</tbody></table>` : '<div class="empty">ยังไม่มีรอบในโปรเซสนี้</div>';
+      $("writesNote").textContent = engine.writesAllowed
+        ? "กดแล้วทำทันที · บันทึกร่องรอยลง ticket_events ทุกครั้ง"
+        : "ปุ่มบังคับถูกปิดในสภาพแวดล้อมนี้";
+      ["runNow", "shiftClock", "forceDev", "forceUser", "resetTicket", "cancelTicket", "closeTicket"].forEach((id) => $(id).disabled = !engine.writesAllowed);
+    } catch (e) { if (e.message !== "unauthorized") toast("โหลดสถานะเครื่องยนต์ไม่ได้", e.message, "bad"); }
+  }
+
+  // ---------- ticket list ----------
+  const filterQS = () => {
+    const p = new URLSearchParams();
+    p.set("scope", $("fScope").value);
+    p.set("sort", $("fSort").value);
+    if ($("fPriority").value) p.set("priority", $("fPriority").value);
+    if ($("fChannel").value) p.set("channel", $("fChannel").value);
+    if ($("fProject").value) p.set("projectId", $("fProject").value);
+    if ($("fq").value.trim()) p.set("q", $("fq").value.trim());
+    p.set("limit", "60");
+    return p.toString();
+  };
+  async function loadProjects() {
+    try {
+      const rows = await api("/api/v1/admin/sla/projects");
+      $("fProject").innerHTML = '<option value="">ทุกโปรเจกต์</option>' +
+        rows.map((p) => `<option value="${p.id}">${esc(String(p.name).slice(0, 26))} (${p.tickets})</option>`).join("");
+    } catch (e) {}
+  }
+  async function loadList(render = true) {
+    try {
+      const d = await api("/api/v1/admin/sla/tickets?" + filterQS());
+      listRows = d.rows;
+      $("pickCount").textContent = `${d.rows.length} รายการ`;
+      $("picklist").innerHTML = d.rows.length ? d.rows.map((r) => {
+        const ref = r.ticket_number || String(r.id);
+        const on = selected.has(ref);
+        return `<div class="pick ${ref === currentRef ? "active" : ""} ${on ? "picked" : ""}" data-row="${esc(ref)}">
+          <input type="checkbox" class="sel pickbox" data-ref="${esc(ref)}" ${on ? "checked" : ""}
+                 title="เลือกเคสนี้สำหรับทำทีละหลายรายการ">
+          <button class="pickmain" data-ref="${esc(ref)}">
+            <span>${BADGE[r.priority] || ""}</span>
+            <span><span class="t">${esc(ref)}</span> <span class="muted">· ${esc(r.status)}</span>
+            <span class="s">${esc(String(r.subject || "").slice(0, 46))}</span></span></button></div>`;
+      }).join("") : '<div class="empty">ไม่พบเคสตามเงื่อนไข</div>';
+      $("picklist").querySelectorAll(".pickmain").forEach((b) => b.onclick = () => selectTicket(b.getAttribute("data-ref")));
+      $("picklist").querySelectorAll(".pickbox").forEach((c) => c.onchange = () => toggleSelected(c.getAttribute("data-ref"), c.checked));
+      syncSelectionUi();
+      if (render && !currentRef) renderBoard();
+    } catch (e) { if (e.message !== "unauthorized") toast("โหลดรายการเคสไม่ได้", e.message, "bad"); }
+  }
+
+  // ---------- board ----------
+  function renderBoard() {
+    const rows = listRows;
+    const scopeLabel = $("fScope").selectedOptions[0].textContent;
+    $("mainArea").innerHTML = `
+      <div class="card">
+        <h2>ภาพรวม · ${esc(scopeLabel)}<span class="spacer"></span><span class="muted">${rows.length} เคส</span></h2>
+        ${rows.length ? `<div class="tbl-wrap"><table>
+          <thead><tr><th style="width:26px"></th><th>เคส</th><th>สถานะ</th><th>ช่องทาง</th><th>เตือนครั้งถัดไป</th><th>กำหนดเสร็จ</th></tr></thead>
+          <tbody>${rows.map((r) => {
+            const ref = r.ticket_number || String(r.id);
+            return `<tr class="clickable" data-ref="${esc(ref)}">
+              <td class="nosel"><input type="checkbox" class="sel boardbox" data-ref="${esc(ref)}" ${selected.has(ref) ? "checked" : ""}></td>
+              <td><span class="chip ${TONE[r.priority] || ""}">${BADGE[r.priority] || ""} ${esc(r.priority)}</span>
+                  <div style="margin-top:3px"><b>${esc(ref)}</b></div>
+                  <div class="muted" style="font-size:12px">${esc(String(r.subject || "").slice(0, 52))}</div></td>
+              <td>${esc(r.status)}</td>
+              <td>${esc(r.channel || "—")}</td>
+              <td class="when">${r.nextAt ? `<span class="num" data-cd="${r.nextAt}" data-big="1">—</span><div class="muted" style="font-size:12px">${fmt(r.nextAt)}</div>` : '<span class="muted">ไม่มีรอบ</span>'}</td>
+              <td class="when">${r.due_date ? `<span data-cd="${r.due_date}" data-big="1">—</span><div class="muted" style="font-size:12px">${fmt(r.due_date)}</div>` : "—"}</td>
+            </tr>`;
+          }).join("")}</tbody></table></div>` : '<div class="empty">ไม่มีเคสตามเงื่อนไขนี้ · ลองเปลี่ยนขอบเขตด้านซ้าย</div>'}
+      </div>`;
+    $("mainArea").querySelectorAll("tr.clickable").forEach((tr) => tr.onclick = (ev) => {
+      if (ev.target.closest(".nosel")) return; // the checkbox cell must not open the ticket
+      selectTicket(tr.getAttribute("data-ref"));
+    });
+    $("mainArea").querySelectorAll(".boardbox").forEach((c) => c.onchange = () => toggleSelected(c.getAttribute("data-ref"), c.checked));
+    syncSelectionUi();
+    tick();
+  }
+
+  // ---------- history rows ----------
+  const slotOf = (key) => { const m = /:(?:dev|user):(.+)$/.exec(String(key || "")); return m ? m[1] : ""; };
+  const slotText = (key) => { const s = slotOf(key); return !s ? "" : (s.startsWith("manual") ? "สั่งทดสอบด้วยมือ" : `รอบที่ ${s}`); };
+  function historyRows(h) {
+    const out = [];
+    for (const r of h.cadenceClaims) out.push({
+      at: r.sent_at || r.created_at,
+      kind: r.kind === "dev" ? "จองรอบ · เมล Dev" : "จองรอบ · LINE ลูกค้า",
+      tone: r.status === "sent" ? "ok" : r.status === "failed" ? "bad" : "",
+      detail: [slotText(r.slot_key), STATUS_TH[r.status] || r.status, r.channel === "email" ? "อีเมล" : "LINE"].filter(Boolean).join(" · "),
+      copy: r.slot_key,
+    });
+    for (const r of h.customerNotifications) out.push({
+      at: r.sent_at || r.created_at,
+      kind: "ข้อความถึงลูกค้า · " + (NOTIFY_TH[r.notification_type] || r.notification_type),
+      tone: r.status === "sent" ? "ok" : r.status === "failed" ? "bad" : "",
+      detail: (r.body ? String(r.body) : "(ไม่มีเนื้อหา)") + (r.error_message ? ` · ผิดพลาด: ${r.error_message}` : ""),
+    });
+    for (const r of h.emailClaims) {
+      const p = r.payload || {}, ref = p.reminderKey || p.eventId || "";
+      const synthetic = String(ref).startsWith("synthetic") || String(ref).startsWith("manual");
+      out.push({ at: r.created_at, kind: EMAIL_TH[r.event_type] || r.event_type, tone: "ok",
+        detail: [slotText(ref), synthetic ? "เหตุการณ์ทดสอบ" : "เหตุการณ์จริงจาก Plane", `อ้างอิง ${ref}`].filter(Boolean).join(" · "), copy: ref });
+    }
+    for (const r of h.consoleAudit) {
+      const p = r.payload || {};
+      let kind = "แผงควบคุม", detail = "", tone = "";
+      if (r.event_type === "SLA_CONSOLE_CLOCK_SHIFT") {
+        kind = "แผงควบคุม · ย้อนเวลาเคส"; tone = "warn";
+        detail = `ย้อน ${p.minutes} นาที · เปิดเคส ${fmt(p.before?.created_at)} → ${fmt(p.after?.created_at)} · กำหนดเสร็จ ${fmt(p.before?.due_date)} → ${fmt(p.after?.due_date)}`;
+      } else if (r.event_type === "SLA_CONSOLE_FORCE_SEND") {
+        kind = "แผงควบคุม · สั่งส่งทดสอบ"; tone = p.sent ? "ok" : "bad";
+        detail = `${p.kind === "dev" ? "เมลถึงทีม Dev" : "LINE ถึงลูกค้า"} · ${p.sent ? "ส่งสำเร็จ" : "ไม่ได้ส่ง"} · คีย์ ${p.key || "-"}`;
+      } else if (r.event_type === "SLA_CONSOLE_RESET") {
+        kind = "แผงควบคุม · ล้างข้อมูลเทส";
+        const n = (p.cadenceClaims || 0) + (p.emailClaims || 0) + (p.progressNotifications || 0);
+        detail = n === 0 ? "ไม่มีรายการให้ลบ" : `ลบการจองรอบ ${p.cadenceClaims || 0} · การจองเมล ${p.emailClaims || 0} · ข้อความลูกค้า ${p.progressNotifications || 0}`;
+      } else if (r.event_type === "SLA_CONSOLE_CLOSE_TICKET") {
+        kind = "แผงควบคุม · เปลี่ยนสถานะเคส"; tone = "warn";
+        detail = `${p.from} → ${p.to}${p.reason ? " · " + p.reason : ""}`;
+      } else detail = JSON.stringify(p);
+      out.push({ at: r.created_at, kind, tone, detail });
+    }
+    return out.sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 60);
+  }
+
+  // ---------- ticket detail ----------
+  function cadenceCard(c, title, icon) {
+    if (!c) return `<div class="card"><h2>${icon} ${title}</h2><div class="empty">ระดับความสำคัญนี้ไม่มีรอบเตือนอัตโนมัติ</div></div>`;
+    const [ptxt, pcls] = PHASE[c.phase] || [c.phase, ""];
+    return `<div class="card">
+      <h2>${icon} ${title}</h2>
+      <div class="tile">
+        <div class="label">คาดว่าส่งจริงอีก</div>
+        <div class="num xl" data-cd="${c.predictedDeliveryAt || ""}" data-big="1">—</div>
+        <div class="sub">${c.predictedDeliveryAt ? "เวลา " + fmt(c.predictedDeliveryAt) : '<span class="bad">เครื่องยนต์ไม่ได้เดิน</span>'}</div>
+      </div>
+      <div class="row" style="margin:11px 0 3px"><span class="chip ${pcls}">${ptxt}</span><span class="chip">${intervalText(c.interval)}</span></div>
+      <div class="divider"></div>
+      <div class="kv">
+        <div>slot ปัจจุบัน</div><div>${c.slot} · <code>${esc(c.slotKey)}</code> <button class="tiny" onclick="__copy('${esc(c.slotKey)}','slot key')">copy</button></div>
+        <div>slot เริ่มเมื่อ</div><div>${fmt(c.slotStartedAt)}</div>
+        <div>ในช่วง grace</div><div>${c.freshWithinGrace ? '<span class="ok">ใช่</span>' : "ไม่"}</div>
+        <div>slot นี้ส่งแล้ว</div><div>${c.claimed ? '<span class="ok">ส่งแล้ว</span>' : "ยัง"}</div>
+        <div>รอบถัดไป</div><div>${fmt(c.nextBoundaryAt)} <span class="muted" data-cd="${c.nextBoundaryAt}"></span></div>
+      </div></div>`;
+  }
+
+  function renderTicket(d, freshCount = 0) {
+    const t = d.ticket, s = d.sla, e = d.eligibility, c = d.cadence;
+    const planeLink = t.plane ? `https://projects.oneweb.tech/${t.plane.workspaceSlug}/projects/${t.plane.projectId}/issues/${t.plane.issueId}` : null;
+    const rows = historyRows(d.history);
+    const curl = `curl -X POST "${BASE}/api/v1/admin/sla/tickets/${t.ticketNumber || t.id}/force" -H "Authorization: Bearer <API_KEY>" -H "Content-Type: application/json" -d '{"kind":"dev","confirm":true}'`;
+    $("mainArea").innerHTML = `
+      <div class="card">
+        <div class="row" style="margin-bottom:10px">
+          <button class="tiny" id="backBoard">← ภาพรวม</button>
+          <span class="num lg">${esc(t.ticketNumber || "#" + t.id)}</span>
+          <button class="tiny" onclick="__copy('${esc(t.ticketNumber || t.id)}','เลขเคส')">copy</button>
+          <span class="chip ${TONE[t.priority] || ""}">${BADGE[t.priority] || ""} ${esc(t.priority)}</span>
+          <span class="chip">${esc(t.status)}</span>
+          ${t.deletedAt ? '<span class="chip bad">ถูกลบ</span>' : ""}
+          <span class="spacer"></span>
+          ${planeLink ? `<a class="chip accent" href="${planeLink}" target="_blank">เปิดใน Plane ↗</a>` : '<span class="chip">ยังไม่ขึ้น Plane</span>'}
+        </div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:10px">${esc(t.subject)}</div>
+        <div class="kv">
+          <div>โปรเจกต์</div><div>${esc(t.projectName || t.projectId)} <span class="muted">(${esc(t.orgId || "")})</span></div>
+          <div>ลูกค้า</div><div>${esc(t.customerName || "ไม่ระบุชื่อ")} · ${esc(t.channel || "-")} · <code>${esc(t.customerRef || "-")}</code> <span class="muted">${t.customerHasEmail ? "มีอีเมล" : "ไม่มีอีเมล"}</span></div>
+          <div>ห้องสนทนา</div><div>${t.conversationId ?? "—"}</div>
+          <div>เปิดเมื่อ</div><div>${fmt(t.createdAt)} <span class="muted" data-age="${t.createdAt}"></span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>นาฬิกา SLA</h2>
+        <div class="tiles">
+          <div class="tile"><div class="label">ตอบกลับครั้งแรก</div>
+            <div class="num lg">${fmtTime(s.firstResponseAt)}</div>
+            <div class="sub">${s.responseMet === null ? "ยังไม่มีการตอบ" : s.responseMet ? '<span class="ok">ทันกำหนด</span>' : '<span class="bad">ช้ากว่ากำหนด</span>'} · กำหนด ${fmtTime(s.responseDueAt)}</div></div>
+          <div class="tile"><div class="label">เหลือถึงกำหนดเสร็จ</div>
+            <div class="num lg ${s.breached ? "bad" : ""}" data-cd="${s.dueAt || ""}" data-big="1">—</div>
+            <div class="sub">${s.breached ? '<span class="bad">เลยกำหนดแล้ว</span> · ' : ""}กำหนด ${fmt(s.dueAt)}</div></div>
+          <div class="tile"><div class="label">อายุเคส</div>
+            <div class="num lg" data-age-big="${t.createdAt}">—</div>
+            <div class="sub">เปิดเมื่อ ${fmt(t.createdAt)}</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>จะแจ้งเตือนไหม</h2>
+        <div class="row" style="margin-bottom:11px">
+          <span class="chip ${e.devEligible ? "ok" : "bad"}">${e.devEligible ? "✓" : "✗"} เมลเตือน Dev</span>
+          <span class="chip ${e.userEligible ? "ok" : "bad"}">${e.userEligible ? "✓" : "✗"} รายงานลูกค้า</span>
+          <span class="chip">ผู้รับเมล: ${esc(c.devRecipients.join(", ") || "ไม่มี")}</span>
+        </div>
+        <ul class="checks">${e.checks.map((k) => `<li><span class="mark ${k.ok ? "ok" : "bad"}">${k.ok ? "✓" : "✗"}</span><span>${esc(k.label)}<small>${esc(k.detail)}</small></span></li>`).join("")}</ul>
+      </div>
+
+      <div class="cad">${cadenceCard(c.dev, "เตือน Dev ซ้ำ", "📧")}${cadenceCard(c.user, "รายงานลูกค้า (LINE)", "💬")}</div>
+
+      <div class="card">
+        <h2>ประวัติการแจ้งเตือน · ${rows.length} รายการ<span class="spacer"></span>
+          <button class="tiny" onclick="__copy(${JSON.stringify(curl)},'คำสั่ง curl ทดสอบเมล')">copy curl</button></h2>
+        ${rows.length ? `<div class="tbl-wrap"><table>
+          <thead><tr><th>เวลา</th><th>เหตุการณ์</th><th>รายละเอียด</th></tr></thead>
+          <tbody>${rows.map((r, i) => `<tr class="${i < freshCount ? "fresh" : ""}"><td class="when">${fmt(r.at)}</td>
+            <td><span class="chip ${r.tone}">${esc(r.kind)}</span></td>
+            <td class="detail">${esc(r.detail)}${r.copy ? ` <button class="tiny" onclick="__copy('${esc(r.copy)}','คีย์')">copy</button>` : ""}</td></tr>`).join("")}</tbody>
+        </table></div>` : '<div class="empty">ยังไม่มีการแจ้งเตือนสำหรับเคสนี้</div>'}
+      </div>`;
+    const back = $("backBoard"); if (back) back.onclick = () => { currentRef = ""; setUrl(""); loadList(); renderBoard(); };
+    tick();
+  }
+
+  const setUrl = (ref) => {
+    const u = new URL(window.location.href);
+    if (ref) u.searchParams.set("ticket", ref); else u.searchParams.delete("ticket");
+    history.replaceState(null, "", u.toString());
+    store.set("slaConsoleLastTicket", ref || "");
+  };
+
+  async function selectTicket(ref, silent = false) {
+    if (!ref) return;
+    try {
+      const d = await api("/api/v1/admin/sla/tickets/" + encodeURIComponent(ref));
+      const sig = JSON.stringify([d.history.cadenceClaims.length, d.history.customerNotifications.length, d.history.emailClaims.length]);
+      let fresh = 0;
+      if (currentRef === ref && lastHistorySig && sig !== lastHistorySig) {
+        const before = JSON.parse(lastHistorySig).reduce((a, b) => a + b, 0);
+        const after = JSON.parse(sig).reduce((a, b) => a + b, 0);
+        fresh = Math.max(0, after - before);
+        if (fresh > 0) toast("มีการแจ้งเตือนใหม่", `${ref} · ${fresh} รายการ`, "ok", 8000);
+      }
+      lastHistorySig = sig; lastTicketData = d;
+      const changed = currentRef !== ref;
+      currentRef = ref;
+      if (changed) { setUrl(ref); $("fq").blur(); }
+      renderTicket(d, fresh);
+      $("picklist").querySelectorAll(".pick").forEach((b) => b.classList.toggle("active", b.getAttribute("data-ref") === ref));
+    } catch (e) {
+      if (e.message === "unauthorized") return;
+      if (!silent) toast("โหลดเคสไม่ได้", e.message, "bad");
+    }
+  }
+
+  // ---------- live counters ----------
+  function tick() {
+    const now = serverNow(), b = bkk(now);
+    $("serverClock").textContent = `${two(b.getUTCHours())}:${two(b.getUTCMinutes())}:${two(b.getUTCSeconds())}`;
+    $("nextRunCountdown").textContent = engine && engine.nextRunAt ? fmtDur(new Date(engine.nextRunAt) - now) : (engine && !engine.running ? "หยุดอยู่" : "—");
+    document.querySelectorAll("[data-cd]").forEach((el) => {
+      const v = el.getAttribute("data-cd");
+      if (!v) { if (el.getAttribute("data-big")) el.textContent = "—"; return; }
+      const diff = new Date(v) - now;
+      el.textContent = el.getAttribute("data-big") ? fmtDur(diff) : "· อีก " + fmtDur(diff);
+      if (el.getAttribute("data-big")) el.classList.toggle("warn", diff > 0 && diff < 60000);
+    });
+    document.querySelectorAll("[data-age]").forEach((el) => el.textContent = "· อายุ " + fmtDur(now - new Date(el.getAttribute("data-age"))));
+    document.querySelectorAll("[data-age-big]").forEach((el) => el.textContent = fmtDur(now - new Date(el.getAttribute("data-age-big"))));
+  }
+
+  // ---------- actions ----------
+  // ---------- multi-select ----------
+  const selected = new Set();
+  let armedBulk = null, armedTimer = null;
+
+  function toggleSelected(ref, on) {
+    if (!ref) return;
+    if (on) selected.add(ref); else selected.delete(ref);
+    document.querySelectorAll(`.pick[data-row="${CSS.escape(ref)}"]`).forEach((el) => el.classList.toggle("picked", on));
+    document.querySelectorAll(`.pickbox[data-ref="${CSS.escape(ref)}"], .boardbox[data-ref="${CSS.escape(ref)}"]`)
+      .forEach((c) => { c.checked = on; });
+    syncSelectionUi();
+  }
+
+  /** Keeps the counter, the bulk bar and the select-all box in step with the set. */
+  function syncSelectionUi() {
+    const listed = listRows.map((r) => r.ticket_number || String(r.id));
+    // Drop refs that are no longer in the list at all (e.g. after a delete).
+    for (const ref of Array.from(selected)) if (!listed.includes(ref)) selected.delete(ref);
+    $("bulkCount").textContent = String(selected.size);
+    $("bulkBar").classList.toggle("on", selected.size > 0);
+    const all = $("pickAll");
+    all.checked = listed.length > 0 && selected.size === listed.length;
+    all.indeterminate = selected.size > 0 && selected.size < listed.length;
+    if (selected.size === 0) disarmBulk();
+  }
+
+  function clearSelection() { selected.clear(); document.querySelectorAll(".sel").forEach((c) => { c.checked = false; }); document.querySelectorAll(".pick.picked").forEach((el) => el.classList.remove("picked")); syncSelectionUi(); }
+
+  function disarmBulk() {
+    if (armedTimer) clearTimeout(armedTimer);
+    armedTimer = null;
+    if (armedBulk) { const b = $(armedBulk.id); if (b) b.textContent = armedBulk.label; armedBulk = null; }
+  }
+
+  /**
+   * Destructive bulk buttons arm on the first click and run on the second.
+   * Not a dialog (the operator asked for none), but one accidental click
+   * cannot wipe a whole selection.
+   */
+  function armBulk(id, label, run) {
+    if (armedBulk && armedBulk.id === id) { disarmBulk(); run(); return; }
+    disarmBulk();
+    armedBulk = { id, label };
+    $(id).textContent = `กดอีกครั้งเพื่อยืนยัน (${selected.size})`;
+    armedTimer = setTimeout(disarmBulk, 5000);
+  }
+
+  async function bulkAction(action, label) {
+    const refs = Array.from(selected);
+    if (!refs.length) { toast("ยังไม่ได้เลือกเคส", "ติกช่องหน้ารายการก่อน", "bad", 4000); return; }
+    try {
+      const d = await api("/api/v1/admin/sla/tickets/bulk", { method: "POST", body: JSON.stringify({ refs, action, confirm: true }) });
+      const failed = (d.results || []).filter((r) => !r.ok);
+      const detail = `สำเร็จ ${d.succeeded} เคส` + (d.failed ? ` · ไม่สำเร็จ ${d.failed} (${failed.slice(0, 3).map((r) => r.ref + ": " + REASON(r.reason)).join(", ")})` : "");
+      toast(label, detail, d.failed ? "bad" : "ok", d.failed ? 12000 : 6000);
+      clearSelection();
+      await loadEngine(); await loadList(false);
+      if (currentRef) await selectTicket(currentRef, true);
+    } catch (e) { toast(label + " ล้มเหลว", e.message, "bad", 10000); }
+  }
+
+  const REASON = (r) => ({
+    TICKET_NOT_FOUND: "ไม่พบเคส", ALREADY_DELETED: "ลบไปแล้ว", NOT_DELETED: "ยังไม่ได้ถูกลบ",
+    NO_TICKETS_SELECTED: "ไม่ได้เลือกเคส", TOO_MANY_TICKETS: "เลือกเกินจำนวนที่อนุญาต",
+  }[r] || r || "ไม่ทราบสาเหตุ");
+
+  async function write(path, body, label) {
+    try {
+      const data = await api(path, { method: "POST", body: JSON.stringify({ ...body, confirm: true }) });
+      let detail = "";
+      if (data && typeof data === "object") {
+        if ("minutes" in data) detail = `ย้อน ${data.minutes} นาที · เปิดเคสใหม่เป็น ${fmt(data.after?.created_at)}`;
+        else if ("sent" in data) detail = data.sent ? "ส่งสำเร็จ · คีย์ " + data.key : "ไม่ได้ส่ง (" + (data.reason || "ไม่ทราบสาเหตุ") + ")";
+        else if ("deleted" in data) { const x = data.deleted; detail = `ลบการจองรอบ ${x.cadenceClaims} · การจองเมล ${x.emailClaims} · ข้อความลูกค้า ${x.progressNotifications}`; }
+        else if ("ticket" in data) detail = `${data.previousStatus} → ${data.ticket.status}`;
+        else if ("evaluated" in data) detail = `ตรวจ ${data.evaluated} เคส · ส่งเมล ${data.devAlertsSent} · ส่ง LINE ${data.userUpdatesSent}` + (data.skippedLocked ? " · ข้ามเพราะ lock" : "");
+      }
+      toast(label, detail, "ok");
+      await loadEngine(); await loadList(false);
+      if (currentRef) await selectTicket(currentRef, true);
+    } catch (e) { toast(label + " ล้มเหลว", e.message, "bad", 10000); loadEngine(); }
+  }
+  $("saveKey").onclick = () => { apiKey = $("apiKey").value.trim(); store.set("slaConsoleApiKey", apiKey); boot(); };
+  $("apiKey").addEventListener("keydown", (ev) => { if (ev.key === "Enter") $("saveKey").click(); });
+  $("refreshEngine").onclick = () => { loadEngine(); loadList(false); if (currentRef) selectTicket(currentRef, true); };
+  $("runNow").onclick = () => write("/api/v1/admin/sla/run", {}, "สั่งตรวจ 1 รอบ");
+  $("dryRun").onclick = async () => {
+    try {
+      const d = await api("/api/v1/admin/sla/run", { method: "POST", body: JSON.stringify({ dryRun: true }) });
+      toast("Dry run (ไม่ส่งจริง)", `ตรวจ ${d.evaluated} เคส · จะส่งเมล ${d.devAlertsSent} · จะส่ง LINE ${d.userUpdatesSent}` + (d.alreadyRunning ? " · กำลังรันอยู่" : ""), "ok");
+      loadEngine();
+    } catch (e) { toast("Dry run ล้มเหลว", e.message, "bad", 10000); }
+  };
+  ["fScope", "fSort", "fPriority", "fChannel", "fProject"].forEach((id) => $(id).onchange = () => loadList());
+  let qTimer = null;
+  $("fq").oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(() => loadList(), 350); };
+  $("pickAll").onclick = () => {
+    const listed = listRows.map((r) => r.ticket_number || String(r.id));
+    const turnOn = selected.size < listed.length;
+    listed.forEach((ref) => { if (turnOn) selected.add(ref); else selected.delete(ref); });
+    document.querySelectorAll(".pickbox, .boardbox").forEach((c) => { c.checked = selected.has(c.getAttribute("data-ref")); });
+    document.querySelectorAll(".pick").forEach((el) => el.classList.toggle("picked", selected.has(el.getAttribute("data-row"))));
+    syncSelectionUi();
+  };
+  $("bulkClear").onclick = () => clearSelection();
+  $("bulkClose").onclick = () => armBulk("bulkClose", "ปิดเคสที่เลือก", () => bulkAction("close", "ปิดเคสที่เลือก"));
+  $("bulkCancel").onclick = () => armBulk("bulkCancel", "ยกเลิกเคสที่เลือก", () => bulkAction("cancel", "ยกเลิกเคสที่เลือก"));
+  $("bulkDelete").onclick = () => armBulk("bulkDelete", "ลบเคสที่เลือก", () => bulkAction("delete", "ลบเคสที่เลือก"));
+  $("bulkRestore").onclick = () => bulkAction("restore", "กู้คืนเคสที่เลือก");
+  $("openBoard").onclick = () => { currentRef = ""; setUrl(""); renderBoard(); };
+  $("reloadList").onclick = () => loadList();
+  $("pauseBtn").onclick = () => {
+    paused = !paused;
+    $("pauseBtn").textContent = paused ? "▶" : "⏸";
+    $("pauseBtn").classList.toggle("on", paused);
+    $("pauseBtn").title = paused ? "รีเฟรชอัตโนมัติหยุดอยู่ — กดเพื่อเล่นต่อ" : "หยุดการรีเฟรชอัตโนมัติ";
+    toast(paused ? "หยุดรีเฟรชอัตโนมัติ" : "รีเฟรชอัตโนมัติทำงานต่อ", "", "", 2500);
+  };
+  const needTicket = () => { if (!currentRef) { toast("ยังไม่ได้เลือกเคส", "เลือกเคสจากรายการด้านซ้ายก่อน", "bad", 4000); return false; } return true; };
+  const T = () => encodeURIComponent(currentRef);
+  $("shiftClock").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/shift-clock`, { minutes: Number($("shiftMin").value || 61) }, `ย้อนเวลา ${currentRef}`);
+  $("forceDev").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/force`, { kind: "dev" }, `ทดสอบเมล Dev · ${currentRef}`);
+  $("forceUser").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/force`, { kind: "user" }, `ทดสอบ LINE · ${currentRef}`);
+  $("deliverTicket").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/deliver`, {}, `ส่งมอบให้ลูกค้า · ${currentRef}`);
+  $("resetTicket").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/reset`, {}, `ล้างข้อมูลเทส · ${currentRef}`);
+  $("cancelTicket").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/close`, { mode: "cancelled" }, `ยกเลิกเคส ${currentRef}`);
+  $("closeTicket").onclick = () => needTicket() && write(`/api/v1/admin/sla/tickets/${T()}/close`, { mode: "closed" }, `ปิดเคส ${currentRef}`);
+
+  // ---------- keyboard ----------
+  document.addEventListener("keydown", (ev) => {
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
+    if (ev.key === "Escape") { document.activeElement?.blur?.(); if (currentRef) { currentRef = ""; setUrl(""); renderBoard(); } return; }
+    if (typing) return;
+    if (ev.key === "/") { ev.preventDefault(); $("fq").focus(); }
+    else if (ev.key === "r") { $("refreshEngine").click(); }
+    else if (ev.key === "d") { $("dryRun").click(); }
+  });
+
+  // ---------- loops ----------
+  setInterval(tick, 1000);
+  setInterval(() => {
+    if (!apiKey || paused) return;
+    loadEngine(); loadList(false);
+    if (currentRef) selectTicket(currentRef, true);
+  }, 10000);
+
+  async function boot() {
+    if (!apiKey) return;
+    await loadEngine(); await loadProjects(); await loadList(false);
+    const urlRef = new URL(window.location.href).searchParams.get("ticket") || store.get("slaConsoleLastTicket");
+    if (urlRef) { $("fq").value = ""; await selectTicket(urlRef, true); }
+    if (!currentRef) renderBoard();
+  }
+  boot(); tick();
+})();
+</script>
+</body>
+</html>
