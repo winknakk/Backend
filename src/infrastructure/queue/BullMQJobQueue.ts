@@ -5,6 +5,7 @@ import { createLogger } from "../../observability/logger";
 import { IJobQueue, JobPayload, JobStatus } from "../../queue/types";
 import { ProcessIncomingMessageWorker } from "../../application/jobs/ProcessIncomingMessageWorker";
 import { createRedisClient } from "../../infrastructure/cache/createRedisClient";
+import { INTELLIGENCE_CONFIG } from "../../config/intelligence";
 
 const logger = createLogger("BullMQJobQueue");
 
@@ -15,6 +16,7 @@ export class BullMQJobQueue implements IJobQueue {
   private duplicateQueue: Queue;
   private planeSyncQueue: Queue;
   private platformEventQueue: Queue;
+  private intelligenceQueue: Queue;
   private redisConnection: Redis;
   private worker: ProcessIncomingMessageWorker | null = null;
 
@@ -43,6 +45,18 @@ export class BullMQJobQueue implements IJobQueue {
     this.duplicateQueue = new Queue("ticket-duplicate-queue", queueOptions);
     this.planeSyncQueue = new Queue("ticket-plane-sync-queue", queueOptions);
     this.platformEventQueue = new Queue("automationx-platform-events-queue", queueOptions);
+    // Conversation intelligence (Phase 3C). Completed jobs are kept for a day
+    // so a re-enqueued job id is a no-op for the whole sweep lookback; failed
+    // jobs are kept a week for inspection (the durable DLQ copy is the outbox).
+    this.intelligenceQueue = new Queue(INTELLIGENCE_CONFIG.queue.name, {
+      connection: this.redisConnection as any,
+      defaultJobOptions: {
+        attempts: INTELLIGENCE_CONFIG.queue.maxRetries,
+        backoff: { type: "exponential", delay: INTELLIGENCE_CONFIG.queue.backoffDelayMs },
+        removeOnComplete: { age: 86400 },
+        removeOnFail: { age: 7 * 86400 },
+      },
+    });
 
     this.redisConnection.on("error", (err) => {
       logger.error({ error: err.message }, "BullMQJobQueue Redis connection error");
@@ -69,6 +83,10 @@ export class BullMQJobQueue implements IJobQueue {
     } else if (payload.type === "ticket.sync.plane") {
       logger.info({ jobId, type: payload.type }, "Enqueueing ticket sync plane job");
       await this.planeSyncQueue.add(payload.type, payload, { jobId });
+    } else if (payload.type.startsWith("intelligence.knowledge_gap.")) {
+      // The worker reads ids from job.data directly; nothing else is carried.
+      logger.info({ jobId, type: payload.type }, "Enqueueing conversation intelligence job");
+      await this.intelligenceQueue.add(payload.type, payload.data, { jobId });
     } else if (payload.type === "TicketEnrichedEvent") {
       logger.info({ jobId, type: payload.type }, "Publishing platform event to AutomationX event queue");
       await this.platformEventQueue.add(payload.type, payload, { jobId });
@@ -111,6 +129,7 @@ export class BullMQJobQueue implements IJobQueue {
     if (!job) job = await this.duplicateQueue.getJob(jobId);
     if (!job) job = await this.planeSyncQueue.getJob(jobId);
     if (!job) job = await this.platformEventQueue.getJob(jobId);
+    if (!job) job = await this.intelligenceQueue.getJob(jobId);
     if (!job) return null;
 
     const state = await job.getState();
@@ -146,6 +165,7 @@ export class BullMQJobQueue implements IJobQueue {
     const qDuplicate = await this.duplicateQueue.getJobCounts("wait", "active", "delayed");
     const qPlane = await this.planeSyncQueue.getJobCounts("wait", "active", "delayed");
     const qPlatformEvents = await this.platformEventQueue.getJobCounts("wait", "active", "delayed");
+    const qIntelligence = await this.intelligenceQueue.getJobCounts("wait", "active", "delayed");
     
     return (
       (qMsg.wait || 0) + (qMsg.active || 0) + (qMsg.delayed || 0) +
@@ -153,7 +173,8 @@ export class BullMQJobQueue implements IJobQueue {
       (qSummary.wait || 0) + (qSummary.active || 0) + (qSummary.delayed || 0) +
       (qDuplicate.wait || 0) + (qDuplicate.active || 0) + (qDuplicate.delayed || 0) +
       (qPlane.wait || 0) + (qPlane.active || 0) + (qPlane.delayed || 0) +
-      (qPlatformEvents.wait || 0) + (qPlatformEvents.active || 0) + (qPlatformEvents.delayed || 0)
+      (qPlatformEvents.wait || 0) + (qPlatformEvents.active || 0) + (qPlatformEvents.delayed || 0) +
+      (qIntelligence.wait || 0) + (qIntelligence.active || 0) + (qIntelligence.delayed || 0)
     );
   }
 
@@ -178,6 +199,7 @@ export class BullMQJobQueue implements IJobQueue {
     await this.duplicateQueue.close();
     await this.planeSyncQueue.close();
     await this.platformEventQueue.close();
+    await this.intelligenceQueue.close();
     await this.redisConnection.quit();
   }
 }

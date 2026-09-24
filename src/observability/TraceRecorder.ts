@@ -30,7 +30,8 @@ export type TraceComponent =
   | "outbox"
   | "plane"
   | "reverse_sync"
-  | "notification";
+  | "notification"
+  | "ai";
 
 export interface TraceEvent {
   correlationId: string;

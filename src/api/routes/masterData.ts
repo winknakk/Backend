@@ -1,5 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
+import { resolveProjectFilter } from "../../middleware/tenantScope";
 
 // The 5 Real Projects from PostgreSQL Database Schema (csdb.projects)
 const REAL_PROJECTS_SEED = [
@@ -137,28 +138,75 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   // ----------------------------------------------------
   fastify.get("/api/v1/admin/master-data/customers", async (request, reply) => {
     try {
+      const query = request.query as any;
+      const requestedProject = query?.projectId ?? query?.tenantId;
+      let allowedProjectIds: number[] | null = null;
+      if (request.tenantScope) {
+        const filter = resolveProjectFilter(request, reply, requestedProject);
+        if (!filter) return reply;
+        allowedProjectIds = filter.projectIds;
+      } else if (requestedProject && requestedProject !== "all") {
+        const p = parseInt(String(requestedProject), 10);
+        if (Number.isInteger(p) && p > 0) {
+          allowedProjectIds = [p];
+        }
+      }
+
+      const limit = Math.min(Math.max(parseInt(String(query?.limit || "50"), 10) || 50, 1), 100);
+      const offset = Math.max(parseInt(String(query?.offset || "0"), 10) || 0, 0);
+      const searchStr = query?.search || query?.q ? String(query.search || query.q).trim() : null;
+
       const client = await pool.connect();
       try {
-        const result = await client.query(
-          `SELECT c.id, c.project_id, p.name as project_name, c.company_name, c.contact_name, c.email, c.phone, c.created_at
-           FROM customers c
-           LEFT JOIN projects p ON p.id = c.project_id
-           ORDER BY c.id ASC`
-        );
-        return reply.send({ success: true, customers: result.rows });
+        const listQuery = `
+          SELECT c.id, c.project_id, p.name as project_name, c.company_name, c.contact_name, c.email, c.phone, c.created_at
+          FROM customers c
+          LEFT JOIN projects p ON p.id = c.project_id
+          WHERE ($1::integer[] IS NULL OR c.project_id = ANY($1::integer[]))
+            AND (
+              $2::text IS NULL
+              OR c.company_name ILIKE ('%' || $2 || '%')
+              OR c.contact_name ILIKE ('%' || $2 || '%')
+              OR c.email ILIKE ('%' || $2 || '%')
+              OR c.phone ILIKE ('%' || $2 || '%')
+            )
+          ORDER BY c.id ASC
+          LIMIT $3::integer OFFSET $4::integer
+        `;
+        const countQuery = `
+          SELECT COUNT(*)::integer AS total
+          FROM customers c
+          WHERE ($1::integer[] IS NULL OR c.project_id = ANY($1::integer[]))
+            AND (
+              $2::text IS NULL
+              OR c.company_name ILIKE ('%' || $2 || '%')
+              OR c.contact_name ILIKE ('%' || $2 || '%')
+              OR c.email ILIKE ('%' || $2 || '%')
+              OR c.phone ILIKE ('%' || $2 || '%')
+            )
+        `;
+
+        const [listRes, countRes] = await Promise.all([
+          client.query(listQuery, [allowedProjectIds, searchStr, limit, offset]),
+          client.query(countQuery, [allowedProjectIds, searchStr]),
+        ]);
+
+        return reply.send({
+          success: true,
+          customers: listRes.rows,
+          total: countRes.rows[0]?.total || 0,
+          limit,
+          offset,
+        });
       } finally {
         client.release();
       }
     } catch (err: any) {
-      return reply.send({
-        success: true,
-        customers: [
-          { id: 1, project_id: 8, project_name: "24/7", company_name: "Avalant Co., Ltd.", contact_name: "Natapohn Sawatsakulpattana", email: "natapohn@gmail.com", phone: "0942415642" },
-          { id: 2, project_id: 1, project_name: "AutomationX Demo", company_name: "TechCorp Logistics", contact_name: "Wichai T.", email: "wichai@techcorp.co.th", phone: "0823456789" },
-          { id: 3, project_id: 2, project_name: "Customer Success Service", company_name: "HealthCare Plus", contact_name: "Kanda P.", email: "kanda@healthcareplus.com", phone: "0834567890" },
-          { id: 4, project_id: 11, project_name: "SSO Project", company_name: "FinTech Solutions", contact_name: "Apirak S.", email: "apirak@fintechsolutions.io", phone: "0845678901" },
-          { id: 5, project_id: 12, project_name: "CRA Project", company_name: "EduLearn Academy", contact_name: "Narin B.", email: "narin@edulearn.ac.th", phone: "0856789012" },
-        ],
+      return reply.code(500).send({
+        success: false,
+        error: "Failed to fetch customers",
+        message: err.message,
+        customers: [],
       });
     }
   });
@@ -194,6 +242,23 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
   // ----------------------------------------------------
   fastify.get("/api/v1/admin/master-data/identities", async (request, reply) => {
     try {
+      const query = request.query as any;
+      const requestedProject = query?.projectId ?? query?.tenantId;
+      let allowedProjectIds: number[] | null = null;
+      if (request.tenantScope) {
+        const filter = resolveProjectFilter(request, reply, requestedProject);
+        if (!filter) return reply;
+        allowedProjectIds = filter.projectIds;
+      } else if (requestedProject && requestedProject !== "all") {
+        const p = parseInt(String(requestedProject), 10);
+        if (Number.isInteger(p) && p > 0) {
+          allowedProjectIds = [p];
+        }
+      }
+
+      const limit = Math.min(Math.max(parseInt(String(query?.limit || "50"), 10) || 50, 1), 100);
+      const offset = Math.max(parseInt(String(query?.offset || "0"), 10) || 0, 0);
+
       const client = await pool.connect();
       try {
         const result = await client.query(
@@ -202,20 +267,21 @@ export async function registerMasterDataRoutes(fastify: FastifyInstance) {
            FROM customer_identities i
            LEFT JOIN customers c ON c.id = i.customer_id
            LEFT JOIN projects p ON p.id = i.project_id
-           ORDER BY i.id ASC`
+           WHERE ($1::integer[] IS NULL OR i.project_id = ANY($1::integer[]))
+           ORDER BY i.id ASC
+           LIMIT $2::integer OFFSET $3::integer`,
+          [allowedProjectIds, limit, offset]
         );
-        return reply.send({ success: true, identities: result.rows });
+        return reply.send({ success: true, identities: result.rows, limit, offset });
       } finally {
         client.release();
       }
     } catch (err: any) {
-      return reply.send({
-        success: true,
-        identities: [
-          { id: 1, line_user_id: "Uad28c1eabbcbe1608e038d4d162f4944", customer_id: 1, project_id: 8, is_verified: true, company_name: "Avalant Co., Ltd.", contact_name: "Natapohn Sawatsakulpattana", project_name: "24/7" },
-          { id: 2, line_user_id: "U367f5ba23c8167bc4b15a7a4e7c52b26", customer_id: 2, project_id: 1, is_verified: true, company_name: "TechCorp Logistics", contact_name: "Wichai T.", project_name: "AutomationX Demo" },
-          { id: 3, line_user_id: "U981abc72619283719283719283719283", customer_id: 3, project_id: 2, is_verified: true, company_name: "HealthCare Plus", contact_name: "Kanda P.", project_name: "Customer Success Service" },
-        ],
+      return reply.code(500).send({
+        success: false,
+        error: "Failed to fetch identities",
+        message: err.message,
+        identities: [],
       });
     }
   });

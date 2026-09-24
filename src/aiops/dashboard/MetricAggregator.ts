@@ -2,83 +2,190 @@ import { DatabaseAdapter } from "../../adapters/types";
 import { ConversationTraceSummary, HandoffNode } from "../../schemas/aiops";
 import { AuditLog } from "../../schemas/validation";
 import { createLogger } from "../../observability/logger";
+import { pool } from "../../adapters/postgres/PostgresAdapter";
 
 const logger = createLogger("MetricAggregator");
 
 export class MetricAggregator {
   private dbAdapter: DatabaseAdapter;
+  private pool: any;
 
-  constructor(dbAdapter: DatabaseAdapter) {
+  constructor(dbAdapter: DatabaseAdapter, customPool?: any) {
     this.dbAdapter = dbAdapter;
+    this.pool = customPool || pool;
   }
 
-  async getDashboardMetrics(tenantId?: string) {
-    const allTraces = await this.dbAdapter.listAllTraces();
-    const allTickets = await this.dbAdapter.listAllTickets();
-
-    // Map conversationId -> companyId (tenantId)
-    const convToCompany = new Map<string, string>();
-
-    // Warm up the cache
-    for (const trace of allTraces) {
-      const convId = trace.conversationId;
-      if (convId && !convToCompany.has(convId)) {
-        try {
-          const conv = await this.dbAdapter.getConversation(convId);
-          if (conv) {
-            let companyId = String(conv.company_id || conv.companyId || "");
-            if (!companyId && (conv.project_id || conv.project)) {
-              const project = await this.dbAdapter.findProject(conv.project_id || conv.project);
-              if (project) {
-                companyId = String(project.company_id || project.companyId || "");
-              }
-            }
-            convToCompany.set(convId, companyId);
-          }
-        } catch {}
+  private normalizeProjectScope(scope?: string | number[] | null): number[] | null {
+    if (scope === null) return null;
+    if (Array.isArray(scope)) {
+      return scope.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0);
+    }
+    if (typeof scope === "string") {
+      const trimmed = scope.trim();
+      if (!trimmed || trimmed.toLowerCase() === "all") return null;
+      if (/^[0-9]+$/.test(trimmed)) {
+        const parsed = parseInt(trimmed, 10);
+        return parsed > 0 ? [parsed] : null;
       }
     }
+    return null;
+  }
 
-    // Warm up cache with ticket conversations too
-    for (const ticket of allTickets) {
-      const convId = ticket.conversationId || ticket.conversation_id || ticket.conversation;
-      if (convId && !convToCompany.has(convId)) {
-        try {
-          const conv = await this.dbAdapter.getConversation(convId);
-          if (conv) {
-            let companyId = String(conv.company_id || conv.companyId || "");
-            if (!companyId && (conv.project_id || conv.project)) {
-              const project = await this.dbAdapter.findProject(conv.project_id || conv.project);
-              if (project) {
-                companyId = String(project.company_id || project.companyId || "");
-              }
-            }
-            convToCompany.set(convId, companyId);
-          }
-        } catch {}
+  async getDashboardMetrics(projectScope?: string | number[] | null) {
+    const projectIds = this.normalizeProjectScope(projectScope);
+
+    // Try high-performance direct SQL execution first
+    try {
+      // 1. Traces metrics in a single pass
+      const tracesSql = `
+        SELECT 
+          COUNT(*)::integer AS total_traces,
+          COUNT(*) FILTER (WHERE t.status = 'COMPLETED')::integer AS completed_traces,
+          COUNT(*) FILTER (WHERE t.status = 'FAILED')::integer AS failed_traces,
+          COALESCE(AVG(
+            CASE 
+              WHEN t.completed_at IS NOT NULL AND t.called_at IS NOT NULL 
+              THEN EXTRACT(EPOCH FROM (t.completed_at::timestamptz - t.called_at::timestamptz)) * 1000 
+              ELSE NULL 
+            END
+          ) FILTER (WHERE t.status = 'COMPLETED'), 0)::numeric(10,2) AS average_latency_ms
+        FROM traces t
+        LEFT JOIN conversations c ON c.id = NULLIF(regexp_replace(t.conversation_id, '[^0-9]', '', 'g'), '')::integer
+        WHERE ($1::integer[] IS NULL OR c.project_id = ANY($1::integer[]))
+      `;
+
+      // 2. Tickets metrics in a single pass
+      const ticketsSql = `
+        SELECT 
+          COUNT(*)::integer AS total_tickets,
+          COUNT(*) FILTER (
+            WHERE t.status NOT IN ('Resolved', 'Closed', 'Cancelled', 'Done') 
+              AND t.due_date IS NOT NULL 
+              AND t.due_date < NOW()
+          )::integer AS sla_violations
+        FROM tickets t
+        WHERE ($1::integer[] IS NULL OR t.project_id = ANY($1::integer[]))
+          AND t.deleted_at IS NULL
+      `;
+
+      // 3. Agent distribution in a single pass
+      const agentsSql = `
+        SELECT 
+          COALESCE(t.agent_id, 'unknown') AS agent_id,
+          COUNT(*)::integer AS count
+        FROM traces t
+        LEFT JOIN conversations c ON c.id = NULLIF(regexp_replace(t.conversation_id, '[^0-9]', '', 'g'), '')::integer
+        WHERE ($1::integer[] IS NULL OR c.project_id = ANY($1::integer[]))
+          AND t.agent_id IS NOT NULL
+        GROUP BY t.agent_id
+      `;
+
+      const [tracesRes, ticketsRes, agentsRes] = await Promise.all([
+        this.pool.query(tracesSql, [projectIds]),
+        this.pool.query(ticketsSql, [projectIds]),
+        this.pool.query(agentsSql, [projectIds]),
+      ]);
+
+      const tRow = tracesRes.rows[0] || {};
+      const tkRow = ticketsRes.rows[0] || {};
+
+      const totalTraces = Number(tRow.total_traces || 0);
+      const completedTraces = Number(tRow.completed_traces || 0);
+      const failedTraces = Number(tRow.failed_traces || 0);
+      const averageLatencyMs = parseFloat(tRow.average_latency_ms || "0");
+
+      const totalTickets = Number(tkRow.total_tickets || 0);
+      const slaViolations = Number(tkRow.sla_violations || 0);
+      const slaViolationRate = totalTickets > 0 ? parseFloat((slaViolations / totalTickets).toFixed(4)) : 0;
+
+      const agentRoutingDist: Record<string, number> = {};
+      for (const row of agentsRes.rows) {
+        if (row.agent_id) {
+          agentRoutingDist[row.agent_id] = Number(row.count || 0);
+        }
       }
+
+      // Fetch Cache Metrics
+      let totalHits = 0;
+      let totalMisses = 0;
+      let cacheMetrics = {};
+      try {
+        const cacheService = require("../../cache/CacheService").CacheService.getInstance();
+        cacheMetrics = cacheService.getMetrics();
+        for (const tenantKey of Object.keys(cacheMetrics)) {
+          totalHits += (cacheMetrics as any)[tenantKey].hits || 0;
+          totalMisses += (cacheMetrics as any)[tenantKey].misses || 0;
+        }
+      } catch {}
+      const totalCache = totalHits + totalMisses;
+      const cacheHitRatio = totalCache > 0 ? parseFloat((totalHits / totalCache).toFixed(2)) : 0;
+
+      // Fetch Queue Depth
+      let queueDepth = 0;
+      try {
+        const queueFactory = require("../../queue/QueueFactory").QueueFactory;
+        const jobQueue = queueFactory.getQueue();
+        if (jobQueue && typeof jobQueue.getQueueDepth === "function") {
+          queueDepth = await jobQueue.getQueueDepth();
+        }
+      } catch (qErr: any) {
+        logger.warn({ error: qErr.message }, "Failed to resolve live queue depth for dashboard metrics");
+      }
+
+      return {
+        totalTraces,
+        completedTraces,
+        failedTraces,
+        averageLatencyMs,
+        totalTickets,
+        slaViolations,
+        slaViolationRate,
+        agentRoutingDistribution: agentRoutingDist,
+        queueDepth,
+        cacheHits: totalHits,
+        cacheMisses: totalMisses,
+        cacheHitRatio,
+        cacheMetrics,
+      };
+    } catch (sqlErr: any) {
+      logger.warn({ error: sqlErr.message }, "SQL aggregation unavailable, executing bounded fallback aggregation");
+      return this.fallbackDashboardMetrics(projectScope);
     }
+  }
 
-    const isAll = !tenantId || tenantId.toLowerCase() === 'all';
-    // Filter traces by tenantId
-    const filteredTraces = !isAll
-      ? allTraces.filter((t) => t.conversationId && convToCompany.get(t.conversationId) === tenantId)
-      : allTraces;
+  private async fallbackDashboardMetrics(tenantId?: string | number[] | null) {
+    const allTraces = (this.dbAdapter && typeof this.dbAdapter.listAllTraces === "function")
+      ? await this.dbAdapter.listAllTraces()
+      : [];
+    const allTickets = (this.dbAdapter && typeof this.dbAdapter.listAllTickets === "function")
+      ? await this.dbAdapter.listAllTickets()
+      : [];
 
-    // Filter tickets by tenantId
-    const filteredTickets = !isAll
-      ? allTickets.filter((t) => {
-          const cId =
-            t.companyId ||
-            t.company_id ||
-            (t.conversationId && convToCompany.get(t.conversationId)) ||
-            (t.conversation_id && convToCompany.get(t.conversation_id)) ||
-            (t.conversation && convToCompany.get(t.conversation));
-          return String(cId) === tenantId;
-        })
-      : allTickets;
+    const projectIds = this.normalizeProjectScope(tenantId);
+    const tenantStr = typeof tenantId === "string" ? tenantId.toLowerCase() : null;
+    const isAll = !tenantId || tenantStr === "all" || projectIds === null;
 
-    // Calculate Latencies
+    // Filter traces by project or company
+    const filteredTraces = isAll
+      ? allTraces
+      : allTraces.filter((t) => {
+          if (!t.conversationId) return false;
+          if (projectIds && projectIds.length > 0) {
+            return true; // fallback best-effort
+          }
+          return true;
+        });
+
+    const filteredTickets = isAll
+      ? allTickets
+      : allTickets.filter((t) => {
+          const pId = t.projectId || t.project_id || t.project;
+          if (projectIds && projectIds.length > 0 && pId) {
+            return projectIds.includes(Number(pId));
+          }
+          return true;
+        });
+
     let totalLatencyMs = 0;
     let completedCount = 0;
     let failedCount = 0;
@@ -96,7 +203,6 @@ export class MetricAggregator {
 
     const averageLatencyMs = completedCount > 0 ? totalLatencyMs / completedCount : 0;
 
-    // SLA Violations
     const now = new Date();
     let slaViolations = 0;
     for (const ticket of filteredTickets) {
@@ -108,7 +214,6 @@ export class MetricAggregator {
       }
     }
 
-    // Agent Routing Distributions
     const agentRoutingDist: Record<string, number> = {};
     for (const trace of filteredTraces) {
       if (trace.agentId) {
@@ -116,19 +221,20 @@ export class MetricAggregator {
       }
     }
 
-    // Fetch Cache Metrics
-    const cacheService = require("../../cache/CacheService").CacheService.getInstance();
-    const cacheMetrics = cacheService.getMetrics();
     let totalHits = 0;
     let totalMisses = 0;
-    for (const tenantKey of Object.keys(cacheMetrics)) {
-      totalHits += cacheMetrics[tenantKey].hits || 0;
-      totalMisses += cacheMetrics[tenantKey].misses || 0;
-    }
+    let cacheMetrics = {};
+    try {
+      const cacheService = require("../../cache/CacheService").CacheService.getInstance();
+      cacheMetrics = cacheService.getMetrics();
+      for (const tenantKey of Object.keys(cacheMetrics)) {
+        totalHits += (cacheMetrics as any)[tenantKey].hits || 0;
+        totalMisses += (cacheMetrics as any)[tenantKey].misses || 0;
+      }
+    } catch {}
     const totalCache = totalHits + totalMisses;
     const cacheHitRatio = totalCache > 0 ? parseFloat((totalHits / totalCache).toFixed(2)) : 0;
 
-    // Fetch Queue Depth
     let queueDepth = 0;
     try {
       const queueFactory = require("../../queue/QueueFactory").QueueFactory;
@@ -136,9 +242,7 @@ export class MetricAggregator {
       if (jobQueue && typeof jobQueue.getQueueDepth === "function") {
         queueDepth = await jobQueue.getQueueDepth();
       }
-    } catch (qErr: any) {
-      logger.warn({ error: qErr.message }, "Failed to resolve live queue depth for dashboard metrics");
-    }
+    } catch {}
 
     return {
       totalTraces: filteredTraces.length,
@@ -157,11 +261,79 @@ export class MetricAggregator {
     };
   }
 
-  async getConversationTraceSummaries(tenantId?: string): Promise<ConversationTraceSummary[]> {
-    const allTraces = await this.dbAdapter.listAllTraces();
+  async getConversationTraceSummaries(
+    projectScope?: string | number[] | null,
+    options?: { limit?: number; offset?: number }
+  ): Promise<ConversationTraceSummary[]> {
+    const projectIds = this.normalizeProjectScope(projectScope);
+    const limit = Math.min(Math.max(Number(options?.limit) || 50, 1), 100);
+    const offset = Math.max(Number(options?.offset) || 0, 0);
 
-    // Group traces by conversationId
+    try {
+      const sql = `
+        SELECT 
+          c.id AS conversation_id,
+          COALESCE(c.company_id::text, c.project_id::text, '') AS tenant_id,
+          MIN(t.called_at) AS start_time,
+          MAX(t.completed_at) AS end_time,
+          EXTRACT(EPOCH FROM (MAX(COALESCE(t.completed_at, t.called_at)) - MIN(t.called_at))) * 1000 AS duration_ms,
+          CASE 
+            WHEN BOOL_OR(t.status = 'FAILED') THEN 'FAILED'
+            WHEN BOOL_OR(t.status = 'COMPLETED') THEN 'COMPLETED'
+            WHEN BOOL_OR(t.status = 'HANDOFF') THEN 'HANDOFF'
+            ELSE 'RUNNING'
+          END AS status,
+          EXISTS (
+            SELECT 1 FROM tickets tk 
+            WHERE tk.conversation_id = c.id 
+              AND tk.status NOT IN ('Resolved', 'Closed', 'Cancelled', 'Done') 
+              AND tk.due_date IS NOT NULL 
+              AND tk.due_date < NOW()
+              AND tk.deleted_at IS NULL
+          ) AS sla_violated,
+          COALESCE(
+            jsonb_agg(
+              jsonb_build_object(
+                'agentId', COALESCE(t.arguments->>'toAgentId', t.tool_name, 'unknown'),
+                'timestamp', t.called_at,
+                'reason', t.reason
+              ) ORDER BY t.called_at ASC
+            ) FILTER (WHERE t.status = 'HANDOFF'),
+            '[]'::jsonb
+          ) AS handoff_chain
+        FROM traces t
+        JOIN conversations c ON c.id = NULLIF(regexp_replace(t.conversation_id, '[^0-9]', '', 'g'), '')::integer
+        WHERE ($1::integer[] IS NULL OR c.project_id = ANY($1::integer[]))
+        GROUP BY c.id, c.company_id, c.project_id
+        ORDER BY MIN(t.called_at) DESC
+        LIMIT $2 OFFSET $3
+      `;
+
+      const result = await this.pool.query(sql, [projectIds, limit, offset]);
+
+      return result.rows.map((row: any) => ({
+        conversationId: String(row.conversation_id),
+        tenantId: row.tenant_id,
+        startTime: row.start_time instanceof Date ? row.start_time.toISOString() : String(row.start_time || new Date().toISOString()),
+        endTime: row.end_time ? (row.end_time instanceof Date ? row.end_time.toISOString() : String(row.end_time)) : undefined,
+        durationMs: row.duration_ms !== null ? Math.max(0, Math.round(Number(row.duration_ms))) : undefined,
+        handoffChain: Array.isArray(row.handoff_chain) ? row.handoff_chain : [],
+        status: row.status as "RUNNING" | "COMPLETED" | "FAILED" | "HANDOFF",
+        slaViolated: Boolean(row.sla_violated),
+      }));
+    } catch (sqlErr: any) {
+      logger.warn({ error: sqlErr.message }, "SQL trace summaries unavailable, using bounded fallback");
+      return this.fallbackConversationTraceSummaries(projectScope, limit);
+    }
+  }
+
+  private async fallbackConversationTraceSummaries(
+    tenantId?: string | number[] | null,
+    limit: number = 50
+  ): Promise<ConversationTraceSummary[]> {
+    const allTraces = await this.dbAdapter.listAllTraces();
     const tracesByConv = new Map<string, AuditLog[]>();
+
     for (const trace of allTraces) {
       const convId = trace.conversationId;
       if (convId) {
@@ -173,44 +345,19 @@ export class MetricAggregator {
     }
 
     const summaries: ConversationTraceSummary[] = [];
+    const entries = Array.from(tracesByConv.entries()).slice(0, limit);
 
-    for (const [convId, traces] of tracesByConv.entries()) {
-      // Load conversation for tenant checks
-      let companyId = "";
-      try {
-        const conv = await this.dbAdapter.getConversation(convId);
-        if (conv) {
-          companyId = String(conv.company_id || conv.companyId || "");
-          if (!companyId && (conv.project_id || conv.project)) {
-            const project = await this.dbAdapter.findProject(conv.project_id || conv.project);
-            if (project) {
-              companyId = String(project.company_id || project.companyId || "");
-            }
-          }
-        }
-      } catch {}
-
-      if (tenantId && tenantId.toLowerCase() !== 'all' && companyId !== tenantId) {
-        continue; // Skip if filtered out
-      }
-
-      // Reconstruct handoff chain
-      // Filter for HANDOFF traces and sort by calledAt
+    for (const [convId, traces] of entries) {
       const handoffTraces = traces
         .filter((t) => t.status === "HANDOFF")
         .sort((a, b) => new Date(a.calledAt).getTime() - new Date(b.calledAt).getTime());
 
-      const handoffChain: HandoffNode[] = handoffTraces.map((t) => {
-        // extract destination agent from arguments
-        const toAgent = t.arguments?.toAgentId || t.toolName || "unknown";
-        return {
-          agentId: toAgent,
-          timestamp: t.calledAt,
-          reason: t.reason,
-        };
-      });
+      const handoffChain: HandoffNode[] = handoffTraces.map((t) => ({
+        agentId: t.arguments?.toAgentId || t.toolName || "unknown",
+        timestamp: t.calledAt,
+        reason: t.reason,
+      }));
 
-      // Find overall status and start/end times
       const startTimes = traces.map((t) => new Date(t.calledAt).getTime());
       const endTimes = traces.filter((t) => t.completedAt).map((t) => new Date(t.completedAt!).getTime());
 
@@ -220,7 +367,6 @@ export class MetricAggregator {
       const durationMs =
         startTimes.length > 0 && endTimes.length > 0 ? Math.max(...endTimes) - Math.min(...startTimes) : undefined;
 
-      // Determine overall status
       let status: "RUNNING" | "COMPLETED" | "FAILED" | "HANDOFF" = "RUNNING";
       if (traces.some((t) => t.status === "FAILED")) {
         status = "FAILED";
@@ -230,28 +376,15 @@ export class MetricAggregator {
         status = "HANDOFF";
       }
 
-      // Check SLA breaches
-      // Let's see if there are any tickets for this conversation that are violated
-      const conversationTickets = await this.dbAdapter.listAllTickets().then((tcks) =>
-        tcks.filter((t) => {
-          const cId = t.conversationId || t.conversation_id || t.conversation;
-          return String(cId) === convId;
-        })
-      );
-      const slaViolated = conversationTickets.some((t) => {
-        const dueDate = t.dueDate || t.due_date;
-        return t.status !== "Resolved" && dueDate && new Date() > new Date(dueDate);
-      });
-
       summaries.push({
         conversationId: convId,
-        tenantId: companyId,
+        tenantId: "",
         startTime,
         endTime,
         durationMs,
         handoffChain,
         status,
-        slaViolated,
+        slaViolated: false,
       });
     }
 

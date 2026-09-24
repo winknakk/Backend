@@ -33,6 +33,7 @@ const BLOCKED_ERROR_PATTERNS = [
   "plane_mapping_not_found",
   "status code 401",
   "status code 403",
+  "intelligence_queue_unavailable",
 ];
 
 export function classifyOutboxFailure(err: any): OutboxFailureKind {

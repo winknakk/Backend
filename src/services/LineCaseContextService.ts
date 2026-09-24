@@ -19,12 +19,17 @@ const logger = createLogger("line-case-context");
  */
 export interface CaseContextHint {
   intent: CaseResolutionType;
+  outcome?: CaseResolutionType;
   ticketId: number | null;
+  routingTicketId?: number | null;
+  referencedTicketId?: number | null;
   ticketNumber: string | null;
   /** True when the resolver decided this is a problem unrelated to any open case (P0 / P7). */
   forceNew: boolean;
   confidence: number;
   reason: string;
+  candidates?: number[];
+  evidence?: string[];
 }
 
 export interface LineCaseTurnInput {
@@ -86,15 +91,22 @@ const LINE_CHIP_MAX = 13;
 /** Pure: the hint the gate receives for a resolver decision. */
 export function buildCaseHint(res: CaseResolutionResult, openCaseCount: number): CaseContextHint {
   const intent = res.type;
+  const isTargeted = intent === "CONTINUE_ACTIVE_CASE" || intent === "SWITCH_EXISTING_CASE";
+  const routingTicketId = isTargeted ? (res.routingTicketId ?? res.ticketId ?? null) : null;
   return {
     intent,
-    ticketId: intent === "CONTINUE_ACTIVE_CASE" || intent === "SWITCH_EXISTING_CASE" ? res.ticketId ?? null : null,
-    ticketNumber: intent === "CONTINUE_ACTIVE_CASE" || intent === "SWITCH_EXISTING_CASE" ? (res.ticketNumber ? String(res.ticketNumber).toUpperCase() : null) : null,
+    outcome: res.outcome || intent,
+    ticketId: routingTicketId,
+    routingTicketId,
+    referencedTicketId: res.referencedTicketId ?? null,
+    ticketNumber: isTargeted ? (res.ticketNumber ? String(res.ticketNumber).toUpperCase() : null) : null,
     // force_new only matters to the hub's duplicate fold, which only exists
     // when there is an open case to fold into.
     forceNew: intent === "NEW_CASE" && openCaseCount > 0,
     confidence: res.confidence,
     reason: res.reason,
+    candidates: res.candidates,
+    evidence: res.evidence,
   };
 }
 
