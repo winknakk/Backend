@@ -73,7 +73,7 @@ export function followUpReportText(parent: Pick<CaseCandidate, "ticket_number" |
   if (subject) lines.push(`เรื่อง: ${subject}`);
   if (summary && summary !== subject) lines.push(`รายละเอียด: ${summary.length > 600 ? `${summary.slice(0, 600)}…` : summary}`);
   // "เคสเดิม: TCK-… (ยกเลิกเมื่อ dd/mm/yy เวลา hh:mm น.)" — the flow's confirmation card
-  // (Main AI Core step_prepare_friday_context) prints this line as-is.
+  // (Main AI Core step_prepare_context) prints this line as-is.
   const when = thaiDateStamp(parent.closed_at ?? null);
   lines.push(`เคสเดิม: ${parentRef}${when ? ` (${cancelled ? "ยกเลิกเมื่อ" : "ปิดเมื่อ"} ${when})` : ""}`);
   return lines.join("\n");
