@@ -508,7 +508,10 @@ async function runPhase3CSuite() {
       assert.strictEqual(patchRes.statusCode, 200);
       const patchBody = JSON.parse(patchRes.payload);
       assert.strictEqual(patchBody.candidate.status, "reviewed");
-      assert.strictEqual(patchBody.candidate.reviewedBy, "op1");
+      // Reviewer is the authenticated principal. `request.user` (mocked above)
+      // is never set by the production authHook; the route used to read it and
+      // therefore denied every real caller (Phase 3C.1, ISSUE-081).
+      assert.strictEqual(patchBody.candidate.reviewedBy, "op1@test.com");
 
       // 8d. GET clusters as operator-project1 -> 200 OK
       const clustersRes = await app.inject({
