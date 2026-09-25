@@ -43,10 +43,30 @@ const raw = fs.readFileSync(FLOW, "utf8").replace(/^﻿/, "");
 const flow = JSON.parse(raw);
 const steps = stepSettings(flow, new Set(["step_1", "step_gate_agent"]));
 
-const customerPrompt: string = (steps.step_1?.input?.roles ?? [])
-  .map((r: any) => String(r?.content ?? ""))
-  .join("\n\n");
-const gatePrompt: string = String(steps.step_gate_agent?.input?.message ?? "");
+/**
+ * The prompt text may be inline, or (since the flow refactor that moved the
+ * customer prompt into CODE steps such as `step_system_prompt`) a template
+ * reference like {{step_system_prompt['systemPrompt']}}. A reference is
+ * resolved to the referenced step's source code, which is where the prompt
+ * text now lives. The assertions below are unchanged: they still require the
+ * rule text to be present, wherever the flow keeps it.
+ */
+const codeSteps: Record<string, string> = {};
+(function walk(n: any) {
+  if (n && typeof n === "object") {
+    if (!Array.isArray(n) && typeof n.name === "string" && n.type === "CODE" && typeof n.settings?.sourceCode?.code === "string") {
+      codeSteps[n.name] = n.settings.sourceCode.code;
+    }
+    for (const v of Object.values(n)) walk(v);
+  }
+})(flow);
+const resolveRefs = (text: string): string =>
+  text.replace(/\{\{\s*(step_[A-Za-z0-9_]+)[^}]*\}\}/g, (whole, name) => codeSteps[name] ?? whole);
+
+const customerPrompt: string = resolveRefs(
+  (steps.step_1?.input?.roles ?? []).map((r: any) => String(r?.content ?? "")).join("\n\n")
+);
+const gatePrompt: string = resolveRefs(String(steps.step_gate_agent?.input?.message ?? ""));
 
 if (!customerPrompt || !gatePrompt) {
   console.log("ERR: could not extract prompts from the flow asset");
