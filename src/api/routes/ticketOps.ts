@@ -163,6 +163,8 @@ export async function registerTicketOpsRoutes(fastify: FastifyInstance): Promise
         {
           projectId: Number(source.project_id),
           action: "TICKET_MERGE",
+          entityType: "ticket",
+          entityId: source.id,
           actor: actorName,
           operatorId: source.operator_id ? Number(source.operator_id) : null,
           oldValue: {

@@ -105,18 +105,18 @@ export class AuditService {
    */
   async record(entry: AuditEntry, client?: PoolClient): Promise<number | null> {
     const executor = client || this.dbPool;
-    // Inside a caller's transaction the insert runs under a savepoint. A failed
-    // audit write must not abort the caller's transaction: before this, the
-    // swallowed error left it aborted and the caller's COMMIT silently rolled
-    // back — a DLQ requeue or ticket merge answered 200 and changed nothing.
-    const savepoint = client ? "audit_log_write" : null;
+    // Inside a caller's transaction (client given) the audit row is part of the
+    // operation: a failed insert is re-thrown so the caller rolls back and
+    // reports an error. Swallowing it left the transaction aborted, the
+    // caller's COMMIT silently rolled back, and a DLQ requeue or ticket merge
+    // answered 200 having changed nothing. Without a client the write is
+    // best-effort and a failure is only logged.
     try {
       const sanitizedOld = sanitizeAuditData(entry.oldValue || {});
       const sanitizedNew = sanitizeAuditData(entry.newValue || {});
       const actorName = String(entry.actor || "system").slice(0, 255);
       const actionName = String(entry.action || "UNKNOWN").slice(0, 100);
 
-      if (savepoint) await executor.query(`SAVEPOINT ${savepoint}`);
       const res = await executor.query(
         `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, operator_id, entity_type, entity_id, timestamp)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
@@ -132,13 +132,12 @@ export class AuditService {
           deriveEntityId(entry),
         ]
       );
-      if (savepoint) await executor.query(`RELEASE SAVEPOINT ${savepoint}`);
 
       const id = res.rows[0]?.id ? Number(res.rows[0].id) : null;
       return id;
     } catch (err: any) {
-      if (savepoint) await executor.query(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => {});
-      logger.error({ error: err.message, action: entry.action }, "Failed to write admin audit log");
+      logger.error({ error: err.message, action: entry.action, transactional: Boolean(client) }, "Failed to write admin audit log");
+      if (client) throw err;
       return null;
     }
   }

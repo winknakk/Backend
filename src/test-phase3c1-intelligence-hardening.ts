@@ -559,16 +559,14 @@ async function run() {
     assert.deepEqual(duplicates, [], `duplicate routes: ${JSON.stringify(duplicates)}`);
   });
 
-  await test("R2 audit write supplies NOT NULL entity columns and never aborts the caller's transaction", async () => {
+  await test("R2 audit write supplies NOT NULL entity columns; in a caller transaction a failure is raised, never swallowed", async () => {
     // Regression: the live admin_audit_logs requires entity_type/entity_id. The
     // insert failed, the error was swallowed, the caller's transaction stayed
-    // aborted and its COMMIT rolled back — DLQ requeue / ticket merge were no-ops.
-    const seen: string[] = [];
+    // aborted and its COMMIT rolled back while the API answered 200.
     let insertParams: any[] = [];
     let failInsert = true;
     const client: any = {
       query: async (sql: string, params?: any[]) => {
-        seen.push(sql.trim().split(/\s+/).slice(0, 3).join(" "));
         if (sql.includes("INSERT INTO admin_audit_logs")) {
           insertParams = params || [];
           if (failInsert) throw new Error('null value in column "entity_type" violates not-null constraint');
@@ -580,15 +578,17 @@ async function run() {
     const svc = new AuditService({} as any);
     const entry = { projectId: 3, action: "DLQ_REQUEUE", actor: "op", oldValue: { id: 2, status: "dead_letter" }, newValue: { id: 2, status: "pending" } };
 
-    assert.equal(await svc.record(entry, client), null);
-    assert.deepEqual(seen, ["SAVEPOINT audit_log_write", "INSERT INTO admin_audit_logs", "ROLLBACK TO SAVEPOINT"]);
+    await assert.rejects(svc.record(entry, client), /entity_type/, "transactional failure must reach the caller so it rolls back");
 
-    seen.length = 0;
+    const standalone = new AuditService({ query: client.query } as any);
+    assert.equal(await standalone.record(entry), null, "without a caller transaction the write stays best-effort");
+
     failInsert = false;
     assert.equal(await svc.record(entry, client), 41);
-    assert.deepEqual(seen, ["SAVEPOINT audit_log_write", "INSERT INTO admin_audit_logs", "RELEASE SAVEPOINT audit_log_write"]);
-    assert.equal(insertParams[6], "dlq", "entity_type derived from action");
-    assert.equal(insertParams[7], "2", "entity_id derived from the values");
+    assert.equal(insertParams[6], "dlq", "entity_type derived from action when not given");
+    assert.equal(insertParams[7], "2", "entity_id derived from the values when not given");
+    await svc.record({ ...entry, entityType: "outbox_event", entityId: 9 }, client);
+    assert.deepEqual([insertParams[6], insertParams[7]], ["outbox_event", "9"], "explicit entity wins");
   });
 
   await test("R3 trace detail keeps numeric/boolean telemetry types and still strips credentials", () => {
