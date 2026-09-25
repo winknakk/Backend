@@ -591,6 +591,26 @@ async function run() {
     assert.deepEqual([insertParams[6], insertParams[7]], ["outbox_event", "9"], "explicit entity wins");
   });
 
+  await test("R4 every admin_audit_logs INSERT supplies the NOT NULL entity_type and entity_id", () => {
+    // Regression: the project SLA / business-hours / settings audits omitted
+    // them and the routes answered 500 on the live schema.
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const f of fs.readdirSync(dir)) {
+        const p = path.join(dir, f);
+        if (fs.statSync(p).isDirectory()) walk(p);
+        else if (f.endsWith(".ts") && !f.includes("test")) {
+          const src = fs.readFileSync(p, "utf8");
+          for (const m of src.matchAll(/INSERT INTO admin_audit_logs\s*\(([^)]*)\)/g)) {
+            if (!/\bentity_type\b/.test(m[1]) || !/\bentity_id\b/.test(m[1])) offenders.push(path.relative(__dirname, p));
+          }
+        }
+      }
+    };
+    walk(path.resolve(__dirname));
+    assert.deepEqual(offenders, [], `audit inserts missing entity columns: ${offenders.join(", ")}`);
+  });
+
   await test("R3 trace detail keeps numeric/boolean telemetry types and still strips credentials", () => {
     // Regression: every scalar was stringified, so latencyMs landed as "123".
     const out: any = sanitizeDetail({ latencyMs: 123, ok: true, model: null, token: "abc", apiKey: "k", note: "A".repeat(45), nested: { n: 0.5 } });
