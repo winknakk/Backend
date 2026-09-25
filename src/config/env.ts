@@ -131,6 +131,13 @@ export const EnvSchema = z.object({
   // decision): a re-opened case keeps its priority; its SLA clocks restart.
   REOPEN_AFTER_CLOSE_DAYS: z.coerce.number().int().min(0).max(365).default(7),
   REOPEN_FEEDBACK_WINDOW_MINUTES: z.coerce.number().int().min(0).max(1440).default(30),
+  // AD-14 "AI ใช้เวลานานกว่าปกติ" message: sent this long after a LINE turn was
+  // dispatched when the AI has still not replied (operator 2026-09-24: 30 min).
+  // Independent of the turn lease, which is released at its own timeout.
+  AI_TIMEOUT_FALLBACK_AFTER_MS: z.coerce.number().int().min(0).max(24 * 60 * 60 * 1000).default(30 * 60 * 1000),
+  // LINE stickers from the backend (2026-09-24). "false" restores text-only
+  // notifications and silently ignores customer stickers.
+  LINE_STICKERS_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   // SLA console write controls (shift a ticket's clock, force a test send,
   // reset test data). Unset = allowed outside production, denied in production.
   SLA_CONSOLE_ALLOW_WRITES: z.enum(["true", "false"]).optional().transform((value) => (value === undefined ? undefined : value === "true")),

@@ -4,6 +4,7 @@ import { createLogger } from "../observability/logger";
 import { tokenForContext } from "../domain/execution/ExecutionContextService";
 import { LineTypingIndicatorService } from "./LineTypingIndicatorService";
 import { customerNotificationService } from "./CustomerNotificationService";
+import { pool } from "../adapters/postgres/PostgresAdapter";
 
 const logger = createLogger("agent-session-worker");
 
@@ -24,6 +25,13 @@ export interface WorkerConfig {
   typingIndicator?: LineTypingIndicatorService;
   /** Upper bound for the reply wait; clamped to stay inside the lease. */
   turnCompletionTimeoutMs?: number;
+  /**
+   * When the AD-14 "AI is taking longer than usual" message goes out,
+   * measured from dispatch (operator 2026-09-24: 30 minutes). Checked on a
+   * timer after the turn is released, so a long value never holds the
+   * conversation's lease and later customer messages keep flowing.
+   */
+  timeoutFallbackAfterMs?: number;
 }
 
 export class AgentSessionQueueWorker {
@@ -32,6 +40,8 @@ export class AgentSessionQueueWorker {
   private readonly maxAttempts: number;
   private readonly typingIndicator: LineTypingIndicatorService | null;
   private readonly turnCompletionTimeoutMs: number;
+  private readonly timeoutFallbackAfterMs: number;
+  private readonly fallbackTimers = new Set<NodeJS.Timeout>();
   private readonly activeDispatches = new Set<number>();
   private watchdogTimer: NodeJS.Timeout | null = null;
   private isStopping = false;
@@ -50,6 +60,7 @@ export class AgentSessionQueueWorker {
       config.turnCompletionTimeoutMs || 90000,
       Math.max(10000, this.leaseDurationMs - 5000)
     );
+    this.timeoutFallbackAfterMs = config.timeoutFallbackAfterMs ?? 30 * 60 * 1000;
 
     if (config.watchdogIntervalMs && config.watchdogIntervalMs > 0) {
       this.startWatchdog(config.watchdogIntervalMs);
@@ -131,6 +142,7 @@ export class AgentSessionQueueWorker {
 
         // High-water mark taken BEFORE dispatch so a reply persisted
         // quickly by the flow cannot be missed.
+        const dispatchedAt = Date.now();
         let sinceMessageId = 0;
         if (this.typingIndicator) {
           try {
@@ -178,20 +190,10 @@ export class AgentSessionQueueWorker {
           );
 
           if (!waited.replied) {
-            // AD-14: Send fallback message to customer instead of leaving them silent
-            try {
-              await customerNotificationService.send({
-                conversationId,
-                notificationType: "ai_timeout_fallback",
-                idempotencyKey: `timeout:${conversationId}:${queueItemId}`,
-                correlationId: `timeout:${conversationId}:${queueItemId}`,
-              });
-            } catch (notifyErr: any) {
-              logger.warn(
-                { conversationId, error: notifyErr.message },
-                "[agent-worker] Failed sending timeout fallback notification"
-              );
-            }
+            // AD-14: tell the customer rather than leave them silent — but only
+            // once the fallback delay has passed since dispatch and the AI has
+            // still not answered. The turn itself is released now either way.
+            this.scheduleTimeoutFallback(conversationId, queueItemId, sinceMessageId, dispatchedAt);
           }
         }
 
@@ -235,6 +237,53 @@ export class AgentSessionQueueWorker {
   }
 
   /**
+   * Arms the AD-14 fallback for a turn released without a reply. In-process
+   * timer: a restart inside the window drops it (the customer then simply
+   * gets no "taking longer" line, never a wrong one).
+   */
+  private scheduleTimeoutFallback(conversationId: number, queueItemId: number | string, sinceMessageId: number, dispatchedAt: number): void {
+    const delay = Math.max(0, dispatchedAt + this.timeoutFallbackAfterMs - Date.now());
+    const timer = setTimeout(() => {
+      this.fallbackTimers.delete(timer);
+      void this.sendTimeoutFallbackIfStillSilent(conversationId, queueItemId, sinceMessageId);
+    }, delay);
+    timer.unref?.();
+    this.fallbackTimers.add(timer);
+    logger.info({ conversationId, queueItemId, delayMs: delay }, "[agent-worker] Timeout fallback armed");
+  }
+
+  private async sendTimeoutFallbackIfStillSilent(conversationId: number, queueItemId: number | string, sinceMessageId: number): Promise<void> {
+    try {
+      // Any AI reply since dispatch (this turn's, or a later one) settles it.
+      if (this.typingIndicator && (await this.typingIndicator.hasReplySince(conversationId, sinceMessageId))) {
+        logger.info({ conversationId, queueItemId }, "[agent-worker] AI replied before the fallback delay; fallback skipped");
+        return;
+      }
+      // A person has the thread: the silence is theirs, not the AI's.
+      const { rows } = await pool.query<{ handled_by: string | null; takeover_state: string | null }>(
+        `SELECT handled_by, takeover_state FROM conversations WHERE id = $1 LIMIT 1`,
+        [conversationId]
+      );
+      const conv = rows[0];
+      if (conv && (String(conv.handled_by || "ai").toLowerCase() !== "ai" || String(conv.takeover_state || "none").toLowerCase() !== "none")) {
+        logger.info({ conversationId, queueItemId }, "[agent-worker] Human owns the thread; timeout fallback skipped");
+        return;
+      }
+      await customerNotificationService.send({
+        conversationId,
+        notificationType: "ai_timeout_fallback",
+        idempotencyKey: `timeout:${conversationId}:${queueItemId}`,
+        correlationId: `timeout:${conversationId}:${queueItemId}`,
+      });
+    } catch (notifyErr: any) {
+      logger.warn(
+        { conversationId, error: notifyErr.message },
+        "[agent-worker] Failed sending timeout fallback notification"
+      );
+    }
+  }
+
+  /**
    * Starts periodic watchdog to recover expired leases and process stalled queues.
    */
   startWatchdog(intervalMs = 30000): void {
@@ -263,6 +312,8 @@ export class AgentSessionQueueWorker {
    */
   async stop(): Promise<void> {
     this.isStopping = true;
+    for (const timer of this.fallbackTimers) clearTimeout(timer);
+    this.fallbackTimers.clear();
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;

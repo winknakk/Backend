@@ -19,7 +19,7 @@ import { caseResolver, type CaseCandidate } from "./domain/case/CaseResolver";
 import { buildCaseHint, ambiguityChips, followUpReportText } from "./services/LineCaseContextService";
 
 // 1. Extract step_parse_gate code from Main AI Core Flow.json
-const flowPath = path.resolve(__dirname, "../../../workflow-tooling/promptx_tools/workflow/เริ่มต้นใหม่อีกครั้ง/Main AI Core Flow.json");
+const flowPath = path.resolve(__dirname, "../../../แล้วกู๊ดจะกลับมาใน AVENGERS DOOMSDAY/All Workflows (ใช้งานในปัจจุบัน)/Main AI Core Flow.json");
 const rawJson = fs.readFileSync(flowPath, "utf-8").replace(/^\uFEFF/, "");
 const flowData = JSON.parse(rawJson);
 

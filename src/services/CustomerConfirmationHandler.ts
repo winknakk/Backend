@@ -7,14 +7,27 @@ import {
   detectCancelIntent,
   detectReopenScope,
   detectReopenConfirmation,
+  isBareShortAnswer,
+  isDeclineReopen,
+  isExplicitDeclineCancel,
+  isExplicitDeclineClose,
   TICKET_NUMBER_PATTERN,
   NEW_ISSUE_PATTERN,
   SAME_ISSUE_PATTERN,
+  SYMPTOM_PATTERN,
+  type ConfirmationIntent,
+  type ReopenScope,
 } from "../domain/ticket/CustomerConfirmation";
+import { closedReferenceChips } from "./LineCaseContextService";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import { isPendingCreatePrompt } from "../domain/case/PendingIntake";
 import type { TicketLifecycleStatus } from "../domain/ticket/TicketLifecycle";
-import { customerNotificationService, type CustomerNotificationType } from "./CustomerNotificationService";
+import {
+  CustomerNotificationService,
+  customerNotificationService,
+  type CustomerNotificationType,
+  type NotificationQuickReply,
+} from "./CustomerNotificationService";
 import { cancelAlertService, doneEmailService, reopenAlertService } from "./UrgentAlertService";
 import { conversationFocusService } from "./ConversationFocusService";
 
@@ -67,6 +80,76 @@ const ROUTE_TO_CLOSED: Record<string, TicketLifecycleStatus[]> = {
 };
 
 type PendingKind = "close" | "which_case" | "reopen" | "scope" | "cancel" | "cancel_which_case" | "create";
+
+interface PendingQuestion {
+  kind: PendingKind;
+  ticketNumber: string | null;
+  /** True when nothing the AI said since has moved the conversation on. */
+  strict: boolean;
+}
+
+/** Ledger types that ask the customer something, and which answer they wait for. */
+const QUESTION_KINDS: Partial<Record<string, PendingKind>> = {
+  close_confirmation_request: "close",
+  close_which_case: "which_case",
+  reopen_which_kind: "scope",
+  reopen_confirmation_request: "reopen",
+  cancel_confirmation_request: "cancel",
+  cancel_which_case: "cancel_which_case",
+};
+
+/** Ledger rows that neither ask nor settle anything; they never hide a pending question. */
+const PASSIVE_NOTIFICATION_TYPES: string[] = [
+  "acknowledgement",
+  "acknowledgement_action",
+  "acknowledgement_edit",
+  "acknowledgement_choice",
+  "greeting",
+  "thanks",
+  "progress_update",
+  "due_extension_notice",
+  "image_attached",
+  "image_need_context",
+  "image_auto_attached",
+  "image_auto_attach_pending",
+  "unsupported_file",
+  "ai_timeout_fallback",
+  "sticker_reply",
+  "sticker_reminder",
+];
+
+/** Pending questions whose chips a sticker reminder can rebuild (2026-09-24). */
+const REMINDER_TYPES: Partial<Record<PendingKind, CustomerNotificationType>> = {
+  close: "close_confirmation_request",
+  cancel: "cancel_confirmation_request",
+  scope: "reopen_which_kind",
+  reopen: "reopen_confirmation_request",
+};
+
+/** How long a question makes its confirmation chip valid — the sticky-chip window. */
+const ASKED_WINDOW_HOURS = 24;
+
+/**
+ * The protocol question an AI-flow reply asks, read from its wording (the
+ * flow's own close / re-open questions and the create card have no ledger row).
+ */
+function flowQuestion(content: string): { kind: PendingKind; ticketNumber: string | null } | null {
+  if (!content) return null;
+  const m = content.match(TICKET_NUMBER_PATTERN);
+  const num = m ? m[0].toUpperCase() : null;
+  if (/ยกเลิกเคสไหน/.test(content)) return { kind: "cancel_which_case", ticketNumber: null };
+  if (/ต้องการยกเลิกเคส|ยืนยันยกเลิกเคส|ยกเลิกเคส[^\n]{0,200}ใช่ไหม|ระบบตรวจพบคำขอยกเลิกเคส/.test(content)) return { kind: "cancel", ticketNumber: num };
+  if (/(?:ปัญหาเดิม|อาการเดิม)[^\n]{0,200}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
+  if (/ปิดเคสไหน|แตะเลือกข้างล่างนี้|แตะเลือกได้เลย/.test(content)) return { kind: "which_case", ticketNumber: null };
+  if (/ยืนยันเปิดเคสอีกครั้ง|CONFIRM_REOPEN_PENDING|เปิดเคส[^\n]{0,200}อีกครั้งใช่ไหม/.test(content)) return { kind: "reopen", ticketNumber: num };
+  if (/ต้องการปิดเคส|ยืนยันปิดเคส|CONFIRM_CLOSE_PENDING|ปิดเคส[^\n]{0,200}ใช่ไหม/.test(content)) return { kind: "close", ticketNumber: num };
+  // The AI gate's create-confirmation prompt or its "which part to change?"
+  // question (markers shared with the LINE case-context guard and the flow's
+  // deterministic net — `domain/case/PendingIntake.ts`): while it is pending,
+  // "ยกเลิกเคส" without a number means the draft, which the gate's CANCEL_RESET owns.
+  if (isPendingCreatePrompt(content)) return { kind: "create", ticketNumber: num };
+  return null;
+}
 
 /**
  * Two-step close and the re-open path, decided by the customer alone and
@@ -143,38 +226,131 @@ export class CustomerConfirmationHandler {
   }
 
   /**
-   * Whether the bot's LAST word to this customer was one of the protocol's
-   * questions, and which. Only the last message counts (seen live 2026-09-08:
-   * a stale close question made a "ยืนยัน" meant for a create confirmation
-   * close the wrong case). The explicit chip texts keep working regardless.
+   * The question the customer owes an answer to, if any.
+   *
+   * Backend questions are read from the notification ledger by TYPE, never by
+   * wording (2026-09-24): the old wording regexes mistook one "ปัญหาเดิม /
+   * ปัญหาใหม่" variant for the close list (H3) and missed the close question
+   * whenever a long subject sat between "ปิดเคส" and "ใช่ไหม" (H4). Receipts
+   * and status pushes (Fast Ack, SLA progress) never hide a question (H5).
+   *
+   * Questions asked by the AI flow (its close / re-open questions, the create
+   * confirmation card) exist only as reply text and keep the wording rules.
+   *
+   * `strict` = nothing the AI said since has moved the conversation on. Only
+   * a strict question takes a bare "ใช่" / "ไม่" (seen live 2026-09-08: a stale
+   * close question made a "ยืนยัน" meant for a create confirmation close the
+   * wrong case); an explicit "ยังไม่ปิด" / "ไม่ยกเลิก" also answers a loose one.
    */
-  private async pendingQuestion(conversationId: number): Promise<{ kind: PendingKind; ticketNumber: string | null } | null> {
-    const last = await pool.query<{ content: string }>(
-      `SELECT content FROM messages
-        WHERE conversation_id = $1 AND role = 'ai'
-          AND created_at >= NOW() - ($2::int * INTERVAL '1 minute')
-        ORDER BY id DESC LIMIT 1`,
-      [conversationId, CLOSE_QUESTION_WINDOW_MINUTES]
+  private async pendingQuestion(conversationId: number): Promise<PendingQuestion | null> {
+    const [ledgerRes, replyRes] = await Promise.all([
+      pool.query<{ notification_type: string; ticket_number: string | null; created_at: Date }>(
+        `SELECT n.notification_type, t.ticket_number, n.created_at
+           FROM customer_notifications n
+           LEFT JOIN tickets t ON t.id = n.ticket_id
+          WHERE n.conversation_id = $1
+            AND n.status = 'sent'
+            AND n.created_at >= NOW() - ($2::int * INTERVAL '1 minute')
+            AND n.notification_type <> ALL($3::text[])
+          ORDER BY n.id DESC LIMIT 1`,
+        [conversationId, CLOSE_QUESTION_WINDOW_MINUTES, PASSIVE_NOTIFICATION_TYPES]
+      ),
+      pool.query<{ content: string; created_at: Date }>(
+        `SELECT content, created_at FROM messages
+          WHERE conversation_id = $1 AND role = 'ai'
+            AND COALESCE(message_purpose, '') <> 'notification'
+            AND created_at >= NOW() - ($2::int * INTERVAL '1 minute')
+          ORDER BY id DESC LIMIT 1`,
+        [conversationId, CLOSE_QUESTION_WINDOW_MINUTES]
+      ),
+    ]);
+    const row = ledgerRes.rows[0];
+    const reply = replyRes.rows[0];
+    const ledgerKind = row ? QUESTION_KINDS[row.notification_type] ?? null : null;
+    const ledgerQuestion = ledgerKind
+      ? { kind: ledgerKind, ticketNumber: row?.ticket_number ? String(row.ticket_number).toUpperCase() : null }
+      : null;
+    const replyIsNewer = Boolean(reply && (!row || new Date(reply.created_at).getTime() > new Date(row.created_at).getTime()));
+    if (replyIsNewer) {
+      const asked = flowQuestion(String(reply?.content || ""));
+      if (asked) return { ...asked, strict: true };
+      return ledgerQuestion ? { ...ledgerQuestion, strict: false } : null;
+    }
+    return ledgerQuestion ? { ...ledgerQuestion, strict: true } : null;
+  }
+
+  /**
+   * The chips of the question the customer still owes an answer to, for the
+   * reminder sent when they reply with a sticker instead (2026-09-24).
+   * null = nothing pending; [] = something pending whose chips cannot be
+   * rebuilt here (a case list, the AI's create summary) — stay silent.
+   * A sticker is never read as the answer itself.
+   */
+  async pendingReminderChips(conversationId: number): Promise<NotificationQuickReply[] | null> {
+    const pending = await this.pendingQuestion(conversationId);
+    if (pending) {
+      const type = pending.strict ? REMINDER_TYPES[pending.kind] : undefined;
+      return type ? CustomerNotificationService.defaultQuickReplies(type, pending.ticketNumber) : [];
+    }
+    // The delivery card: its question has no PendingKind, it stands while the
+    // case is still RESOLVED and nothing newer was asked.
+    const { rows } = await pool.query<{ notification_type: string; ticket_number: string | null; status: string | null }>(
+      `SELECT n.notification_type, t.ticket_number, UPPER(t.status) AS status
+         FROM customer_notifications n
+         LEFT JOIN tickets t ON t.id = n.ticket_id
+        WHERE n.conversation_id = $1
+          AND n.status = 'sent'
+          AND n.created_at >= NOW() - ($2::int * INTERVAL '1 hour')
+          AND n.notification_type <> ALL($3::text[])
+        ORDER BY n.id DESC LIMIT 1`,
+      [conversationId, ASKED_WINDOW_HOURS, PASSIVE_NOTIFICATION_TYPES]
     );
-    const content = String(last.rows[0]?.content || "");
-    if (!content) return null;
-    const m = content.match(TICKET_NUMBER_PATTERN);
-    const num = m ? m[0].toUpperCase() : null;
-    if (/ยกเลิกเคสไหน/.test(content)) return { kind: "cancel_which_case", ticketNumber: null };
-    if (/ต้องการยกเลิกเคส|ยืนยันยกเลิกเคส|ยกเลิกเคส[^\n]{0,80}ใช่ไหม|ระบบตรวจพบคำขอยกเลิกเคส/.test(content)) return { kind: "cancel", ticketNumber: num };
-    if (/แตะเลือกข้างล่างนี้|แตะเลือกได้เลย/.test(content)) return { kind: "which_case", ticketNumber: null };
-    if (/(?:ปัญหาเดิม|อาการเดิม)[^\n]{0,80}ปัญหาใหม่/.test(content)) return { kind: "scope", ticketNumber: num };
-    if (/ยืนยันเปิดเคสอีกครั้ง|เปิดเคส[^\n]{0,80}อีกครั้งใช่ไหม/.test(content)) return { kind: "reopen", ticketNumber: num };
-    if (/ต้องการปิดเคส|ยืนยันปิดเคส|ปิดเคส[^\n]{0,80}ใช่ไหม/.test(content)) return { kind: "close", ticketNumber: num };
-    // The AI gate's create-confirmation prompt or its "which part to change?"
-    // question (markers shared with the LINE case-context guard and the
-    // flow's deterministic net — `domain/case/PendingIntake.ts`): while it is
-    // pending, "ยกเลิกเคส" without a number means the draft, which the gate's
-    // CANCEL_RESET owns.
-    if (isPendingCreatePrompt(content)) {
-      return { kind: "create", ticketNumber: num };
+    const row = rows[0];
+    if (row && (row.notification_type === "resolution_confirmation" || row.notification_type === "resolution_nudge") && row.status === "RESOLVED") {
+      return CustomerNotificationService.defaultQuickReplies("resolution_confirmation", row.ticket_number);
     }
     return null;
+  }
+
+  /**
+   * Whether this exact case was actually asked the question that its
+   * confirmation chip answers, after its last status change and within the
+   * sticky-chip window (H8 / H10). Typed "ยืนยันปิดเคส <TCK>" on a case nobody
+   * asked about, or one engineering has moved since, gets the question first.
+   */
+  private async wasAsked(conversationId: number, ticket: OpenTicket, kind: "close" | "cancel" | "reopen"): Promise<boolean> {
+    const type: CustomerNotificationType =
+      kind === "close" ? "close_confirmation_request" : kind === "cancel" ? "cancel_confirmation_request" : "reopen_confirmation_request";
+    try {
+      const ledger = await pool.query(
+        `SELECT 1 FROM customer_notifications n
+           JOIN tickets t ON t.id = n.ticket_id
+          WHERE n.conversation_id = $1 AND n.ticket_id = $2 AND n.notification_type = $3
+            AND n.status = 'sent'
+            AND n.created_at >= NOW() - ($4::int * INTERVAL '1 hour')
+            AND n.created_at >= COALESCE(t.lifecycle_changed_at, '-infinity'::timestamptz)
+          LIMIT 1`,
+        [conversationId, ticket.id, type, ASKED_WINDOW_HOURS]
+      );
+      if (ledger.rows.length > 0) return true;
+      if (!ticket.ticket_number) return false;
+      // The AI flow asks its own close / re-open questions; those live only as reply text.
+      const replies = await pool.query<{ content: string }>(
+        `SELECT m.content FROM messages m
+           JOIN tickets t ON t.id = $2
+          WHERE m.conversation_id = $1 AND m.role = 'ai'
+            AND COALESCE(m.message_purpose, '') <> 'notification'
+            AND m.created_at >= NOW() - ($3::int * INTERVAL '1 hour')
+            AND m.created_at >= COALESCE(t.lifecycle_changed_at, '-infinity'::timestamptz)
+            AND POSITION(UPPER($4) IN UPPER(m.content)) > 0
+          ORDER BY m.id DESC LIMIT 5`,
+        [conversationId, ticket.id, ASKED_WINDOW_HOURS, ticket.ticket_number]
+      );
+      return replies.rows.some((r) => flowQuestion(String(r.content || ""))?.kind === kind);
+    } catch (err: any) {
+      logger.warn({ ticketId: ticket.id, kind, error: err.message }, "Could not check whether the question was asked; asking again");
+      return false;
+    }
   }
 
   private notify(
@@ -245,6 +421,140 @@ export class CustomerConfirmationHandler {
     return { handled: true, ticketId: ticket.id, from, to: ticket.status === "RESOLVED" ? "CUSTOMER_CONFIRMED" : ticket.status, reason: "CLOSE_QUESTION_ASKED" };
   }
 
+  /** "Same problem or a new one?" — two chips decide (operator decision 2026-09-08: always ask). */
+  private async askScope(input: { conversationId: number; correlationId?: string }, ticket: OpenTicket, tag = "which_kind"): Promise<ConfirmationOutcome> {
+    await this.notify(input, ticket, "reopen_which_kind", this.eventKey(input, tag));
+    return { handled: true, ticketId: ticket.id, reason: "REOPEN_SCOPE_ASKED" };
+  }
+
+  /**
+   * Several delivered cases and an answer that names none (H1): ask which,
+   * one chip per case carrying the same answer with the number attached.
+   * Picking the newest one used to close or re-open a case the customer
+   * never meant.
+   */
+  private async askWhichAwaiting(
+    input: { conversationId: number; correlationId?: string },
+    awaiting: OpenTicket[],
+    scope: ReopenScope,
+    intent: ConfirmationIntent
+  ): Promise<ConfirmationOutcome> {
+    const shown = awaiting.slice(0, WHICH_CASE_LIMIT);
+    const answer = scope === "NEW" ? "ปัญหาใหม่" : intent === "CONFIRMED" && scope === "NONE" ? "ใช้งานได้แล้ว" : "ยังมีปัญหาอยู่";
+    const lines = shown.map((t) => {
+      const subject = String(t.subject || "").trim();
+      const short = subject.length > 60 ? `${subject.slice(0, 60)}…` : subject;
+      return `• ${t.ticket_number || `#${t.id}`}${short ? ` – ${short}` : ""}`;
+    });
+    await this.notify(input, null, "resolution_which_case", this.eventKey(input, "resolution_which_case"), {
+      detail: lines.join("\n"),
+      quickReplies: shown
+        .filter((t) => t.ticket_number)
+        .map((t) => ({ label: String(t.ticket_number).slice(0, 20), text: `${answer} ${t.ticket_number}` })),
+    });
+    return { handled: true, reason: "RESOLUTION_WHICH_CASE" };
+  }
+
+  /**
+   * A delivery-style answer about a case that is not waiting on the customer
+   * (engineering pulled it back, or it was never delivered). Answered for
+   * that case only — never redirected to another one (H1).
+   */
+  private async answerCaseInProgress(
+    input: { conversationId: number; correlationId?: string },
+    ticket: OpenTicket,
+    text: string,
+    scope: ReopenScope,
+    intent: ConfirmationIntent
+  ): Promise<ConfirmationOutcome> {
+    if (intent === "CONFIRMED" && scope === "NONE") return this.askClose(input, ticket);
+    if (scope === "SAME" || scope === "AMBIGUOUS" || intent === "REJECTED") {
+      const feedback = this.feedbackFrom(text);
+      if (feedback) await this.saveFeedback(input, ticket, feedback, ticket.reopened_count ?? null, "comment");
+      const num = ticket.ticket_number || `#${ticket.id}`;
+      await this.notify(input, ticket, "case_context", this.eventKey(input, "case_in_progress"), {
+        detail: `เคส ${num} ทีมงานยังดำเนินการอยู่ค่ะ ${feedback ? "แอดมินส่งรายละเอียดที่แจ้งมาให้ทีมงานแล้วนะคะ " : ""}มีความคืบหน้าจะรีบแจ้งให้ทราบค่ะ หากมีรายละเอียดเพิ่มเติม พิมพ์เล่ามาได้เลยนะคะ`,
+        quickReplies: [],
+      });
+      return { handled: true, ticketId: ticket.id, reason: "CASE_STILL_IN_PROGRESS" };
+    }
+    return { handled: false, reason: "OPEN_CASE_NO_PROTOCOL_INTENT" };
+  }
+
+  /**
+   * "ปัญหาใหม่" about a case that is already closed: nothing to close — ask
+   * for the new report. `new_case_prompt` opens the new-case window, so the
+   * next message is filed as a new case rather than matched to an old one.
+   */
+  private async promptNewIssue(input: { conversationId: number; correlationId?: string }, ended: OpenTicket): Promise<ConfirmationOutcome> {
+    await customerNotificationService.send({
+      conversationId: input.conversationId,
+      notificationType: "new_case_prompt",
+      idempotencyKey: this.eventKey(input, "new_issue_prompt"),
+      projectId: ended.project_id ?? null,
+      orgId: ended.org_id ?? null,
+      correlationId: input.correlationId,
+      quickReplies: [],
+    });
+    return { handled: true, ticketId: ended.id, reason: "NEW_ISSUE_PROMPTED" };
+  }
+
+  /**
+   * The answer for a case that has already ended. A cancelled case is never
+   * re-opened and must not be told "ปิดไปเกิน 7 วัน" (H9, operator decision
+   * 2026-09-18); it is offered a new case made from it instead.
+   */
+  private async answerEndedCase(
+    input: { conversationId: number; correlationId?: string },
+    ended: OpenTicket,
+    purpose: "reopen" | "close"
+  ): Promise<ConfirmationOutcome> {
+    const num = ended.ticket_number || `#${ended.id}`;
+    if (String(ended.status).toUpperCase() === "CANCELLED") {
+      await this.notify(input, ended, "case_context", this.eventKey(input, "cancelled_case"), {
+        detail: `เคส ${num} ถูกยกเลิกไปแล้วค่ะ ระบบเปิดเคสที่ยกเลิกแล้วกลับมาไม่ได้ หากยังพบปัญหาอยู่ แตะ "เปิดเคสใหม่จากเรื่องนี้" หรือเล่าอาการที่เจอมาได้เลยนะคะ`,
+        quickReplies: closedReferenceChips(ended.ticket_number, ended.closed_at, config.REOPEN_AFTER_CLOSE_DAYS, "CANCELLED"),
+      });
+      return { handled: true, ticketId: ended.id, reason: "CASE_CANCELLED" };
+    }
+    if (purpose === "reopen") {
+      await this.notify(input, ended, "reopen_too_old", this.eventKey(input, "reopen_too_old"), { detail: String(config.REOPEN_AFTER_CLOSE_DAYS), quickReplies: [] });
+      return { handled: true, ticketId: ended.id, reason: "REOPEN_TOO_OLD" };
+    }
+    await this.notify(input, ended, "case_context", this.eventKey(input, "already_closed"), {
+      detail: `เคส ${num} ปิดเรียบร้อยแล้วค่ะ`,
+      quickReplies: [],
+    });
+    return { handled: true, ticketId: ended.id, reason: "ALREADY_CLOSED" };
+  }
+
+  /**
+   * A customer action the state machine refused (H6). The turn stays handled
+   * and the customer is told what really happened: handing "ยืนยันยกเลิกเคส
+   * <TCK>" to the AI let it announce a cancel that never happened (2026-09-18).
+   */
+  private async transitionRefused(
+    input: { conversationId: number; correlationId?: string },
+    ticket: OpenTicket,
+    action: "close" | "cancel" | "reopen",
+    code?: string
+  ): Promise<ConfirmationOutcome> {
+    logger.warn({ ticketId: ticket.id, from: ticket.status, action, code }, "Customer action refused by the state machine; answered at the edge");
+    const fresh = await pool
+      .query<{ status: string }>(`SELECT UPPER(COALESCE(status, '')) AS status FROM tickets WHERE id = $1`, [ticket.id])
+      .then((r) => String(r.rows[0]?.status || ""))
+      .catch(() => "");
+    if (action === "cancel" && (fresh === "RESOLVED" || fresh === "CUSTOMER_CONFIRMED")) {
+      // Delivered in the meantime: not cancellable, so offer the close question.
+      return this.askClose(input, { ...ticket, status: fresh });
+    }
+    if (action !== "reopen" && (fresh === "CLOSED" || fresh === "CANCELLED")) {
+      return this.answerEndedCase(input, { ...ticket, status: fresh }, "close");
+    }
+    await this.notify(input, ticket, "action_failed", this.eventKey(input, `action_failed:${action}`), { quickReplies: [] });
+    return { handled: true, ticketId: ticket.id, from: ticket.status, reason: `TRANSITION_REFUSED: ${code || "UNKNOWN"}` };
+  }
+
   /** Walks the ticket to CLOSED along ROUTE_TO_CLOSED and tells the customer. */
   private async closeTicket(
     input: { conversationId: number; correlationId?: string },
@@ -260,7 +570,7 @@ export class CustomerConfirmationHandler {
     const route = ROUTE_TO_CLOSED[ticket.status];
     if (!route) {
       logger.warn({ ticketId: ticket.id, status: ticket.status }, "No close route for ticket status");
-      return { handled: false, reason: "NO_CLOSE_ROUTE" };
+      return this.transitionRefused(input, ticket, "close", "NO_CLOSE_ROUTE");
     }
     let current: string = ticket.status;
     let closedEventId: number | null = null;
@@ -279,7 +589,7 @@ export class CustomerConfirmationHandler {
       });
       if (!r.applied) {
         logger.warn({ ticketId: ticket.id, from: current, to: next, code: r.code }, "Close route hop rejected");
-        return { handled: false, ticketId: ticket.id, from: ticket.status, to: current, reason: r.code };
+        return this.transitionRefused(input, ticket, "close", r.code);
       }
       current = next;
       if (next === "CLOSED") closedEventId = r.eventId ?? null;
@@ -364,7 +674,7 @@ export class CustomerConfirmationHandler {
     });
     if (!reopened.applied) {
       logger.warn({ ticketId: ticket.id, code: reopened.code }, "Customer rejection could not be applied");
-      return { handled: false, reason: reopened.code };
+      return this.transitionRefused(input, ticket, "reopen", reopened.code);
     }
     const countRow = await pool.query<{ reopened_count: number | null }>(`SELECT reopened_count FROM tickets WHERE id = $1`, [ticket.id]).catch(() => null);
     const count = Number(countRow?.rows?.[0]?.reopened_count || 1);
@@ -468,7 +778,7 @@ export class CustomerConfirmationHandler {
     });
     if (!r.applied) {
       logger.warn({ ticketId: ticket.id, from: ticket.status, code: r.code }, "Customer cancel could not be applied");
-      return { handled: false, ticketId: ticket.id, from: ticket.status, reason: r.code };
+      return this.transitionRefused(input, ticket, "cancel", r.code);
     }
     const customerReason = await this.requestedCancelReason(ticket.id);
     await pool
@@ -504,14 +814,27 @@ export class CustomerConfirmationHandler {
     const tickets = await this.loadOpenTickets(input.conversationId);
     const activeTicketId = await conversationFocusService.getActiveTicketId(input.conversationId);
     const activeTicket = activeTicketId ? tickets.find((t) => t.id === activeTicketId) ?? null : null;
-    const pending = await this.pendingQuestion(input.conversationId);
-    const close = detectCloseIntent(text, pending?.kind === "close" || pending?.kind === "which_case");
+    // `asked`: the newest question in the last 30 minutes, strict or loose.
+    // `pending`: only a strict one — the only kind a bare "ใช่" / "ไม่" answers.
+    const asked = await this.pendingQuestion(input.conversationId);
+    const pending = asked?.strict ? asked : null;
     const numberInText = (text.match(TICKET_NUMBER_PATTERN)?.[0] || "").toUpperCase() || null;
+    const isBareNumber = Boolean(numberInText) && text.replace(TICKET_NUMBER_PATTERN, "").replace(/นะครับ|นะคะ|ครับ|ค่ะ|คับ|จ้า|เคส|\s/g, "") === "";
+    // A bare "ใช่" closes only right after the close question itself — never
+    // after the "which case" list or the "ปัญหาเดิม / ปัญหาใหม่" question (H3).
+    let close = detectCloseIntent(text, pending?.kind === "close");
+    if (close.kind === "NONE" && asked?.kind === "close" && isExplicitDeclineClose(text)) {
+      close = { kind: "DECLINE_CLOSE", ticketNumber: numberInText, isThisCaseRef: false };
+    }
+    if (close.kind === "NONE" && pending?.kind === "which_case" && isBareNumber) {
+      // The "which case" list answered with just a number.
+      close = { kind: "CLOSE_REQUEST", ticketNumber: numberInText, isThisCaseRef: false };
+    }
     const byNumber = (n: string | null | undefined, pool_: OpenTicket[] = tickets) =>
       n ? pool_.find((t) => String(t.ticket_number || "").toUpperCase() === n.toUpperCase()) ?? null : null;
 
-    // 0. "ยืนยันเปิดเคสอีกครั้ง [TCK]" — the explicit re-open chip (AI path or
-    //    the re-open question). A bare yes counts only right after that question.
+    // 0. "ยืนยันเปิดเคสอีกครั้ง [TCK]" — the AI flow's re-open chip. A bare yes
+    //    counts only right after that question.
     const reopenConfirm = detectReopenConfirmation(text);
     const bareYesForReopen = pending?.kind === "reopen" && close.kind === "NONE" && /^\s*(?:ยืนยัน|ใช่|โอเค|ok|ตกลง|ได้เลย|เปิดเลย)/i.test(text);
     if (reopenConfirm.confirmed || bareYesForReopen) {
@@ -524,19 +847,21 @@ export class CustomerConfirmationHandler {
       }
       if (!target && wanted) {
         const old = await this.loadClosedByNumber(input.conversationId, wanted);
-        if (old) {
-          await this.notify(input, old, "reopen_too_old", this.eventKey(input, "reopen_too_old"), { detail: String(config.REOPEN_AFTER_CLOSE_DAYS), quickReplies: [] });
-          return { handled: true, ticketId: old.id, reason: "REOPEN_TOO_OLD" };
-        }
+        if (old) return this.answerEndedCase(input, old, "reopen");
       }
       if (!target) return { handled: false, reason: "REOPEN_TARGET_NOT_FOUND" };
       if (!["RESOLVED", "CUSTOMER_CONFIRMED", "CLOSED"].includes(target.status)) {
         await this.notify(input, target, "acknowledgement_action", this.eventKey(input, "reopen_noop"), { quickReplies: [] });
         return { handled: true, ticketId: target.id, reason: "ALREADY_OPEN" };
       }
+      // H10: the chip answers a re-open question. Typed without one, the case
+      // is asked "same problem or new?" first (operator decision: always ask).
+      if (!bareYesForReopen && !(await this.wasAsked(input.conversationId, target, "reopen"))) {
+        return this.askScope(input, target);
+      }
       return this.reopenTicket(input, target, null);
     }
-    if (pending?.kind === "reopen" && /^\s*(?:ยกเลิก|ไม่|cancel|no)\b/i.test(text)) {
+    if (pending?.kind === "reopen" && isDeclineReopen(text)) {
       await this.notify(input, null, "acknowledgement_action", this.eventKey(input, "reopen_cancel"), { quickReplies: [] });
       return { handled: true, reason: "REOPEN_CANCELLED" };
     }
@@ -544,9 +869,12 @@ export class CustomerConfirmationHandler {
     // 0b. Post-ticket cancel (Flow 5, 2026-09-17). The object word is required
     //     ("ยกเลิกเคส"), so a bare "ยกเลิก" keeps its other meanings below.
     let cancel = detectCancelIntent(text, pending?.kind === "cancel");
+    // "ไม่ยกเลิก" answers the cancel question even after another bot message (H5).
+    if (asked?.kind === "cancel" && isExplicitDeclineCancel(text)) {
+      cancel = { kind: "DECLINE_CANCEL", ticketNumber: numberInText };
+    }
     // The "which case to cancel" list answered with just a number.
-    if (cancel.kind === "NONE" && pending?.kind === "cancel_which_case" && numberInText
-        && text.replace(TICKET_NUMBER_PATTERN, "").replace(/นะครับ|นะคะ|ครับ|ค่ะ|คับ|จ้า|เคส|\s/g, "") === "") {
+    if (cancel.kind === "NONE" && pending?.kind === "cancel_which_case" && isBareNumber) {
       cancel = { kind: "CANCEL_REQUEST", ticketNumber: numberInText };
     }
     if (cancel.kind === "CONFIRM_CANCEL") {
@@ -556,6 +884,13 @@ export class CustomerConfirmationHandler {
         // The explicit phrase without a number: the only open case qualifies;
         // a bare yes never does (same lesson as the close protocol).
         if (!target && /ยกเลิก|cancel/i.test(text) && tickets.length === 1) target = tickets[0];
+      }
+      if (!target && cancel.ticketNumber) {
+        const old = await this.loadClosedByNumber(input.conversationId, cancel.ticketNumber);
+        if (old) {
+          await this.notify(input, old, "cancel_case_not_open", this.eventKey(input, "cancel_not_open"), { quickReplies: [] });
+          return { handled: true, ticketId: old.id, reason: "CANCEL_CASE_NOT_OPEN" };
+        }
       }
       if (!target) {
         if (tickets.length === 0) {
@@ -567,10 +902,13 @@ export class CustomerConfirmationHandler {
       // A delivered case is not cancellable (state machine): the customer is
       // really saying "we are done" — offer the close question instead.
       if (target.status === "RESOLVED" || target.status === "CUSTOMER_CONFIRMED") return this.askClose(input, target);
+      // H8: the confirmation chip answers a cancel question about this case;
+      // typed on a case nobody asked about, the question comes first.
+      if (!(await this.wasAsked(input.conversationId, target, "cancel"))) return this.askCancel(input, target);
       return this.cancelTicket(input, target);
     }
-    if (cancel.kind === "DECLINE_CANCEL" && pending?.kind === "cancel") {
-      const target = byNumber(pending.ticketNumber);
+    if (cancel.kind === "DECLINE_CANCEL" && asked?.kind === "cancel") {
+      const target = byNumber(numberInText ?? asked.ticketNumber);
       await this.notify(input, target, "cancel_declined", this.eventKey(input, "cancel_declined"), { quickReplies: [] });
       return { handled: true, ticketId: target?.id, from: target?.status, to: target?.status, reason: "CANCEL_DECLINED" };
     }
@@ -619,13 +957,7 @@ export class CustomerConfirmationHandler {
       }
       if (!target && close.ticketNumber) {
         const old = await this.loadClosedByNumber(input.conversationId, close.ticketNumber);
-        if (old) {
-          await this.notify(input, old, "case_context", this.eventKey(input, "already_closed"), {
-            detail: `เคส ${old.ticket_number || old.id} ปิดเรียบร้อยแล้วค่ะ`,
-            quickReplies: [],
-          });
-          return { handled: true, ticketId: old.id, reason: "ALREADY_CLOSED" };
-        }
+        if (old) return this.answerEndedCase(input, old, "close");
       }
       if (!target) {
         if (tickets.length === 0) {
@@ -634,12 +966,15 @@ export class CustomerConfirmationHandler {
         }
         return this.askWhichCase(input, tickets);
       }
+      // H8: closes only a case that was asked the close question (by us or by
+      // the AI flow) since its last status change; otherwise ask first.
+      if (!(await this.wasAsked(input.conversationId, target, "close"))) return this.askClose(input, target);
       return this.closeTicket(input, target);
     }
 
-    // 2. "ยังไม่ปิด" while the close question is pending — keep it open, say so.
-    if (close.kind === "DECLINE_CLOSE" && pending?.kind === "close") {
-      let target = byNumber(pending.ticketNumber);
+    // 2. "ยังไม่ปิด" while the close question is out — keep it open, say so.
+    if (close.kind === "DECLINE_CLOSE" && asked?.kind === "close") {
+      let target = byNumber(numberInText ?? asked.ticketNumber);
       if (!target) {
         const confirmed = tickets.filter((t) => t.status === "CUSTOMER_CONFIRMED");
         target = confirmed.length === 1 ? confirmed[0] : tickets.length === 1 ? tickets[0] : null;
@@ -669,13 +1004,7 @@ export class CustomerConfirmationHandler {
           return this.askClose(input, target);
         }
         const old = await this.loadClosedByNumber(input.conversationId, close.ticketNumber);
-        if (old) {
-          await this.notify(input, old, "case_context", this.eventKey(input, "close_already_closed"), {
-            detail: `เคส ${old.ticket_number || old.id} ปิดเรียบร้อยแล้วค่ะ`,
-            quickReplies: [],
-          });
-          return { handled: true, ticketId: old.id, reason: "ALREADY_CLOSED" };
-        }
+        if (old) return this.answerEndedCase(input, old, "close");
         if (tickets.length === 0) {
           await this.notify(input, null, "close_no_open_case", this.eventKey(input, "no_open_case"));
           return { handled: true, reason: "NO_OPEN_CASE" };
@@ -708,7 +1037,8 @@ export class CustomerConfirmationHandler {
       return this.askWhichCase(input, tickets);
     }
 
-    const scope = detectReopenScope(text, pending?.kind === "scope");
+    const scopePending = pending?.kind === "scope";
+    const scope = detectReopenScope(text, scopePending);
     const intent = detectConfirmationIntent(text);
 
     // 4. Feedback right after a re-open: goes to the engineer, not to the AI.
@@ -749,7 +1079,7 @@ export class CustomerConfirmationHandler {
         // as feedback while the picture stayed unattached.
         let attachedImages = 0;
         try {
-          const pending = await pool.query(
+          const pendingImage = await pool.query(
             `SELECT 1 FROM message_attachments ma JOIN messages m ON m.id = ma.message_id
               WHERE m.conversation_id = $1::integer
                 AND ma.metadata->>'awaitingCaseConfirm' = 'true'
@@ -758,7 +1088,7 @@ export class CustomerConfirmationHandler {
               LIMIT 1`,
             [input.conversationId]
           );
-          if (pending.rows.length > 0 && fresh.ticket_number) {
+          if (pendingImage.rows.length > 0 && fresh.ticket_number) {
             const { PlaneService } = await import("./planeService");
             const { AdapterFactory } = await import("../adapters/AdapterFactory");
             const planeService = new PlaneService(AdapterFactory.getAdapter());
@@ -784,26 +1114,60 @@ export class CustomerConfirmationHandler {
     // 5. Answer to the delivery message ("does it work now?") — or a "still
     //    broken" about a case closed within the re-open window.
     const awaiting = tickets.filter((t) => t.status === "RESOLVED" || t.status === "CUSTOMER_CONFIRMED");
-    let target: OpenTicket | null = numberInText ? awaiting.find((t) => String(t.ticket_number || "").toUpperCase() === numberInText) ?? null : null;
-    if (!target && numberInText && (scope === "SAME" || intent === "REJECTED")) {
-      const recent = await this.loadRecentlyClosed(input.conversationId);
-      target = byNumber(numberInText, recent);
+
+    // "ปัญหาเดิมหรือปัญหาใหม่" answered with a bare "ใช่" / "โอเค": it picks
+    // neither, so the question is asked again rather than guessed (H3).
+    if (scopePending && scope === "NONE" && intent === "NONE" && isBareShortAnswer(text) && pending?.ticketNumber) {
+      const scoped = byNumber(pending.ticketNumber, awaiting) ?? byNumber(pending.ticketNumber, await this.loadRecentlyClosed(input.conversationId));
+      if (scoped) return this.askScope(input, scoped, "which_kind_again");
+    }
+
+    // The case the answer is about: the number in the text, else the case the
+    // pending "same or new?" question named. A named case is answered for that
+    // case only — it never falls back to another waiting case (H1: "ปัญหาใหม่
+    // <closed TCK>" closed an unrelated delivered case).
+    const named = numberInText || (scopePending ? pending?.ticketNumber ?? null : null);
+    let target: OpenTicket | null = null;
+    if (named) {
+      target = byNumber(named, awaiting);
       if (!target) {
-        const old = await this.loadClosedByNumber(input.conversationId, numberInText);
-        if (old) {
-          await this.notify(input, old, "reopen_too_old", this.eventKey(input, "reopen_too_old"), { detail: String(config.REOPEN_AFTER_CLOSE_DAYS), quickReplies: [] });
-          return { handled: true, ticketId: old.id, reason: "REOPEN_TOO_OLD" };
+        const openNamed = byNumber(named);
+        if (openNamed) return this.answerCaseInProgress(input, openNamed, text, scope, intent);
+        const recent = await this.loadRecentlyClosed(input.conversationId);
+        const closedNamed = byNumber(named, recent);
+        if (closedNamed) {
+          if (scope === "NEW") return this.promptNewIssue(input, closedNamed);
+          if (!(scope === "SAME" || scope === "AMBIGUOUS" || intent === "REJECTED")) {
+            if (intent === "CONFIRMED") return this.answerEndedCase(input, closedNamed, "close");
+            return { handled: false, reason: "CLOSED_CASE_NO_PROTOCOL_INTENT" };
+          }
+          target = closedNamed;
+        } else {
+          const old = await this.loadClosedByNumber(input.conversationId, named);
+          if (old) {
+            if (scope === "NEW") return this.promptNewIssue(input, old);
+            if (scope === "SAME" || scope === "AMBIGUOUS" || intent === "REJECTED") return this.answerEndedCase(input, old, "reopen");
+            if (intent === "CONFIRMED") return this.answerEndedCase(input, old, "close");
+          }
+          return { handled: false, reason: "NAMED_CASE_NOT_FOUND" };
         }
       }
     }
     if (!target) {
       if (awaiting.length === 0) return { handled: false, reason: "NO_TICKET_AWAITING_CONFIRMATION" };
-      target = awaiting[0];
+      if (awaiting.length === 1) {
+        target = awaiting[0];
+      } else {
+        if (scope === "NONE" && intent === "NONE") return { handled: false, reason: "NO_CONFIRMATION_INTENT" };
+        // "มีอีกปัญหา …" typed as a full report stays with the AI (force_new).
+        if (scope === "NEW" && !/^\s*(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(text)) return { handled: false, reason: "NEW_ISSUE_TO_AI" };
+        return this.askWhichAwaiting(input, awaiting, scope, intent);
+      }
     }
 
     // While the "ปัญหาเดิมหรือปัญหาใหม่" question is pending, resolve natural phrasing.
     let effectiveScope = scope;
-    if (pending?.kind === "scope") {
+    if (scopePending) {
       if (effectiveScope === "NONE" || effectiveScope === "AMBIGUOUS") {
         const hasNew = NEW_ISSUE_PATTERN.test(text) || /(?:^|\s)(?:เป็น)?(?:ปัญหา|เรื่อง|เคส)?\s*ใหม่/i.test(text);
         const hasSame =
@@ -814,23 +1178,25 @@ export class CustomerConfirmationHandler {
           effectiveScope = "NEW";
         } else if (hasSame && !hasNew) {
           effectiveScope = "SAME";
-        } else if (!hasNew && text.trim().length >= 6) {
+        } else if (!hasNew && intent !== "CONFIRMED" && SYMPTOM_PATTERN.test(text)) {
           // Customer answered the scope question by describing the failure/symptoms
           // (e.g. "ตรวจสอบที่ Production แล้ว ระดับการศึกษา ปวส. ยังไม่ขึ้นให้เลือกเลยค่ะ").
-          // When answering "ปัญหาเดิมหรือปัญหาใหม่" with symptoms and without new-issue markers,
-          // treat as SAME issue to avoid asking twice (AD-08).
+          // Only a described symptom counts (AD-08); "ขอคุยกับเจ้าหน้าที่" or
+          // "ใช้งานได้แล้ว" typed here used to re-open the case too (H2).
           effectiveScope = "SAME";
         }
       }
     }
 
     if (effectiveScope === "NEW") {
-      const answeredChip = pending?.kind === "scope" || /^\s*(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(text);
+      const answeredChip = scopePending || /^\s*(?:เป็น)?(?:ปัญหา|เรื่อง)ใหม่/.test(text);
       if (answeredChip) {
         // "ปัญหาใหม่": the delivered case is done as far as the customer is
         // concerned — close it (Plane → Close) and start intake over; the
         // customer's next message is a fresh report for the AI (the gate's
         // new-issue net sees this turn, so it is never folded into the old case).
+        // A case already closed has nothing to close: just ask for the report.
+        if (target.status === "CLOSED") return this.promptNewIssue(input, target);
         return this.closeTicket(input, target, "reopen_new_issue_prompt");
       }
       // "มีอีกปัญหา …" typed as a full report: leave it to the AI (force_new);
@@ -840,15 +1206,15 @@ export class CustomerConfirmationHandler {
     if (effectiveScope === "SAME") {
       return this.reopenTicket(input, target, this.feedbackFrom(text));
     }
-    if (effectiveScope === "AMBIGUOUS" || (intent === "REJECTED" && pending?.kind !== "scope")) {
+    if (effectiveScope === "AMBIGUOUS" || (intent === "REJECTED" && !scopePending)) {
       // Same problem or a new one? Two chips decide (operator decision
       // 2026-09-08: always ask; the chip "ยังมีปัญหาอยู่" lands here).
       // Only ask on the initial report, never repeatedly if already pending.
-      await this.notify(input, target, "reopen_which_kind", this.eventKey(input, "which_kind"));
-      return { handled: true, ticketId: target.id, reason: "REOPEN_SCOPE_ASKED" };
+      return this.askScope(input, target);
     }
     if (intent === "CONFIRMED") {
       // Positive, but nothing closes yet: ask the close question.
+      if (target.status === "CLOSED") return this.answerEndedCase(input, target, "close");
       return this.askClose(input, target);
     }
     return { handled: false, reason: "NO_CONFIRMATION_INTENT" };

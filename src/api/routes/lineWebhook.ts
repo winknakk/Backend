@@ -4,8 +4,10 @@ import https from "node:https";
 import path from "node:path";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config/env";
-import { customerNotificationService } from "../../services/CustomerNotificationService";
+import { customerNotificationService, CustomerNotificationService } from "../../services/CustomerNotificationService";
 import { customerConfirmationHandler } from "../../services/CustomerConfirmationHandler";
+import { answerCustomerSticker } from "../../services/CustomerStickerHandler";
+import { PROJECT_LINKED_REASONS, STICKERS, stickerMessage } from "../../services/LineStickers";
 import { executionContextService } from "../../domain/execution/ExecutionContextService";
 import { traceRecorder } from "../../observability/TraceRecorder";
 import {
@@ -101,6 +103,14 @@ async function sendLineReply(replyToken: string, decision: LineOnboardingDecisio
     : decision.quickReplies?.length
       ? [buildLineChoicePrompt(decision.replyText || "เลือกวิธีดำเนินการได้เลยค่ะ", decision.quickReplies)]
     : [buildLineReply(decision)];
+  // Project linked (2026-09-24): a celebration sticker before the text.
+  const sticker =
+    PROJECT_LINKED_REASONS.has(decision.reason) &&
+    decision.conversationId &&
+    (await customerNotificationService.stickerAllowed(Number(decision.conversationId)))
+      ? STICKERS.celebrate
+      : null;
+  if (sticker) messages.unshift(stickerMessage(sticker));
   try {
     await axios.post(
       "https://api.line.me/v2/bot/message/reply",
@@ -114,6 +124,7 @@ async function sendLineReply(replyToken: string, decision: LineOnboardingDecisio
         httpsAgent: lineHttpsAgent,
       }
     );
+    if (sticker) await customerNotificationService.recordSticker(Number(decision.conversationId), sticker);
   } catch (err: any) {
     logger.error(
       {
@@ -685,17 +696,36 @@ export function registerLineWebhookRoutes(
               }
             }
 
+            // Stickers (2026-09-24): answered at the edge, never by the AI and
+            // never with a Fast Ack — a sticker back, or a reminder with the
+            // pending question's chips. See CustomerStickerHandler.
+            if (event?.type === "message" && event?.message?.type === "sticker") {
+              if (decision.conversationId && webhookEventId) {
+                void answerCustomerSticker({
+                  conversationId: Number(decision.conversationId),
+                  projectId: decision.projectId ?? null,
+                  eventId: webhookEventId,
+                  messageId: event.message.id ? String(event.message.id) : null,
+                  quoteToken: event.message.quoteToken ?? null,
+                  keywords: event.message.keywords,
+                  text: event.message.text,
+                }).catch((stickerErr: any) =>
+                  logger.error({ error: stickerErr.message, webhookEventId }, "Customer sticker handling failed")
+                );
+              }
+              processed += 1;
+              continue;
+            }
+
             // Non-image media (a .webp sent as a FILE, videos, voice clips):
             // the pipeline cannot read these, and letting them through meant an
             // acknowledgement plus an empty AI turn (run 4vBCthf81M). Say what
-            // works instead, immediately, and end the turn. Stickers are
-            // emotional punctuation — consumed silently: no ack, no AI, and
-            // telling someone to resend a sticker as PNG would be absurd.
+            // works instead, immediately, and end the turn.
             if (
               event?.type === "message" &&
-              ["file", "video", "audio", "sticker"].includes(String(event?.message?.type || ""))
+              ["file", "video", "audio"].includes(String(event?.message?.type || ""))
             ) {
-              if (event.message.type !== "sticker" && decision.conversationId && webhookEventId) {
+              if (decision.conversationId && webhookEventId) {
                 void customerNotificationService
                   .send({
                     conversationId: Number(decision.conversationId),
@@ -1029,24 +1059,11 @@ export function registerLineWebhookRoutes(
                   meta: { conversationId: decision.conversationId, incomingText: msgText, userId: event?.source?.userId, webhookEventId },
                 });
               }
-              const tailPattern = "(?:[\\s.,!ๆ555คะครับค่ะคับค้าบคร้าบจ้าจ้ะงับฮะฮับนะน้าอ้วนผมวะอ่ะแอดมินพี่คุณ]*)$";
-              const isActionTurn =
-                new RegExp(`^(?:ครับ|ค่ะ|คับ|ค้าบ|คร้าบ|ค่า|ค๊า|ฮับ|ฮะ|งับ|จ้า|จ้ะ|จร้า|อือ|อื้อ|เค|k|ok|yes|yup|yep|sure|confirm|จัดไป|ลุย|ลุยเลย|เอาเลย|ตามนั้น|เปิดเลย|เปิดเคสเลย|จัดการเลย|จัดให้หน่อย|ถูก|ถูกต้อง|ถูกแล้ว|ใช่|ใช่เลย|ใช่แล้ว|ช่าย|โอเค|ได้|ได้เลย|ได้หมด|ยกเลิก|cancel|ไม่เอา|ไม่ต้อง|ไม่แจ้ง|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|หายแล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไร|อย่าเพิ่ง|no|nope|❌|👍|✅)${tailPattern}`, "i").test(msgText) ||
-                /(?:ยืนยัน|ถูกต้อง|ถูกแล้ว|ใช่เลย|โอเค|ได้เลย|เปิดเคสเลย|จัดไป|ตามนั้น|ส่งรูป|นี่รูป|รูปปัญหา|ภาพปัญหา|แนบรูป|ยกเลิก|cancel|ไม่เอาแล้ว|ไม่ต้องแล้ว|ไม่แจ้งแล้ว|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไรแล้ว|อย่าเพิ่งเปิด)/i.test(msgText) ||
-                /(?:^|\s|[.,!])(?:ใช่|ถูก|โอเค|ok|ได้|ครับ|ค่ะ|คับ|งับ|ฮะ|จ้า|เค|ยกเลิก|ไม่เอา|ไม่ต้อง)/i.test(msgText);
-
-              // The "ขอแก้ไขข้อมูล" chip, and the correction typed while the
-              // "which part to change?" question is out, get the short edit
-              // acknowledgement (2026-09-17). A chip/word that is itself an
-              // action ("ยกเลิก", "ยืนยัน") keeps the action acknowledgement.
-              const isEditChip = /^\s*ขอแก้ไขข้อมูล\s*$/.test(msgText);
-              const ackType: "acknowledgement" | "acknowledgement_action" | "acknowledgement_edit" = isEditChip
-                ? "acknowledgement_edit"
-                : isActionTurn
-                  ? "acknowledgement_action"
-                  : pendingIntake === "edit"
-                    ? "acknowledgement_edit"
-                    : "acknowledgement";
+              // The "ขอแก้ไขข้อมูล" chip and a correction typed while the "which
+              // part to change?" question is out get the short edit receipt
+              // (2026-09-17); a chip answer gets the choice receipt, never
+              // "แอดมินดูให้" (2026-09-24); a short action word keeps the action one.
+              const ackType = CustomerNotificationService.classifyAcknowledgement(msgText, pendingIntake);
 
               const ackUserId = event?.source?.userId ? String(event.source.userId) : "";
               void customerNotificationService

@@ -7,6 +7,14 @@ import { traceRecorder } from "../observability/TraceRecorder";
 import Redis from "ioredis";
 import { createRedisClient } from "../infrastructure/cache/createRedisClient";
 import { broadcastWebChatOutbound } from "../presentation/http/routes/WebChatGateway";
+import {
+  NOTIFICATION_STICKERS,
+  STICKER_MIN_INTERVAL_MINUTES,
+  THROTTLED_STICKER_TYPES,
+  stickerMessage,
+  stickerRecord,
+  type LineSticker,
+} from "./LineStickers";
 
 const logger = createLogger("customer-notification");
 
@@ -15,6 +23,9 @@ export type CustomerNotificationType =
   | "acknowledgement_action"
   // The "ขอแก้ไขข้อมูล" chip and the correction that answers it (2026-09-17).
   | "acknowledgement_edit"
+  // A chip answer / protocol word the edge could not settle itself ("ยังไม่ปิด"
+  // with no question pending): a plain receipt, never "แอดมินดูให้" (2026-09-24).
+  | "acknowledgement_choice"
   | "greeting"
   | "thanks"
   | "image_attached"
@@ -38,6 +49,10 @@ export type CustomerNotificationType =
   | "close_no_open_case"
   | "close_which_case"
   | "resolution_nudge"
+  // Several delivered cases and an answer that names none (H1, 2026-09-24).
+  | "resolution_which_case"
+  // A customer action whose state transition was refused (H6, 2026-09-24).
+  | "action_failed"
   | "auto_closed"
   // Re-open path (2026-09-08).
   | "reopen_which_kind"
@@ -66,7 +81,11 @@ export type CustomerNotificationType =
   // The "แจ้งปัญหา" menu card's reply, recorded by lineWebhook (never sent through send()).
   | "report_prompt"
   // AI timeout fallback (AD-14): informs customer when AI reply takes longer than expected.
-  | "ai_timeout_fallback";
+  | "ai_timeout_fallback"
+  // A customer sent a LINE sticker (2026-09-24): a sticker back (sticker_reply),
+  // or, while a question is pending, a nudge that re-attaches its chips.
+  | "sticker_reply"
+  | "sticker_reminder";
 
 /**
  * Facts the case card is built from. Loaded from `tickets` by ticket id when
@@ -164,6 +183,11 @@ export interface SendRequest {
    * (delivery / close question); pass [] to send none.
    */
   quickReplies?: NotificationQuickReply[] | null;
+  /**
+   * LINE sticker sent before the text. When omitted, the type's sticker from
+   * NOTIFICATION_STICKERS is used; pass null to send none.
+   */
+  sticker?: LineSticker | null;
 }
 
 /**
@@ -246,6 +270,66 @@ export class CustomerNotificationService {
     "รับทราบค่ะ แป๊บนึงนะคะ",
     "ได้เลยค่ะ สักครู่นะคะ",
   ] as const;
+
+  /**
+   * Receipt for a chip answer or protocol word that reaches the AI ("ยังไม่ปิด"
+   * with no close question pending, "ตรวจสอบสถานะ"). The customer pressed a
+   * choice, so the line only confirms it was heard — no "แอดมินดูให้", no
+   * promise of a person looking (operator request 2026-09-24).
+   */
+  private static readonly ACK_CHOICE_VARIANTS = [
+    "รับทราบค่ะ",
+    "ได้เลยค่ะ รับทราบนะคะ",
+    "โอเคค่ะ รับทราบค่ะ",
+    "รับทราบตามนี้เลยค่ะ",
+    "ได้ค่ะ รับทราบแล้วนะคะ",
+    "เข้าใจแล้วค่ะ ขอบคุณนะคะ",
+    "รับทราบค่ะ ขอบคุณที่แจ้งนะคะ",
+  ] as const;
+
+  /** "Which delivered case?" — the list follows; each chip names one case. */
+  private static readonly RESOLUTION_WHICH_CASE_VARIANTS = [
+    "ตอนนี้มีหลายเคสที่ทีมงานแก้ไขแล้วและรอคุณลูกค้าทดสอบอยู่ค่ะ หมายถึงเคสไหนคะ",
+    "มีมากกว่าหนึ่งเคสที่รอคุณลูกค้าทดสอบอยู่นะคะ รบกวนเลือกเคสที่หมายถึงจากรายการนี้ได้เลยค่ะ",
+  ] as const;
+
+  /** A refused transition: say it did not happen, promise nothing else. */
+  private static readonly ACTION_FAILED_VARIANTS = [
+    "ขออภัยค่ะ ตอนนี้ยังทำรายการกับเคส {ticket} ไม่สำเร็จ รบกวนลองใหม่อีกครั้งในอีกสักครู่นะคะ",
+    "ขออภัยนะคะ ระบบยังเปลี่ยนสถานะเคส {ticket} ไม่สำเร็จ รบกวนลองอีกครั้งในอีกสักครู่ค่ะ",
+  ] as const;
+
+  /**
+   * Chip texts and protocol words (2026-09-24): a turn made of one of these
+   * is a choice, acknowledged with ACK_CHOICE_VARIANTS when it reaches the AI.
+   */
+  private static readonly CHOICE_TURN_RE =
+    /^\s*(?:ยังไม่(?:ต้อง)?ปิด|อย่าเพิ่งปิด|ไม่(?:ต้อง)?ปิด|ยังไม่ยกเลิก|ไม่(?:ต้อง)?ยกเลิก|ยืนยันปิดเคส|ยืนยันยกเลิกเคส|ยืนยันเปิดเคส(?:อีกครั้ง)?|ปัญหาเดิม|ปัญหาใหม่|ใช้งานได้แล้ว|ยังมีปัญหาอยู่|สลับไปที่|ปิดเคส|ยกเลิกเคส|ดูเคสล่าสุดทั้งหมด|ตรวจสอบสถานะ|ขอคุยกับเจ้าหน้าที่)(?:\s*(?:เคส)?\s*TCK-\d{4}-\d{4,6})?[\s.,!]*(?:ค่ะ|คะ|ครับ|คับ|จ้า|นะคะ|นะครับ)?\s*$/i;
+
+  /**
+   * Which Fast Ack a LINE text turn gets. Order: the edit chip, a choice
+   * (chip text), a short action word, a correction to a pending draft, else
+   * the general receipt.
+   */
+  static classifyAcknowledgement(
+    msgText: string,
+    pendingIntake?: string | null
+  ): "acknowledgement" | "acknowledgement_action" | "acknowledgement_edit" | "acknowledgement_choice" {
+    const text = String(msgText || "").trim();
+    if (/^\s*ขอแก้ไขข้อมูล\s*$/.test(text)) return "acknowledgement_edit";
+    if (CustomerNotificationService.CHOICE_TURN_RE.test(text)) return "acknowledgement_choice";
+    // A bag of particle characters (moved unchanged from lineWebhook, where it
+    // already tripped this rule); Thai tone marks in a class are intended here.
+    const tailPattern = "(?:[\\s.,!ๆ555คะครับค่ะคับค้าบคร้าบจ้าจ้ะงับฮะฮับนะน้าอ้วนผมวะอ่ะแอดมินพี่คุณ]*)$";
+    const isActionTurn =
+      // eslint-disable-next-line no-misleading-character-class
+      new RegExp(`^(?:ครับ|ค่ะ|คับ|ค้าบ|คร้าบ|ค่า|ค๊า|ฮับ|ฮะ|งับ|จ้า|จ้ะ|จร้า|อือ|อื้อ|เค|k|ok|yes|yup|yep|sure|confirm|จัดไป|ลุย|ลุยเลย|เอาเลย|ตามนั้น|เปิดเลย|เปิดเคสเลย|จัดการเลย|จัดให้หน่อย|ถูก|ถูกต้อง|ถูกแล้ว|ใช่|ใช่เลย|ใช่แล้ว|ช่าย|โอเค|ได้|ได้เลย|ได้หมด|ยกเลิก|cancel|ไม่เอา|ไม่ต้อง|ไม่แจ้ง|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|หายแล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไร|อย่าเพิ่ง|no|nope|❌|👍|✅)${tailPattern}`, "i").test(text) ||
+      /(?:ยืนยัน|ถูกต้อง|ถูกแล้ว|ใช่เลย|โอเค|ได้เลย|เปิดเคสเลย|จัดไป|ตามนั้น|ส่งรูป|นี่รูป|รูปปัญหา|ภาพปัญหา|แนบรูป|ยกเลิก|cancel|ไม่เอาแล้ว|ไม่ต้องแล้ว|ไม่แจ้งแล้ว|ช่างมัน|แก้ได้แล้ว|ทำได้แล้ว|รีเซ็ต|reset|พิมพ์ผิด|เปลี่ยนใจ|ไม่เป็นไรแล้ว|อย่าเพิ่งเปิด)/i.test(text) ||
+      /(?:^|\s|[.,!])(?:ใช่|ถูก|โอเค|ok|ได้|ครับ|ค่ะ|คับ|งับ|ฮะ|จ้า|เค|ยกเลิก|ไม่เอา|ไม่ต้อง)/i.test(text);
+    if (isActionTurn) return "acknowledgement_action";
+    if (pendingIntake === "edit") return "acknowledgement_edit";
+    return "acknowledgement";
+  }
 
   /**
    * Complete replies for turns the webhook answers at the edge: a pure
@@ -596,6 +680,15 @@ export class CustomerNotificationService {
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_ACTION_VARIANTS, seed);
       case "acknowledgement_edit":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_EDIT_VARIANTS, seed);
+      case "acknowledgement_choice":
+        return CustomerNotificationService.pickVariant(CustomerNotificationService.ACK_CHOICE_VARIANTS, seed);
+      case "resolution_which_case": {
+        const list = String(detail || "").trim();
+        const head = CustomerNotificationService.pickVariant(CustomerNotificationService.RESOLUTION_WHICH_CASE_VARIANTS, seed);
+        return list ? `${head}\n\n${list}` : head;
+      }
+      case "action_failed":
+        return this.fill(CustomerNotificationService.ACTION_FAILED_VARIANTS, seed, ticketNumber, null);
       case "greeting":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.GREETING_VARIANTS, seed);
       case "thanks":
@@ -740,6 +833,11 @@ export class CustomerNotificationService {
         return CustomerNotificationService.pickVariant(CustomerNotificationService.NEW_CASE_PROMPT_VARIANTS, seed);
       case "ai_timeout_fallback":
         return CustomerNotificationService.pickVariant(CustomerNotificationService.AI_TIMEOUT_FALLBACK_VARIANTS, seed);
+      case "sticker_reply":
+        // Usually a sticker alone; `detail` is the one follow-up line some moods get.
+        return String(detail || "").trim();
+      case "sticker_reminder":
+        return "แตะปุ่มด้านล่างเพื่อตอบได้เลยนะคะ";
     }
   }
 
@@ -955,11 +1053,23 @@ export class CustomerNotificationService {
   }
 
   /** Pushes a LINE message. Never logs the access token. */
-  private async pushLine(recipientRef: string, text: string, quickReplies: NotificationQuickReply[] = []): Promise<void> {
+  private async pushLine(
+    recipientRef: string,
+    text: string,
+    quickReplies: NotificationQuickReply[] = [],
+    sticker: LineSticker | null = null
+  ): Promise<void> {
     const token = (config.LINE_CHANNEL_ACCESS_TOKEN || "").trim();
     if (!token) throw new Error("LINE_CHANNEL_ACCESS_TOKEN is not configured");
 
     const message: Record<string, unknown> = { type: "text", text };
+    // The sticker goes first, so the chips stay on the text bubble (LINE shows
+    // quick replies on the last message only). A sticker-only reply has no text.
+    const messages: Record<string, unknown>[] = [
+      ...(sticker ? [stickerMessage(sticker)] : []),
+      ...(String(text || "").trim() ? [message] : []),
+    ];
+    if (messages.length === 0) throw new Error("Nothing to send: empty text and no sticker");
     if (quickReplies.length > 0) {
       // LINE allows at most 13 items; labels are capped at 20 characters.
       message.quickReply = {
@@ -978,7 +1088,7 @@ export class CustomerNotificationService {
       try {
         await axios.post(
           "https://api.line.me/v2/bot/message/push",
-          { to: recipientRef, messages: [message] },
+          { to: recipientRef, messages },
           { headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, timeout: 15000 }
         );
         return;
@@ -1024,7 +1134,7 @@ export class CustomerNotificationService {
           AND COALESCE(n.error_message, '') NOT ILIKE '%status code 401%'
           AND COALESCE(n.error_message, '') NOT ILIKE '%status code 403%'
           AND COALESCE(n.error_message, '') NOT ILIKE '[retry 3]%'
-          AND n.notification_type NOT IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit', 'greeting', 'thanks', 'image_auto_attached', 'image_auto_attach_pending')
+          AND n.notification_type NOT IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit', 'acknowledgement_choice', 'greeting', 'thanks', 'image_auto_attached', 'image_auto_attach_pending', 'sticker_reply', 'sticker_reminder')
         ORDER BY n.id ASC
         LIMIT $2`,
       [maxAge, limit]
@@ -1121,11 +1231,11 @@ export class CustomerNotificationService {
     // The edit acknowledgement answers a chip tap, so it is never held back
     // by the burst window; it still counts as the burst's acknowledgement for
     // whatever the customer sends next.
-    if (req.notificationType === "acknowledgement" || req.notificationType === "acknowledgement_action") {
+    if (req.notificationType === "acknowledgement" || req.notificationType === "acknowledgement_action" || req.notificationType === "acknowledgement_choice") {
       const recent = await pool.query(
         `SELECT 1 FROM customer_notifications
           WHERE conversation_id = $1
-            AND notification_type IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit')
+            AND notification_type IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit', 'acknowledgement_choice')
             AND created_at >= NOW() - ($2::int * INTERVAL '1 second')
           LIMIT 1`,
         [req.conversationId, ACK_BURST_WINDOW_SECONDS]
@@ -1141,6 +1251,17 @@ export class CustomerNotificationService {
 
     const facts = await this.factsFor(req);
     const body = this.body(req.notificationType, req.ticketNumber, req.idempotencyKey, req.subject ?? facts?.subject ?? null, req.detail, facts);
+
+    // LINE sticker (2026-09-24): decided before the claim, because a
+    // sticker-only reply that may not send a sticker has nothing to say.
+    let sticker: LineSticker | null = null;
+    if (recipient.channel === "line") {
+      const wanted = req.sticker !== undefined ? req.sticker : NOTIFICATION_STICKERS[req.notificationType] ?? null;
+      if (wanted && (await this.stickerAllowed(req.conversationId, THROTTLED_STICKER_TYPES.has(req.notificationType)))) sticker = wanted;
+    }
+    if (!body.trim() && !sticker) {
+      return { sent: false, reason: "NOTHING_TO_SEND" };
+    }
 
     const claimId = await this.claim(
       { ...req, projectId: req.projectId ?? recipient.projectId, orgId: req.orgId ?? recipient.orgId },
@@ -1181,8 +1302,9 @@ export class CustomerNotificationService {
     let insertedMsgId: number | null = null;
     try {
       if (recipient.channel === "line") {
-        await this.pushLine(recipient.recipientRef, body, quickReplies);
-        insertedMsgId = await this.appendToConversation(req.conversationId, body);
+        await this.pushLine(recipient.recipientRef, body, quickReplies, sticker);
+        if (sticker) await this.recordSticker(req.conversationId, sticker);
+        if (body.trim()) insertedMsgId = await this.appendToConversation(req.conversationId, body);
       } else if (recipient.channel === "webchat") {
         insertedMsgId = await this.appendToConversation(req.conversationId, body);
         await this.pushWebChat(req.conversationId, recipient.recipientRef, body, insertedMsgId, quickReplies);
@@ -1234,7 +1356,7 @@ export class CustomerNotificationService {
       });
       // Still record what we intended to say, so the thread is not silently
       // missing a turn the customer may or may not have received.
-      if (!insertedMsgId) {
+      if (!insertedMsgId && body.trim()) {
         await this.appendToConversation(req.conversationId, body);
       }
       logger.error(
@@ -1243,6 +1365,41 @@ export class CustomerNotificationService {
       );
       return { sent: false, reason: "DELIVERY_FAILED", body };
     }
+  }
+
+  /**
+   * Whether the bot may send a sticker in this conversation now: enabled, the
+   * AI (not a staff member) owns the chat, and — for a `throttled` (repeatable)
+   * trigger — no bot sticker in the last STICKER_MIN_INTERVAL_MINUTES.
+   * Any doubt means no sticker.
+   */
+  async stickerAllowed(conversationId: number, throttled = false): Promise<boolean> {
+    if (!config.LINE_STICKERS_ENABLED) return false;
+    try {
+      const { rows } = await pool.query<{ ai_owned: boolean | null; recent: boolean }>(
+        `SELECT (SELECT COALESCE(LOWER(handled_by), 'ai') = 'ai' AND COALESCE(LOWER(takeover_state), 'none') = 'none'
+                   FROM conversations WHERE id = $1) AS ai_owned,
+                EXISTS (SELECT 1 FROM messages
+                         WHERE conversation_id = $1 AND role = 'ai' AND message_type = 'sticker'
+                           AND created_at >= NOW() - ($2::int * INTERVAL '1 minute')) AS recent`,
+        [conversationId, STICKER_MIN_INTERVAL_MINUTES]
+      );
+      return rows[0]?.ai_owned !== false && (!throttled || rows[0]?.recent !== true);
+    } catch (err: any) {
+      logger.warn({ error: err.message, conversationId }, "Sticker gate failed; sending without a sticker");
+      return false;
+    }
+  }
+
+  /** Writes a sent sticker to the conversation (admin view + the rate window). */
+  async recordSticker(conversationId: number, sticker: LineSticker): Promise<void> {
+    await pool
+      .query(
+        `INSERT INTO messages (conversation_id, role, content, message_type, message_purpose, created_at)
+         VALUES ($1, 'ai', $2, 'sticker', 'notification', NOW())`,
+        [conversationId, stickerRecord(sticker)]
+      )
+      .catch((err) => logger.warn({ error: err.message, conversationId }, "Could not record sent sticker"));
   }
 
   private async appendToConversation(conversationId: number, text: string): Promise<number | null> {

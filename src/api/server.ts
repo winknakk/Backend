@@ -3251,6 +3251,7 @@ const agentSessionQueueWorker = new AgentSessionQueueWorker(agentSessionQueueSer
   watchdogIntervalMs: 30000,
   typingIndicator: lineTypingIndicatorService,
   turnCompletionTimeoutMs: 600000,
+  timeoutFallbackAfterMs: config.AI_TIMEOUT_FALLBACK_AFTER_MS,
 });
 const lineMessageBatchingService = new LineMessageBatchingService(
   {

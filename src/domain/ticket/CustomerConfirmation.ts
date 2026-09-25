@@ -257,11 +257,49 @@ export function detectReopenScope(text: string, scopePending = false): ReopenSco
   if (hasNew && hasSame) return "AMBIGUOUS";
 
   if (scopePending) {
+    // "ใช้งานได้แล้ว" answers the delivery question, not "same or new?": the
+    // handler turns it into the close question. Any length used to count as
+    // SAME and re-opened a case the customer had just called fixed (H2).
+    if (hasConfirm && !hasReject) return "NONE";
     if (hasReject && !hasNew) return "SAME";
-    if (!hasNew && raw.length >= 6) return "SAME";
+    // Only a described symptom answers "same problem" (AD-08). "ขอคุยกับ
+    // เจ้าหน้าที่" or "ตรวจสอบสถานะ" typed here is a different request.
+    if (!hasNew && SYMPTOM_PATTERN.test(raw)) return "SAME";
   }
 
   return "NONE";
+}
+
+/**
+ * Words that describe a failure. While "ปัญหาเดิมหรือปัญหาใหม่" is pending,
+ * a message carrying one of these is read as the old problem coming back.
+ */
+export const SYMPTOM_PATTERN =
+  /ไม่ได้|ไม่ขึ้น|ไม่แสดง|ไม่ผ่าน|ไม่สำเร็จ|ไม่ตรง|ไม่ถูกต้อง|ไม่ครบ|ไม่เจอ|ไม่ทำงาน|ไม่ออก|ไม่เข้า|ยังขึ้น|ยังเป็น|เหมือนเดิม|error|เออเร่อ|เออเรอ|ผิดพลาด|ค้าง|หมุน|จอขาว|หน้าขาว|เด้ง|หลุด|ล่ม|พัง|ช้า|timeout|time\s*out|\b[45]\d{2}\b/i;
+
+/**
+ * A short reply that answers no either/or question by itself ("ใช่ค่ะ",
+ * "โอเค", "ไม่แน่ใจ"). Asked "ปัญหาเดิมหรือปัญหาใหม่", such a reply gets the
+ * question again instead of a guess (H3).
+ */
+export function isBareShortAnswer(text: string): boolean {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw || TICKET_NUMBER_PATTERN.test(raw)) return false;
+  return BARE_YES_RE.test(raw) || DECLINE_CLOSE_RE.test(raw) || new RegExp(`^\\s*(?:ไม่แน่ใจ|ไม่รู้|ไม่ทราบ|อันไหนก็ได้|ได้หมด)${TAIL}$`, "i").test(raw);
+}
+
+/**
+ * "ยังไม่ปิด" and its explicit variants: they can only mean "do not close",
+ * so they answer a close question asked in the last 30 minutes even when
+ * another bot message came in between (H5). Bare "ยัง" / "ไม่" stay strict.
+ */
+const EXPLICIT_DECLINE_CLOSE_RE = new RegExp(
+  `^\\s*(?:ยังไม่(?:ต้อง)?ปิด|อย่าเพิ่งปิด|ไม่(?:ต้อง)?ปิด)(?:เคส)?${TICKET}${TAIL}$`,
+  "i"
+);
+
+export function isExplicitDeclineClose(text: string): boolean {
+  return EXPLICIT_DECLINE_CLOSE_RE.test(String(text || "").replace(/\s+/g, " ").trim());
 }
 
 /** Explicit re-open confirmation chip: "ยืนยันเปิดเคสอีกครั้ง TCK-…". */
@@ -396,6 +434,30 @@ const DECLINE_CANCEL_RE = new RegExp(
   `^\\s*(?:ไม่ยกเลิก|ไม่ต้องยกเลิก|ยังไม่ยกเลิก|อย่าเพิ่งยกเลิก|อย่ายกเลิก|ไม่ยกเลิกแล้ว|เก็บไว้ก่อน|ทำต่อ(?:เลย|ได้เลย)?|ดำเนินการต่อ|ไม่ใช่|ไม่|ยังก่อน|เดี๋ยวก่อน|no|nope|keep\\s+it|❌)${TAIL}$`,
   "i"
 );
+
+/** "ไม่ยกเลิก" and its explicit variants — same looser rule as isExplicitDeclineClose. */
+const EXPLICIT_DECLINE_CANCEL_RE = new RegExp(
+  `^\\s*(?:ยังไม่ยกเลิก|ไม่(?:ต้อง)?ยกเลิก(?:แล้ว)?|อย่า(?:เพิ่ง)?ยกเลิก)(?:เคส)?${TICKET}${TAIL}$`,
+  "i"
+);
+
+export function isExplicitDeclineCancel(text: string): boolean {
+  return EXPLICIT_DECLINE_CANCEL_RE.test(String(text || "").replace(/\s+/g, " ").trim());
+}
+
+/**
+ * A refusal to re-open, meaningful only while the re-open question is pending
+ * (ISSUE-090: the old `\b` form never matched after Thai text). Symptoms such
+ * as "ไม่หาย" are deliberately not declines.
+ */
+const DECLINE_REOPEN_RE = new RegExp(
+  `^\\s*(?:ยกเลิก(?!\\s*(?:เคส|ticket))|ไม่(?:ต้อง)?(?:เปิด(?:เคส)?(?:อีกครั้ง|ใหม่)?)?|ยังไม่(?:ต้อง)?(?:เปิด(?:เคส)?)?|ไม่ใช่|ไม่เอา|ไม่เป็นไร|cancel|no|nope|❌)(?:แล้ว)?${TICKET}${TAIL}$`,
+  "i"
+);
+
+export function isDeclineReopen(text: string): boolean {
+  return DECLINE_REOPEN_RE.test(String(text || "").replace(/\s+/g, " ").trim());
+}
 
 /**
  * Classifies a message against the post-ticket cancel protocol.

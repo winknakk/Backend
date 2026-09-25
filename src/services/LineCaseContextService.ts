@@ -21,6 +21,7 @@ const NEW_CASE_WINDOW_IGNORED_TYPES = [
   "acknowledgement",
   "acknowledgement_action",
   "acknowledgement_edit",
+  "acknowledgement_choice",
   "greeting",
   "thanks",
   "image_attached",
@@ -28,6 +29,8 @@ const NEW_CASE_WINDOW_IGNORED_TYPES = [
   "image_auto_attached",
   "image_auto_attach_pending",
   "unsupported_file",
+  "sticker_reply",
+  "sticker_reminder",
 ];
 
 /**

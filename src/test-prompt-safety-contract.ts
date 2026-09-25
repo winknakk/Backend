@@ -23,7 +23,7 @@ import path from "path";
 
 const FLOW = path.resolve(
   __dirname,
-  "../../../workflow-tooling/promptx_tools/workflow/เริ่มต้นใหม่อีกครั้ง/Main AI Core Flow.json"
+  "../../../แล้วกู๊ดจะกลับมาใน AVENGERS DOOMSDAY/All Workflows (ใช้งานในปัจจุบัน)/Main AI Core Flow.json"
 );
 
 function stepSettings(root: unknown, wanted: Set<string>): Record<string, any> {
@@ -197,7 +197,7 @@ const passed = results.filter((r) => r.ok);
 const failed = results.filter((r) => !r.ok);
 
 console.log("Prompt safety contract — static, no LLM call\n");
-console.log(`asset: workflow/เริ่มต้นใหม่อีกครั้ง/Main AI Core Flow.json`);
+console.log(`asset: แล้วกู๊ดจะกลับมาใน AVENGERS DOOMSDAY/All Workflows (ใช้งานในปัจจุบัน)/Main AI Core Flow.json`);
 console.log(`step_1 prompt: ${customerPrompt.length} chars   gate prompt: ${gatePrompt.length} chars\n`);
 for (const r of results) {
   console.log(`  ${r.ok ? "ผ่าน" : "พลาด"}  ${r.id}  ${r.what}`);

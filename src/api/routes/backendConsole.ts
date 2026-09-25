@@ -244,7 +244,7 @@ export function registerBackendConsoleRoutes(
           c.project_id
         FROM customer_notifications n
         LEFT JOIN conversations c ON c.id = n.conversation_id
-        WHERE n.notification_type IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit', 'greeting', 'thanks', 'waiting_customer', 'progress_update')
+        WHERE n.notification_type IN ('acknowledgement', 'acknowledgement_action', 'acknowledgement_edit', 'acknowledgement_choice', 'greeting', 'thanks', 'waiting_customer', 'progress_update', 'sticker_reply', 'sticker_reminder')
         ORDER BY n.id DESC
         LIMIT $1
       `;
