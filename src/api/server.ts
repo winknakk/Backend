@@ -47,6 +47,14 @@ import { AgentSessionQueueService } from "../services/AgentSessionQueueService";
 import { AgentSessionQueueWorker } from "../services/AgentSessionQueueWorker";
 import { LineTypingIndicatorService } from "../services/LineTypingIndicatorService";
 import { registerGitRepositoryRoutes } from "./routes/gitRepoRoutes";
+import { registerInternalNotesRoutes } from "./routes/internalNotes";
+import { registerDlqAdminRoutes } from "./routes/dlqAdmin";
+import { registerQueueHealthRoutes } from "./routes/queueHealth";
+import { registerTicketOpsRoutes } from "./routes/ticketOps";
+import { registerHandoffAuditRoutes } from "./routes/handoffAudit";
+import { registerAiObservabilityRoutes } from "./routes/aiObservability";
+import { registerAuditLogsRoutes } from "./routes/auditLogs";
+import { registerConversationIntelligenceRoutes } from "./routes/conversationIntelligence";
 import { SLAMatrixService } from "../services/SLAMatrixService";
 import { PolicyEngine } from "../policy/PolicyEngine";
 import { RuntimeContextResolver } from "../services/RuntimeContextResolver";
@@ -2241,7 +2249,7 @@ fastify.post("/api/v1/internal/tickets/:id/restore", async (request, reply) => {
     // the tickets_status_lifecycle_check constraint added in migration 040.
     const query = isNumeric
       ? `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE id = $1 AND org_id = $2 RETURNING *`
-      : `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE ticket_number = $1 AND org_id = $2 RETURNING *`;
+      : `UPDATE tickets SET status = 'REOPENED', plane_status = 'Open', cancellation_reason = NULL, lifecycle_changed_at = NOW(), updated_at = NOW() WHERE (ticket_number = $1 OR ticket_id = $1) AND org_id = $2 RETURNING *`;
     
     const queryArgs = [isNumeric ? parseInt(ticketIdStr, 10) : ticketIdStr, String(orgId)] as any[];
     const { rows } = await client.query(query, queryArgs);
@@ -3239,6 +3247,14 @@ fastify.register(registerAuthRoutes);
 fastify.register(registerMasterDataRoutes);
 fastify.register(registerAdminPlaneIntegrationRoutes);
 fastify.register(registerGitRepositoryRoutes);
+fastify.register(registerInternalNotesRoutes);
+fastify.register(registerDlqAdminRoutes);
+fastify.register(registerQueueHealthRoutes);
+fastify.register(registerTicketOpsRoutes);
+fastify.register(registerHandoffAuditRoutes);
+fastify.register(registerAiObservabilityRoutes);
+fastify.register(registerAuditLogsRoutes);
+fastify.register(registerConversationIntelligenceRoutes);
 registerPortalRoutes(fastify, { dbAdapter, slaService, emailService: emailNotificationService });
 const agentSessionQueueService = new AgentSessionQueueService(pool);
 // Shared by the LINE webhook route (phases A/B: receipt + after the ack) and

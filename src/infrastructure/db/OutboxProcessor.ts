@@ -8,6 +8,8 @@ import { PlaneService } from "../../services/planeService";
 import { PostgresAdapter } from "../../adapters/postgres/PostgresAdapter";
 import { classifyOutboxFailure, backoffMs, logClassification } from "./OutboxFailureClassifier";
 import { traceRecorder } from "../../observability/TraceRecorder";
+import { config } from "../../config/env";
+import { KG_EVALUATE_JOB, KG_EVALUATION_EVENT, parseEvaluateJobData } from "../../application/jobs/KnowledgeGapWorker";
 
 const logger = createLogger("OutboxProcessor");
 
@@ -119,6 +121,21 @@ export class OutboxProcessor {
               orgId: payload.orgId,
               planeWorkspaceSlug: payload.planeWorkspaceSlug,
               planeProjectId: payload.planeProjectId,
+            });
+          } else if (event_type === KG_EVALUATION_EVENT) {
+            // A dead-lettered knowledge gap evaluation that an operator requeued.
+            // Only ids travel; the worker re-reads the turn from the database.
+            if ((config.QUEUE_PROVIDER || "").toLowerCase() !== "redis") {
+              throw new Error("intelligence_queue_unavailable: knowledge gap evaluation requires QUEUE_PROVIDER=redis");
+            }
+            const turn = parseEvaluateJobData(payload);
+            if (!turn) throw new Error("invalid payload: knowledge gap evaluation ids are missing in outbox payload");
+            await this.jobQueue.enqueue({
+              type: KG_EVALUATE_JOB,
+              data: turn,
+              // A fresh job id per replay: the original BullMQ job may still sit in
+              // the failed set, and reusing its id would make the add a no-op.
+              metadata: { requestId: `kg-eval-replay-${id}-${attempts}` },
             });
           } else {
             logger.warn({ event_type }, "Unsupported outbox event type, skipping");

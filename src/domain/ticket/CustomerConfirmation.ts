@@ -171,9 +171,10 @@ export function splitCommandClauses(text: string): string[] {
   return parts.length > 1 ? [raw, ...parts] : [raw];
 }
 
-/** Whole-message close request: "ปิดเคส", "ขอปิดเคส TCK-… หน่อยค่ะ", "close case", "ขอปิดเคสนี้ค่ะ". */
+/** Whole-message close request: "ปิดเคส", "ขอปิดเคส TCK-… หน่อยค่ะ", "close case", "ขอปิดเคสนี้ค่ะ", "แก้ได้แล้ว ขอปิดเคสครับ". */
+const RESOLVED_PREFIX = "(?:(?:แก้|แก้ไข|ใช้งาน|ทำ|ใช้|เรียบร้อย|เสร็จ|โอเค|ok)(?:ได้)?แล้ว(?:นะคะ|นะครับ|ค่ะ|คะ|ครับ|คับ|จ้า)?\\s*)?";
 const CLOSE_REQUEST_RE = new RegExp(
-  `^\\s*(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ|จะ|please\\s+)?\\s*(?:ปิดเคส|ปิดตั๋ว|ปิดงาน|ปิดเรื่อง|close\\s+(?:the\\s+)?(?:case|ticket))${CLOSE_OBJECT}${TICKET}${TAIL}${TICKET}${TAIL}$`,
+  `^\\s*${RESOLVED_PREFIX}(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ|จะ|please\\s+)?\\s*(?:ปิดเคส|ปิดตั๋ว|ปิดงาน|ปิดเรื่อง|close\\s+(?:the\\s+)?(?:case|ticket))${CLOSE_OBJECT}${TICKET}${TAIL}${TICKET}${TAIL}$`,
   "i"
 );
 

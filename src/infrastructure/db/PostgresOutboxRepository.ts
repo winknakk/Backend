@@ -120,6 +120,40 @@ export class PostgresOutboxRepository implements IOutboxRepository {
     );
   }
 
+  /**
+   * Records work that failed outside the outbox (a BullMQ job that exhausted
+   * its retries) as a dead letter, so it surfaces in the same operator DLQ and
+   * can be requeued from there. On requeue the OutboxProcessor re-dispatches
+   * it like any pending event.
+   */
+  async recordDeadLetter(event: {
+    aggregateType: string;
+    aggregateId: string;
+    eventType: string;
+    payload: Record<string, unknown>;
+    attempts: number;
+    errorMessage: string;
+    failureKind: string;
+  }): Promise<number | null> {
+    const { rows } = await pool.query(
+      `INSERT INTO outbox_events
+         (aggregate_type, aggregate_id, event_type, payload, status, attempts,
+          error_message, failure_kind, dead_lettered_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, 'dead_letter', $5, $6, $7, NOW(), NOW(), NOW())
+       RETURNING id`,
+      [
+        event.aggregateType,
+        event.aggregateId,
+        event.eventType,
+        JSON.stringify(event.payload),
+        event.attempts,
+        event.errorMessage.slice(0, 1000),
+        event.failureKind,
+      ]
+    );
+    return rows.length ? Number(rows[0].id) : null;
+  }
+
   /** Dead letters, newest first, for the operations surface. */
   async listDeadLetters(limit: number, offset: number): Promise<any[]> {
     const { rows } = await pool.query(
