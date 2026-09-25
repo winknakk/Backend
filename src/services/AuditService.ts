@@ -11,6 +11,31 @@ export interface AuditEntry {
   operatorId?: number | null;
   oldValue?: Record<string, any> | null;
   newValue?: Record<string, any> | null;
+  /** What was acted on (`admin_audit_logs.entity_type`, NOT NULL). Derived from `action` when omitted. */
+  entityType?: string;
+  /** Id of what was acted on (`admin_audit_logs.entity_id`, NOT NULL). Derived from the values when omitted. */
+  entityId?: string | number | null;
+}
+
+/** "DLQ_REQUEUE" -> "dlq", "TICKET_MERGE" -> "ticket". */
+function deriveEntityType(entry: AuditEntry): string {
+  if (entry.entityType) return String(entry.entityType).slice(0, 100);
+  return String(entry.action || "unknown").split("_")[0].toLowerCase().slice(0, 100) || "unknown";
+}
+
+function deriveEntityId(entry: AuditEntry): string {
+  const candidates = [
+    entry.entityId,
+    entry.newValue?.id,
+    entry.oldValue?.id,
+    entry.newValue?.ticketId,
+    entry.oldValue?.ticketId,
+    entry.oldValue?.sourceTicketId,
+    entry.newValue?.noteId,
+    entry.oldValue?.noteId,
+  ];
+  const found = candidates.find((v) => v !== undefined && v !== null && String(v) !== "");
+  return found !== undefined ? String(found).slice(0, 255) : "unknown";
 }
 
 export interface AuditLogRecord {
@@ -80,15 +105,21 @@ export class AuditService {
    */
   async record(entry: AuditEntry, client?: PoolClient): Promise<number | null> {
     const executor = client || this.dbPool;
+    // Inside a caller's transaction the insert runs under a savepoint. A failed
+    // audit write must not abort the caller's transaction: before this, the
+    // swallowed error left it aborted and the caller's COMMIT silently rolled
+    // back — a DLQ requeue or ticket merge answered 200 and changed nothing.
+    const savepoint = client ? "audit_log_write" : null;
     try {
       const sanitizedOld = sanitizeAuditData(entry.oldValue || {});
       const sanitizedNew = sanitizeAuditData(entry.newValue || {});
       const actorName = String(entry.actor || "system").slice(0, 255);
       const actionName = String(entry.action || "UNKNOWN").slice(0, 100);
 
+      if (savepoint) await executor.query(`SAVEPOINT ${savepoint}`);
       const res = await executor.query(
-        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, operator_id, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, operator_id, entity_type, entity_id, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
          RETURNING id`,
         [
           entry.projectId !== undefined && entry.projectId !== null ? Number(entry.projectId) : null,
@@ -97,12 +128,16 @@ export class AuditService {
           JSON.stringify(sanitizedNew),
           actorName,
           entry.operatorId !== undefined && entry.operatorId !== null ? Number(entry.operatorId) : null,
+          deriveEntityType(entry),
+          deriveEntityId(entry),
         ]
       );
+      if (savepoint) await executor.query(`RELEASE SAVEPOINT ${savepoint}`);
 
       const id = res.rows[0]?.id ? Number(res.rows[0].id) : null;
       return id;
     } catch (err: any) {
+      if (savepoint) await executor.query(`ROLLBACK TO SAVEPOINT ${savepoint}`).catch(() => {});
       logger.error({ error: err.message, action: entry.action }, "Failed to write admin audit log");
       return null;
     }

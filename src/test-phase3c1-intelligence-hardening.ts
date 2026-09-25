@@ -28,6 +28,7 @@ import { buildNarrativeFacts, validateNarrative } from "./services/DailyNarrativ
 import { registerConversationIntelligenceRoutes } from "./api/routes/conversationIntelligence";
 import { resolveProjectFilter } from "./middleware/tenantScope";
 import { resolveProjectTimezone } from "./config/intelligence";
+import { AuditService } from "./services/AuditService";
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -556,6 +557,38 @@ async function run() {
     const duplicates = [...seen.entries()].filter(([, where]) => where.length > 1);
     assert.ok(seen.size > 100, "route scan found the route modules");
     assert.deepEqual(duplicates, [], `duplicate routes: ${JSON.stringify(duplicates)}`);
+  });
+
+  await test("R2 audit write supplies NOT NULL entity columns and never aborts the caller's transaction", async () => {
+    // Regression: the live admin_audit_logs requires entity_type/entity_id. The
+    // insert failed, the error was swallowed, the caller's transaction stayed
+    // aborted and its COMMIT rolled back — DLQ requeue / ticket merge were no-ops.
+    const seen: string[] = [];
+    let insertParams: any[] = [];
+    let failInsert = true;
+    const client: any = {
+      query: async (sql: string, params?: any[]) => {
+        seen.push(sql.trim().split(/\s+/).slice(0, 3).join(" "));
+        if (sql.includes("INSERT INTO admin_audit_logs")) {
+          insertParams = params || [];
+          if (failInsert) throw new Error('null value in column "entity_type" violates not-null constraint');
+          return { rows: [{ id: 41 }] };
+        }
+        return { rows: [] };
+      },
+    };
+    const svc = new AuditService({} as any);
+    const entry = { projectId: 3, action: "DLQ_REQUEUE", actor: "op", oldValue: { id: 2, status: "dead_letter" }, newValue: { id: 2, status: "pending" } };
+
+    assert.equal(await svc.record(entry, client), null);
+    assert.deepEqual(seen, ["SAVEPOINT audit_log_write", "INSERT INTO admin_audit_logs", "ROLLBACK TO SAVEPOINT"]);
+
+    seen.length = 0;
+    failInsert = false;
+    assert.equal(await svc.record(entry, client), 41);
+    assert.deepEqual(seen, ["SAVEPOINT audit_log_write", "INSERT INTO admin_audit_logs", "RELEASE SAVEPOINT audit_log_write"]);
+    assert.equal(insertParams[6], "dlq", "entity_type derived from action");
+    assert.equal(insertParams[7], "2", "entity_id derived from the values");
   });
 
   console.log("\n===============================================================================");

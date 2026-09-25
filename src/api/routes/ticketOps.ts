@@ -121,10 +121,11 @@ export async function registerTicketOpsRoutes(fastify: FastifyInstance): Promise
       const mergeReason = (body.reason || "Duplicate inquiry merged by operator").trim();
       const actorName = request.principal?.subject || "operator";
 
-      // 7. Update source ticket to resolved/duplicate
+      // 7. Update source ticket to resolved/duplicate. The lifecycle CHECK
+      // (tickets_status_lifecycle_check) only accepts the uppercase vocabulary.
       await client.query(
         `UPDATE tickets
-         SET status = 'resolved',
+         SET status = 'RESOLVED',
              duplicate_of_ticket_id = $1,
              duplicate_reason = $2,
              resolved_at = NOW(),
@@ -136,12 +137,14 @@ export async function registerTicketOpsRoutes(fastify: FastifyInstance): Promise
       // 8. Add internal note to target ticket
       if (target.conversation_id) {
         await client.query(
-          `INSERT INTO internal_notes (conversation_id, ticket_id, operator_id, content, is_pinned, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, false, NOW(), NOW())`,
+          // note_text and mentioned_ops are NOT NULL in the live schema;
+          // operator_id references operators(id), so no placeholder operator.
+          `INSERT INTO internal_notes (conversation_id, ticket_id, operator_id, content, note_text, mentioned_ops, is_pinned, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $4, '{}', false, NOW(), NOW())`,
           [
             target.conversation_id,
             target.id,
-            source.operator_id || 1,
+            source.operator_id || null,
             `Merged duplicate ticket #${source.ticket_id} into this ticket. Reason: ${mergeReason}`,
           ]
         );
