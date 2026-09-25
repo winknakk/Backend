@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Fastify from "fastify";
 import { UnrecoverableError } from "bullmq";
-import { traceRecorder } from "./observability/TraceRecorder";
+import { traceRecorder, sanitizeDetail } from "./observability/TraceRecorder";
 import { INTELLIGENCE_CONFIG } from "./config/intelligence";
 import { KnowledgeGapService, KnowledgeGapTurnNotFoundError } from "./services/KnowledgeGapService";
 import { parseEvaluateJobData, isFinalAttempt, KG_EVALUATE_JOB, KG_CLUSTER_JOB } from "./application/jobs/KnowledgeGapWorker";
@@ -589,6 +589,17 @@ async function run() {
     assert.deepEqual(seen, ["SAVEPOINT audit_log_write", "INSERT INTO admin_audit_logs", "RELEASE SAVEPOINT audit_log_write"]);
     assert.equal(insertParams[6], "dlq", "entity_type derived from action");
     assert.equal(insertParams[7], "2", "entity_id derived from the values");
+  });
+
+  await test("R3 trace detail keeps numeric/boolean telemetry types and still strips credentials", () => {
+    // Regression: every scalar was stringified, so latencyMs landed as "123".
+    const out: any = sanitizeDetail({ latencyMs: 123, ok: true, model: null, token: "abc", apiKey: "k", note: "A".repeat(45), nested: { n: 0.5 } });
+    assert.equal(out.latencyMs, 123);
+    assert.equal(out.ok, true);
+    assert.equal(out.model, null);
+    assert.equal(out.nested.n, 0.5);
+    assert.ok(!("token" in out) && !("apiKey" in out), "credential keys dropped");
+    assert.equal(out.note, "[redacted]", "credential-shaped strings redacted");
   });
 
   console.log("\n===============================================================================");
