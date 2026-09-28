@@ -84,6 +84,9 @@ const FORBIDDEN_DETAIL_KEYS = [
 export function sanitizeDetail(detail: unknown, depth = 0): unknown {
   if (depth > 4 || detail === null || detail === undefined) return detail ?? null;
   if (Array.isArray(detail)) return detail.slice(0, 20).map((d) => sanitizeDetail(d, depth + 1));
+  // Numbers and booleans cannot carry a credential; keeping their type lets
+  // metrics such as latencyMs stay numeric in the JSONB detail.
+  if (typeof detail === "boolean" || (typeof detail === "number" && Number.isFinite(detail))) return detail;
   if (typeof detail !== "object") {
     const s = String(detail);
     // Defence in depth: a value that looks like a credential is dropped even

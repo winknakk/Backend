@@ -233,6 +233,8 @@ export async function registerDlqAdminRoutes(fastify: FastifyInstance): Promise<
         {
           projectId: row.project_id !== null ? Number(row.project_id) : null,
           action: "DLQ_REQUEUE",
+          entityType: "outbox_event",
+          entityId: id,
           actor: actorName,
           oldValue: {
             id,

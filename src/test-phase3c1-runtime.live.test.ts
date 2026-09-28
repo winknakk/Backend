@@ -71,7 +71,8 @@ const stub = http.createServer((req, res) => {
     if (body.method === "tools/list") return send({ jsonrpc: "2.0", id: body.id, result: { tools: [] } });
     const args = body.params?.arguments || {};
     const msg: string = args.message || "";
-    const kind = msg.includes("operational narrative") ? "narrative" : "summary";
+    const callId: string = args.conversationContext?.conversationId || "";
+    const kind = callId.startsWith("ai-daily_narrative-") ? "narrative" : callId.startsWith("ai-conversation_summary-") ? "summary" : "other";
     stubCalls.push({ kind, mode: stubMode, prompt: msg, tools: args.availableTools, conversationId: args.conversationContext?.conversationId });
     const text = (t: string) => send({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: t }] } });
     switch (stubMode) {
@@ -81,6 +82,7 @@ const stub = http.createServer((req, res) => {
       case "bad": return text("Sorry, I cannot help with that request.");
       case "malformed": return text('{"summary_th": "broken", ');
     }
+    if (kind === "other") return text("stub reply for a non-Phase-3C.1 caller");
     if (kind === "narrative") {
       const facts = JSON.parse((msg.split("<facts>")[1] || "").split("</facts>")[0] || "{}");
       if (stubMode === "invent") return text("วันนี้มีบทสนทนา 987 รายการ");
@@ -351,19 +353,21 @@ async function main() {
     await redis.set(`lock:kg:eval:${A.projectId}:${K1.conversationId}:${K1.messageId}`, "crashed-worker", "EX", 4);
     await before!.remove();
     await queue.add("intelligence.knowledge_gap.evaluate", { projectId: A.projectId, conversationId: K1.conversationId, messageId: K1.messageId }, { jobId: id });
-    const blocked = await waitFor("blocked job done", async () => {
+    await waitFor("blocked job done", async () => {
       const j = await queue.getJob(id);
-      return j && (await j.getState()) === "completed" ? j : null;
+      return j && (await j.getState()) === "completed";
     }, 20000, 500);
+    const blocked = (await queue.getJob(id))!;
     assert.equal(blocked.returnvalue.reason, "evaluation_in_progress");
 
     await sleep(4500); // lock TTL elapses; the crashed worker's marker is gone
     await blocked.remove();
     await queue.add("intelligence.knowledge_gap.evaluate", { projectId: A.projectId, conversationId: K1.conversationId, messageId: K1.messageId }, { jobId: id });
-    const retried = await waitFor("retried job done", async () => {
+    await waitFor("retried job done", async () => {
       const j = await queue.getJob(id);
-      return j && (await j.getState()) === "completed" ? j : null;
+      return j && (await j.getState()) === "completed";
     }, 20000, 500);
+    const retried = (await queue.getJob(id))!;
     assert.equal(retried.returnvalue.isCandidate, true);
     const rows = await q(`SELECT id, updated_at FROM knowledge_gap_candidates WHERE project_id = $1 AND conversation_id = $2 AND message_id = $3`, [A.projectId, K1.conversationId, K1.messageId]);
     assert.equal(rows.length, 1, "PostgreSQL unique key kept a single candidate");
@@ -399,6 +403,11 @@ async function main() {
     await q(`UPDATE messages SET deleted_at = NULL WHERE id = $1`, [D2.messageId]); // operator fixes the cause
     const rq = await api("POST", `/api/admin/outbox/dead-letters/${d2Outbox.id}/requeue`, opA, {});
     assert.equal(rq.status, 200, rq.text.slice(0, 200));
+    const [afterRq] = await q(`SELECT status FROM outbox_events WHERE id = $1`, [d2Outbox.id]);
+    assert.notEqual(afterRq.status, "dead_letter", "requeue actually committed (audit failure no longer rolls it back)");
+    const audit = await q(`SELECT entity_type, entity_id, project_id FROM admin_audit_logs WHERE action = 'DLQ_REQUEUE' AND entity_id = $1`, [String(d2Outbox.id)]);
+    assert.equal(audit.length, 1, "requeue is audited");
+    assert.equal(Number(audit[0].project_id), A.projectId);
     const replayId = `kg-eval-replay-${d2Outbox.id}-0`;
     const job = await waitFor("replay job", async () => queue.getJob(replayId), 30000, 1000);
     await waitFor("replay completed", async () => (await job!.getState()) === "completed", 30000, 500);
@@ -536,10 +545,17 @@ async function main() {
   });
 
   await check("12 Summary authorization: DB-derived project, forged headers and query ignored", async () => {
-    assert.equal((await api("GET", summaryUrl, opB)).status, 403);
-    assert.equal((await api("GET", summaryUrl, opB, undefined, { "x-project-id": String(A.projectId), "x-org-id": A.orgId })).status, 403);
-    assert.equal((await api("POST", `${summaryUrl}/refresh?projectId=${A.projectId}`, opB, {})).status, 403);
-    assert.equal((await api("GET", `/api/admin/conversations/${SB.conversationId}/ai-summary`, opA)).status, 403);
+    const denials: Record<string, any> = {
+      "B GET A-summary": await api("GET", summaryUrl, opB),
+      "B GET A-summary forged headers": await api("GET", summaryUrl, opB, undefined, { "x-project-id": String(A.projectId), "x-org-id": A.orgId }),
+      "B POST A-refresh ?projectId=A": await api("POST", `${summaryUrl}/refresh?projectId=${A.projectId}`, opB, {}),
+      "A GET B-summary": await api("GET", `/api/admin/conversations/${SB.conversationId}/ai-summary`, opA),
+    };
+    for (const [label, r] of Object.entries(denials)) {
+      console.log(`    ${label}: ${r.status} ${String(r.json?.message || "").slice(0, 90)}`);
+      assert.ok(r.status === 403 || r.status === 404, `${label} must be denied (got ${r.status})`);
+      assert.ok(!r.text.includes("summary_th"), `${label} leaks no summary`);
+    }
     assert.equal((await api("GET", `/api/admin/conversations/999999999/ai-summary`, opA)).status, 404);
     const own = await api("GET", `/api/admin/conversations/${SB.conversationId}/ai-summary`, opB);
     assert.equal(own.status, 200);
@@ -655,6 +671,11 @@ async function main() {
   // =========================================================================
   // Circuit breaker observation (known issue ISSUE-082)
   // =========================================================================
+  await check("O Other PromptX callers observed during the run (outside Phase 3C.1)", async () => {
+    const others = stubCalls.filter((c) => c.kind === "other");
+    console.log(`  (${others.length} foreign chatAgent call(s): ${[...new Set(others.map((c) => c.conversationId))].join(", ") || "none"})`);
+  });
+
   await check("CB Shared PromptX circuit breaker: summary failures stay below the opening threshold here", async () => {
     const opened = serverLog.join("").includes("Circuit Breaker transitioned to OPEN");
     console.log(`  (breaker opened during run: ${opened})`);

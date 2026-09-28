@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Fastify from "fastify";
 import { UnrecoverableError } from "bullmq";
-import { traceRecorder } from "./observability/TraceRecorder";
+import { traceRecorder, sanitizeDetail } from "./observability/TraceRecorder";
 import { INTELLIGENCE_CONFIG } from "./config/intelligence";
 import { KnowledgeGapService, KnowledgeGapTurnNotFoundError } from "./services/KnowledgeGapService";
 import { parseEvaluateJobData, isFinalAttempt, KG_EVALUATE_JOB, KG_CLUSTER_JOB } from "./application/jobs/KnowledgeGapWorker";
@@ -28,6 +28,7 @@ import { buildNarrativeFacts, validateNarrative } from "./services/DailyNarrativ
 import { registerConversationIntelligenceRoutes } from "./api/routes/conversationIntelligence";
 import { resolveProjectFilter } from "./middleware/tenantScope";
 import { resolveProjectTimezone } from "./config/intelligence";
+import { AuditService } from "./services/AuditService";
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -556,6 +557,69 @@ async function run() {
     const duplicates = [...seen.entries()].filter(([, where]) => where.length > 1);
     assert.ok(seen.size > 100, "route scan found the route modules");
     assert.deepEqual(duplicates, [], `duplicate routes: ${JSON.stringify(duplicates)}`);
+  });
+
+  await test("R2 audit write supplies NOT NULL entity columns; in a caller transaction a failure is raised, never swallowed", async () => {
+    // Regression: the live admin_audit_logs requires entity_type/entity_id. The
+    // insert failed, the error was swallowed, the caller's transaction stayed
+    // aborted and its COMMIT rolled back while the API answered 200.
+    let insertParams: any[] = [];
+    let failInsert = true;
+    const client: any = {
+      query: async (sql: string, params?: any[]) => {
+        if (sql.includes("INSERT INTO admin_audit_logs")) {
+          insertParams = params || [];
+          if (failInsert) throw new Error('null value in column "entity_type" violates not-null constraint');
+          return { rows: [{ id: 41 }] };
+        }
+        return { rows: [] };
+      },
+    };
+    const svc = new AuditService({} as any);
+    const entry = { projectId: 3, action: "DLQ_REQUEUE", actor: "op", oldValue: { id: 2, status: "dead_letter" }, newValue: { id: 2, status: "pending" } };
+
+    await assert.rejects(svc.record(entry, client), /entity_type/, "transactional failure must reach the caller so it rolls back");
+
+    const standalone = new AuditService({ query: client.query } as any);
+    assert.equal(await standalone.record(entry), null, "without a caller transaction the write stays best-effort");
+
+    failInsert = false;
+    assert.equal(await svc.record(entry, client), 41);
+    assert.equal(insertParams[6], "dlq", "entity_type derived from action when not given");
+    assert.equal(insertParams[7], "2", "entity_id derived from the values when not given");
+    await svc.record({ ...entry, entityType: "outbox_event", entityId: 9 }, client);
+    assert.deepEqual([insertParams[6], insertParams[7]], ["outbox_event", "9"], "explicit entity wins");
+  });
+
+  await test("R4 every admin_audit_logs INSERT supplies the NOT NULL entity_type and entity_id", () => {
+    // Regression: the project SLA / business-hours / settings audits omitted
+    // them and the routes answered 500 on the live schema.
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const f of fs.readdirSync(dir)) {
+        const p = path.join(dir, f);
+        if (fs.statSync(p).isDirectory()) walk(p);
+        else if (f.endsWith(".ts") && !f.includes("test")) {
+          const src = fs.readFileSync(p, "utf8");
+          for (const m of src.matchAll(/INSERT INTO admin_audit_logs\s*\(([^)]*)\)/g)) {
+            if (!/\bentity_type\b/.test(m[1]) || !/\bentity_id\b/.test(m[1])) offenders.push(path.relative(__dirname, p));
+          }
+        }
+      }
+    };
+    walk(path.resolve(__dirname));
+    assert.deepEqual(offenders, [], `audit inserts missing entity columns: ${offenders.join(", ")}`);
+  });
+
+  await test("R3 trace detail keeps numeric/boolean telemetry types and still strips credentials", () => {
+    // Regression: every scalar was stringified, so latencyMs landed as "123".
+    const out: any = sanitizeDetail({ latencyMs: 123, ok: true, model: null, token: "abc", apiKey: "k", note: "A".repeat(45), nested: { n: 0.5 } });
+    assert.equal(out.latencyMs, 123);
+    assert.equal(out.ok, true);
+    assert.equal(out.model, null);
+    assert.equal(out.nested.n, 0.5);
+    assert.ok(!("token" in out) && !("apiKey" in out), "credential keys dropped");
+    assert.equal(out.note, "[redacted]", "credential-shaped strings redacted");
   });
 
   console.log("\n===============================================================================");

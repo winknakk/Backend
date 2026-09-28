@@ -1400,14 +1400,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
         // Audit Log
         await client.query(
-          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
-         VALUES ($1, $2, $3, $4, $5)`,
+          // entity_type / entity_id are NOT NULL in the live admin_audit_logs.
+          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, entity_type, entity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             parseInt(id, 10),
             "UPSERT_SLA_POLICY",
             JSON.stringify(oldValue || {}),
             JSON.stringify(body),
-            actor
+            actor,
+            "project_sla_policy",
+            String(parseInt(id, 10))
           ]
         );
 
@@ -1454,14 +1457,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
         // Audit Log
         await client.query(
-          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
-         VALUES ($1, $2, $3, $4, $5)`,
+          // entity_type / entity_id are NOT NULL in the live admin_audit_logs.
+          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, entity_type, entity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             parseInt(id, 10),
             "DELETE_SLA_POLICY",
             JSON.stringify(oldValue),
             JSON.stringify({}),
-            actor
+            actor,
+            "project_sla_policy",
+            String(parseInt(id, 10))
           ]
         );
 
@@ -1536,14 +1542,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
         // Audit Log
         await client.query(
-          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
-         VALUES ($1, $2, $3, $4, $5)`,
+          // entity_type / entity_id are NOT NULL in the live admin_audit_logs.
+          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, entity_type, entity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             parseInt(id, 10),
             "UPSERT_BUSINESS_HOURS",
             JSON.stringify(oldValue || {}),
             JSON.stringify(body),
-            actor
+            actor,
+            "project_business_hours",
+            String(parseInt(id, 10))
           ]
         );
 
@@ -1589,14 +1598,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
         // Audit Log
         await client.query(
-          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
-         VALUES ($1, $2, $3, $4, $5)`,
+          // entity_type / entity_id are NOT NULL in the live admin_audit_logs.
+          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, entity_type, entity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             parseInt(id, 10),
             "DELETE_BUSINESS_HOURS",
             JSON.stringify(oldValue),
             JSON.stringify({}),
-            actor
+            actor,
+            "project_business_hours",
+            String(parseInt(id, 10))
           ]
         );
 
@@ -1737,14 +1749,17 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
 
         // Audit Log
         await client.query(
-          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor)
-         VALUES ($1, $2, $3, $4, $5)`,
+          // entity_type / entity_id are NOT NULL in the live admin_audit_logs.
+          `INSERT INTO admin_audit_logs (project_id, action, old_value, new_value, actor, entity_type, entity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             parseInt(id, 10),
             "UPDATE_PROJECT_SETTINGS",
             JSON.stringify(oldValue),
             JSON.stringify(body),
-            actor
+            actor,
+            "project_settings",
+            String(parseInt(id, 10))
           ]
         );
 
