@@ -65,7 +65,9 @@ function systemPromptFromCodeStep(): string {
 const resolvedSystemPrompt = systemPromptFromCodeStep();
 
 const customerPrompt: string = (steps.step_1?.input?.roles ?? [])
-  .map((r: any) => String(r?.content ?? ""))
+  .map((r: any) =>
+    String(r?.content ?? "").replace(/\{\{\s*step_system_prompt\['systemPrompt'\]\s*\}\}/g, () => resolvedSystemPrompt)
+  )
   .join("\n\n");
 const gatePrompt: string = String(steps.step_gate_agent?.input?.message ?? "");
 
