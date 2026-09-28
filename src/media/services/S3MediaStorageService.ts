@@ -194,6 +194,10 @@ export class S3MediaStorageService implements IMediaStorageService {
       case "application/pdf": return ".pdf";
       case "audio/mpeg": return ".mp3";
       case "audio/wav": return ".wav";
+      // LINE voice messages
+      case "audio/x-m4a":
+      case "audio/m4a":
+      case "audio/mp4": return ".m4a";
       default: return ".bin";
     }
   }
@@ -207,6 +211,7 @@ export class S3MediaStorageService implements IMediaStorageService {
       case ".pdf": return "application/pdf";
       case ".mp3": return "audio/mpeg";
       case ".wav": return "audio/wav";
+      case ".m4a": return "audio/x-m4a";
       default: return "application/octet-stream";
     }
   }

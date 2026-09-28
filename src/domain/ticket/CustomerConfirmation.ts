@@ -373,6 +373,12 @@ export type CancelIntentKind =
   | "DECLINE_CANCEL"
   /** "ยกเลิกเคส", "ขอยกเลิกเคส TCK-… ค่ะ", "cancel the ticket": the customer asks to cancel something. */
   | "CANCEL_REQUEST"
+  /**
+   * Slang / colloquial "never mind" with no object word: "ไม่ต้องดูแล้วจ้า",
+   * "ทำได้ละ", "กดยกเลิกให้ที". Only a candidate — the handler honours it
+   * when no question is pending and there is an open case (demo 5.3).
+   */
+  | "SOFT_CANCEL_REQUEST"
   | "NONE";
 
 export interface CancelIntent {
@@ -460,6 +466,79 @@ export function isDeclineReopen(text: string): boolean {
   return DECLINE_REOPEN_RE.test(String(text || "").replace(/\s+/g, " ").trim());
 }
 
+// ---------------------------------------------------------------------------
+// Slang / colloquial cancel (demo 5.3, 2026-09-28)
+// ---------------------------------------------------------------------------
+//
+// "ไม่ต้องดูแล้วจ้า", "ทำได้ละ", "กดยกเลิกให้ที", "แก้เองได้แล้วค่ะ ขอบคุณนะคะ".
+// No object word, so these are SOFT: the message must consist of nothing but
+// soft-cancel phrases plus fillers (particles, thanks, "เคสนี้", a TCK number).
+// Anything left over — "แต่ยังช้าอยู่", a symptom, a question — means it is not
+// a cancel, and the text stays with the other protocols and the AI.
+
+const SOFT_DONE = "(?:แล้ว|แร้ว|แระ|ละ|ล่ะ|หละ)";
+const SOFT_OBJ = "(?:เคส|เรื่อง|ตั๋ว|งาน|ปัญหา|อัน)(?:นี้|นั้น|นั่น|เดิม|ที่แจ้ง(?:ไว้)?|เมื่อกี้|เมื่อกี๊|ก่อนหน้า)?";
+/** A short topic ("เรื่องเงินยืม") inside a phrase; never spans a negation or "แต่". */
+const SOFT_SPAN = "(?:(?!ไม่|ยัง|แต่)\\S){0,30}?";
+const SOFT_TOPIC = `(?:\\s*(?:เคส|เรื่อง|ตั๋ว|งาน)${SOFT_SPAN})?`;
+
+/** Longer alternatives first: the alternation takes the first that matches. */
+const SOFT_CANCEL_PHRASES = [
+  // "No longer needed": ไม่ต้องดูแล้ว, ไม่ต้องแก้เรื่องเงินยืมแล้วนะ, ไม่ต้องส่งช่างแล้ว
+  `ไม่ต้อง(?:ให้)?(?:ช่วย)?(?:ดู|แก้ไข|แก้|ทำ|ติดตาม|ตาม|เช็ค|เช็ก|ตรวจสอบ|ตรวจ|ดำเนินการ|จัดการ|ส่งช่าง|เข้ามา|เปิดเคส|สนใจ|ห่วง)(?:ต่อ)?(?:ให้)?${SOFT_SPAN}${SOFT_DONE}`,
+  `ไม่ต้อง(?:ดู|แก้ไข|แก้|ทำ|ตาม)(?:ต่อ)?(?:ให้)?(?:${SOFT_OBJ})?(?:ก็ได้|เลย)`,
+  `ไม่ต้อง${SOFT_DONE}`,
+  `ไม่(?:เอา|ใช้|ต้องการ|จำเป็น(?:ต้อง${SOFT_SPAN})?)(?:${SOFT_OBJ})?${SOFT_DONE}`,
+  `ไม่(?:รบกวน|เป็นไร|มีปัญหา)${SOFT_DONE}`,
+  // Solved it themselves: ทำได้ละ, แก้ได้เองแล้ว, แก้เองได้แล้ว, จัดการเองแล้ว, หายเอง
+  `(?:ทำ|แก้ไข|แก้|จัดการ|เคลียร์|ซ่อม)(?:ปัญหา)?(?:เอง)?ได้(?:เอง)?${SOFT_DONE}`,
+  `(?:ทำ|แก้ไข|แก้|จัดการ|เคลียร์)(?:ปัญหา)?เอง${SOFT_DONE}`,
+  `(?:ปัญหา)?หาย(?:ไป)?เอง(?:${SOFT_DONE})?`,
+  // Cancel without the object word: กดยกเลิกให้ที, ยกเลิกเลย, ช่วยยกเลิกเรื่องนี้ให้หน่อย
+  `(?:กด|ช่วย|รบกวน|ขอ|อยาก|ต้องการ)*\\s*(?:กด)?ยกเลิก${SOFT_TOPIC}(?:ไป|ทิ้ง|ออก)?\\s*(?:ได้เลย|ไปเลย|ให้|เลย|ได้|ด้วย|หน่อย|ที|เถอะ|เหอะ|ละกัน|แล้วกัน)`,
+  `(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ)\\s*(?:กด)?ยกเลิก\\s*เรื่อง(?:(?!ไม่|ยัง|แต่)\\S){1,30}?(?=\\s|$)`,
+  `(?:ขอ|อยาก|ช่วย|รบกวน|ต้องการ)\\s*(?:กด)?ยกเลิก`,
+  `ยกเลิกทิ้ง`,
+  // Let it go: ช่างมัน, ปล่อยไปเลย, ลืมไปได้เลย, เลิกดูได้เลย, ถอนเรื่อง
+  `ช่างมัน(?:เถอะ|เหอะ)?`,
+  `ปล่อย(?:มัน)?(?:ไป|ผ่าน)(?:เลย|ก่อน)?`,
+  `ลืม(?:มัน|${SOFT_OBJ})?ไปได้เลย`,
+  `เลิก(?:ดู|ทำ|แก้|ตาม)(?:ต่อ)?(?:ได้)?(?:เลย)?`,
+  `ถอน(?:เรื่อง|เคส|คำขอ)`,
+  // English
+  `never\\s*mind|nvm|forget\\s+it|no\\s+longer\\s+needed|not\\s+needed\\s+any\\s*more`,
+  `(?:i|we)\\s+(?:fixed|solved|resolved|sorted)\\s+it(?:\\s+(?:myself|ourselves|already))?|fixed\\s+it\\s+myself`,
+  `(?:please\\s+)?cancel\\s+(?:it|this|that|please)(?:\\s+please)?|don'?t\\s+need\\s+(?:it|help|this)\\s+any\\s*more`,
+];
+const SOFT_CANCEL_RE = new RegExp(SOFT_CANCEL_PHRASES.join("|"), "gi");
+
+const SOFT_FILLERS = [
+  SOFT_OBJ,
+  "TCK-\\d{4}-\\d{4,6}",
+  "ขอบคุณ(?:มาก)?(?:ๆ)?(?:ที่ช่วย(?:ดู)?|สำหรับความช่วยเหลือ)?|ขอบใจ|thanks?(?:\\s+you)?|thx|ขอโทษ(?:ที่รบกวน|ที(?!่))?|sorry",
+  "สวัสดี|หวัดดี|แอดมิน|admin|พี่|น้อง|ทีมงาน|เจ้าหน้าที่",
+  "อ๋อ|อ่อ|อ้อ|เอ่อ|โอเค|okay|ok|พอดี|คือ|ตอนนี้|เดี๋ยวนี้|สรุป|งั้น|ก็|เลย|ด้วย|ให้|หน่อย|ได้เลย|ได้ไหม|ได้มั้ย|ได้ป่าว|ไหม|มั้ย|please|pls",
+  "ครับผม|ครับ|คับ|ค้าบ|คร้าบ|ครัช|ค่ะ|คะ|ค่า|คร่า|จ้า|จ้ะ|จ๊ะ|จ่ะ|ฮะ|ฮับ|งับ|นะคะ|นะครับ|นะจ๊ะ|นะ|น้า|น่ะ|เนอะ|เด้อ|ละกัน|แล้วกัน|เถอะ|เหอะ|ที",
+];
+const SOFT_FILLER_RE = new RegExp(SOFT_FILLERS.join("|"), "gi");
+
+/**
+ * Whether the whole message is a colloquial "never mind / I fixed it / cancel
+ * it for me" (demo 5.3). A candidate only: see SOFT_CANCEL_REQUEST.
+ */
+export function isSoftCancelPhrase(text: string): boolean {
+  const t = String(text || "")
+    .toLowerCase()
+    .replace(/(\D)\1{2,}/g, "$1") // "จ้าาา", "ค่าาา"
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t || isNegativeCancelIntent(t)) return false;
+  const withoutPhrases = t.replace(SOFT_CANCEL_RE, " ");
+  if (withoutPhrases === t) return false;
+  const rest = withoutPhrases.replace(SOFT_FILLER_RE, " ").replace(/[\s\p{P}\p{S}5ๆ️]+/gu, "");
+  return rest === "";
+}
+
 /**
  * Classifies a message against the post-ticket cancel protocol.
  *
@@ -491,6 +570,8 @@ export function detectCancelIntent(text: string, cancelQuestionPending = false):
     if (DECLINE_CANCEL_RE.test(raw)) return { kind: "DECLINE_CANCEL", ticketNumber };
     if (BARE_YES_RE.test(raw)) return { kind: "CONFIRM_CANCEL", ticketNumber };
   }
+
+  if (isSoftCancelPhrase(raw)) return { kind: "SOFT_CANCEL_REQUEST", ticketNumber, reason: raw };
 
   return { kind: "NONE", ticketNumber };
 }

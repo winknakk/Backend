@@ -33,7 +33,9 @@ export async function findAccompanyingCustomerText(
            FROM messages candidate
           WHERE candidate.conversation_id = image_message.conversation_id
             AND candidate.role = 'customer'
-            AND candidate.message_type = 'text'
+            -- A transcribed voice clip describes a screenshot as well as typed text does.
+            AND (candidate.message_type = 'text'
+                 OR (candidate.message_type = 'audio' AND COALESCE(candidate.content, '') <> ''))
             AND candidate.created_at BETWEEN
                 image_message.created_at - ($3::int * INTERVAL '1 second')
                 AND image_message.created_at + ($3::int * INTERVAL '1 second')

@@ -116,6 +116,9 @@ const PASSIVE_NOTIFICATION_TYPES: string[] = [
   "ai_timeout_fallback",
   "sticker_reply",
   "sticker_reminder",
+  "voice_unclear",
+  "voice_too_long",
+  "voice_confirm_by_tap",
 ];
 
 /** Pending questions whose chips a sticker reminder can rebuild (2026-09-24). */
@@ -876,6 +879,16 @@ export class CustomerConfirmationHandler {
     // The "which case to cancel" list answered with just a number.
     if (cancel.kind === "NONE" && pending?.kind === "cancel_which_case" && isBareNumber) {
       cancel = { kind: "CANCEL_REQUEST", ticketNumber: numberInText };
+    }
+    // Slang "ไม่ต้องดูแล้ว / ทำได้ละ / กดยกเลิกให้ที" (demo 5.3) has no object
+    // word, so it counts only when no question is out (a draft card, close,
+    // re-open or scope question owns those words) and a case is open. The
+    // customer's own words become the cancel reason; the confirm chip still
+    // decides, and a delivered case gets the close question below.
+    if (cancel.kind === "SOFT_CANCEL_REQUEST") {
+      cancel = !pending && asked?.kind !== "create" && tickets.length > 0
+        ? { ...cancel, kind: "CANCEL_REQUEST" }
+        : { kind: "NONE", ticketNumber: cancel.ticketNumber };
     }
     if (cancel.kind === "CONFIRM_CANCEL") {
       let target = byNumber(cancel.ticketNumber);

@@ -369,6 +369,37 @@ async function main() {
   }
 
   // -------------------------------------------------------------------------
+  console.log("\nH11 — slang cancel (demo 5.3) asks the cancel question only when nothing else is asked");
+  for (const slang of ["ไม่ต้องดูแล้วจ้า", "ทำได้ละจ้า", "กดยกเลิกให้ที"]) {
+    reset();
+    const H = addTicket(8, "IN_PROGRESS", "ระบบชดใช้เงินยืม - ย้อนสถานะไม่ได้");
+    r = await customer(slang);
+    check(`H11a '${slang}' on an open case asks to cancel it, nothing cancelled yet`, r.sent[0]?.notification_type === "cancel_confirmation_request" && r.sent[0]?.ticket_id === H.id && H.status === "IN_PROGRESS", `${types(r.sent)} H=${H.status}`);
+    r = await customer(`ยืนยันยกเลิกเคส ${H.ticket_number}`);
+    check(`H11b '${slang}' ...then the chip cancels it`, H.status === "CANCELLED", `H is ${H.status}; ${types(r.sent)}`);
+  }
+
+  reset();
+  let H = addTicket(8, "IN_PROGRESS", "ระบบชดใช้เงินยืม - ย้อนสถานะไม่ได้");
+  aiSays("สรุปรายละเอียดก่อนเปิดเคสนะคะ ข้อมูลถูกต้องไหมคะ");
+  r = await customer("ไม่ต้องแล้วค่ะ");
+  check("H11c during a draft card slang stays with the AI gate (CANCEL_RESET), filed case untouched", r.outcome.handled === false && r.sent.length === 0 && H.status === "IN_PROGRESS", `${JSON.stringify(r.outcome)} ${types(r.sent)}`);
+
+  reset();
+  H = addTicket(8, "RESOLVED", "ระบบชดใช้เงินยืม - ย้อนสถานะไม่ได้");
+  r = await customer("แก้ได้เองแล้วค่ะ");
+  check("H11d slang on a delivered case offers the close question, not cancel", r.sent[0]?.notification_type === "close_confirmation_request" && H.status !== "CANCELLED", `${types(r.sent)} H=${H.status}`);
+
+  reset();
+  r = await customer("ไม่ต้องดูแล้วจ้า");
+  check("H11e slang with no open case goes to the AI, no 'no open case' reply", r.outcome.handled === false && r.sent.length === 0, `${JSON.stringify(r.outcome)} ${types(r.sent)}`);
+
+  reset();
+  H = addTicket(8, "IN_PROGRESS", "ระบบชดใช้เงินยืม - ย้อนสถานะไม่ได้");
+  r = await customer("ทำได้ละ แต่ยังช้าอยู่นิดนึง");
+  check("H11f a leftover clause ('แต่ยังช้า') is not a cancel", r.sent.every((n) => n.notification_type !== "cancel_confirmation_request") && H.status === "IN_PROGRESS", `${types(r.sent)} H=${H.status}`);
+
+  // -------------------------------------------------------------------------
   console.log("\nDetectors and Fast Ack");
   check("D1 scope pending: 'ใช้งานได้แล้วค่ะ' is NONE", detectReopenScope("ใช้งานได้แล้วค่ะ", true) === "NONE");
   check("D2 scope pending: 'ขอคุยกับเจ้าหน้าที่' is NONE", detectReopenScope("ขอคุยกับเจ้าหน้าที่", true) === "NONE");

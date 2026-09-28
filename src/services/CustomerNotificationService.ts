@@ -85,7 +85,13 @@ export type CustomerNotificationType =
   // A customer sent a LINE sticker (2026-09-24): a sticker back (sticker_reply),
   // or, while a question is pending, a nudge that re-attaches its chips.
   | "sticker_reply"
-  | "sticker_reminder";
+  | "sticker_reminder"
+  // LINE voice messages (2026-09-28): the clip could not be transcribed, was
+  // over VOICE_MAX_SECONDS, or tried to answer a pending question — voice
+  // never confirms a close / cancel / re-open; that stays a tap or typed reply.
+  | "voice_unclear"
+  | "voice_too_long"
+  | "voice_confirm_by_tap";
 
 /**
  * Facts the case card is built from. Loaded from `tickets` by ticket id when
@@ -838,6 +844,12 @@ export class CustomerNotificationService {
         return String(detail || "").trim();
       case "sticker_reminder":
         return "แตะปุ่มด้านล่างเพื่อตอบได้เลยนะคะ";
+      case "voice_unclear":
+        return "ขออภัยค่ะ แอดมินฟังข้อความเสียงไม่ชัด รบกวนพิมพ์มาอีกครั้งได้เลยนะคะ";
+      case "voice_too_long":
+        return `ข้อความเสียงยาวเกิน ${config.VOICE_MAX_SECONDS} วินาทีค่ะ รบกวนส่งเสียงสั้นลง หรือพิมพ์อธิบายมาได้เลยนะคะ`;
+      case "voice_confirm_by_tap":
+        return "ได้รับข้อความเสียงแล้วค่ะ เรื่องการยืนยัน รบกวนแตะปุ่มหรือพิมพ์ตอบแทนนะคะ";
     }
   }
 

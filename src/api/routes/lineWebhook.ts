@@ -33,6 +33,7 @@ import { LineTypingIndicatorService } from "../../services/LineTypingIndicatorSe
 import { lineCaseContextService, type CaseContextHint } from "../../services/LineCaseContextService";
 import type { PendingIntakeKind } from "../../domain/case/PendingIntake";
 import { lineImageAutoAttachService } from "../../services/LineImageAutoAttachService";
+import { voiceTranscriptionService } from "../../services/VoiceTranscriptionService";
 import { recordBackendActivity } from "./backendConsole";
 
 const logger = createLogger("line-webhook");
@@ -717,6 +718,47 @@ export function registerLineWebhookRoutes(
               continue;
             }
 
+            // Voice clips (2026-09-28): transcribed, then rewritten into a text
+            // event so everything below — persistence, the confirmation
+            // handler, case context, Fast Ack, batching, the AI flows — treats
+            // the transcript exactly like typed text. Only while the
+            // transcription flow is configured; otherwise the notice below.
+            let voiceTurn = false;
+            if (
+              event?.type === "message" &&
+              event?.message?.type === "audio" &&
+              event?.message?.id &&
+              decision.conversationId &&
+              webhookEventId &&
+              voiceTranscriptionService.isEnabled()
+            ) {
+              const voice = await voiceTranscriptionService.transcribeLineVoice({
+                conversationId: Number(decision.conversationId),
+                projectId: decision.projectId ?? null,
+                messageId: String(event.message.id),
+                durationMs: Number(event.message.duration) || null,
+                quoteToken: event.message.quoteToken ?? null,
+                correlationId: webhookEventId,
+              });
+              if (!voice.ok) {
+                void customerNotificationService
+                  .send({
+                    conversationId: Number(decision.conversationId),
+                    notificationType: voice.reason === "TOO_LONG" ? "voice_too_long" : "voice_unclear",
+                    idempotencyKey: webhookEventId,
+                    projectId: decision.projectId ?? null,
+                    correlationId: webhookEventId,
+                  })
+                  .catch((voiceErr: any) =>
+                    logger.error({ error: voiceErr.message, webhookEventId }, "Voice fallback notice failed")
+                  );
+                processed += 1;
+                continue;
+              }
+              event.message = { ...event.message, type: "text", text: voice.text };
+              voiceTurn = true;
+            }
+
             // Non-image media (a .webp sent as a FILE, videos, voice clips):
             // the pipeline cannot read these, and letting them through meant an
             // acknowledgement plus an empty AI turn (run 4vBCthf81M). Say what
@@ -776,6 +818,33 @@ export function registerLineWebhookRoutes(
                   { error: persistErr.message, webhookEventId, conversationId: decision.conversationId },
                   "Failed to persist inbound LINE text message"
                 );
+              }
+            }
+
+            // A voice clip never answers a pending question and never confirms
+            // a close / cancel / re-open: a mis-heard "ใช่" must not end a case.
+            // The customer gets the question's chips back to tap, or is asked
+            // to type (operator decision 2026-09-28).
+            if (voiceTurn && decision.conversationId && webhookEventId) {
+              const chips = await voiceTranscriptionService.typedAnswerRequired(
+                Number(decision.conversationId),
+                String(event.message.text || "")
+              );
+              if (chips) {
+                void customerNotificationService
+                  .send({
+                    conversationId: Number(decision.conversationId),
+                    notificationType: "voice_confirm_by_tap",
+                    idempotencyKey: webhookEventId,
+                    projectId: decision.projectId ?? null,
+                    correlationId: webhookEventId,
+                    quickReplies: chips,
+                  })
+                  .catch((voiceErr: any) =>
+                    logger.error({ error: voiceErr.message, webhookEventId }, "Voice confirm-by-tap notice failed")
+                  );
+                processed += 1;
+                continue;
               }
             }
 
@@ -1030,7 +1099,7 @@ export function registerLineWebhookRoutes(
                     identityId: created.context.identityId,
                     projectId: created.context.projectId,
                     orgId: created.context.orgId,
-                    detail: { messageType: event?.message?.type || event?.type },
+                    detail: { messageType: voiceTurn ? "audio" : event?.message?.type || event?.type },
                   });
                 }
               } catch (ctxErr: any) {

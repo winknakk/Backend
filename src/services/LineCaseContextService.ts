@@ -31,6 +31,9 @@ const NEW_CASE_WINDOW_IGNORED_TYPES = [
   "unsupported_file",
   "sticker_reply",
   "sticker_reminder",
+  "voice_unclear",
+  "voice_too_long",
+  "voice_confirm_by_tap",
 ];
 
 /**

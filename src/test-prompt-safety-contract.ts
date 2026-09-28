@@ -15,8 +15,9 @@
  * customer, from "your filed case was cancelled".
  *
  * NOTE ON DEPLOYMENT: per .ai/FLOWS.md (2026-09-03) the deployed flow set is
- * UNKNOWN. This asserts the tracked asset under เริ่มต้นใหม่อีกครั้ง/. Passing
- * here does NOT prove the deployed flow is safe.
+ * UNKNOWN. This asserts the tracked asset under "แล้วกู๊ดจะกลับมาใน AVENGERS DOOMSDAY/
+ * All Workflows (ใช้งานในปัจจุบัน)/". Passing here does NOT prove the deployed flow is
+ * safe — the PromptX copy must be re-imported and published from this file.
  */
 import fs from "fs";
 import path from "path";
@@ -39,12 +40,34 @@ function stepSettings(root: unknown, wanted: Set<string>): Record<string, any> {
   return out;
 }
 
-const raw = fs.readFileSync(FLOW, "utf8").replace(/^﻿/, "");
+const raw = fs.readFileSync(FLOW, "utf8").replace(/^\uFEFF/, "");
 const flow = JSON.parse(raw);
-const steps = stepSettings(flow, new Set(["step_1", "step_gate_agent"]));
+const steps = stepSettings(flow, new Set(["step_1", "step_gate_agent", "step_system_prompt"]));
+
+/**
+ * Since 2026-09-24 step_1's Roles only reference `{{step_system_prompt['systemPrompt']}}`;
+ * the prompt text lives in the CODE step's template literal. Run that code (it is a pure
+ * `return { systemPrompt }`, no I/O and no await) so escapes resolve exactly as PromptX
+ * sees them. It is made synchronous because this script is CommonJS (no top-level await).
+ */
+function systemPromptFromCodeStep(): string {
+  const code = String(steps.step_system_prompt?.sourceCode?.code ?? "");
+  if (!code) return "";
+  const syncCode = code.replace(/exports\.code\s*=\s*async\s*\(/, "exports.code = (");
+  if (syncCode === code || /\bawait\b/.test(syncCode)) {
+    console.log("ERR: step_system_prompt is no longer a plain `exports.code = async () => ({ systemPrompt })`");
+    process.exit(1);
+  }
+  const mod: { exports: any } = { exports: {} };
+  new Function("exports", "module", syncCode)(mod.exports, mod);
+  return String(mod.exports.code()?.systemPrompt ?? "");
+}
+const resolvedSystemPrompt = systemPromptFromCodeStep();
 
 const customerPrompt: string = (steps.step_1?.input?.roles ?? [])
-  .map((r: any) => String(r?.content ?? ""))
+  .map((r: any) =>
+    String(r?.content ?? "").replace(/\{\{\s*step_system_prompt\['systemPrompt'\]\s*\}\}/g, () => resolvedSystemPrompt)
+  )
   .join("\n\n");
 const gatePrompt: string = String(steps.step_gate_agent?.input?.message ?? "");
 

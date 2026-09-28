@@ -26,6 +26,12 @@ export const EnvSchema = z.object({
   ACTIVEPIECES_PROMOTE_TICKET_WEBHOOK_URL_V2: z.string().url().default("https://wf.promptxai.com/api/v1/webhooks/v2-promote-ticket"),
   PROMPTX_HUMAN_REPLY_WEBHOOK_URL: z.string().url().optional(),
   PROMPTX_PROMOTE_TICKET_WEBHOOK_URL: z.string().url().optional(),
+  // LINE voice messages (2026-09-28): the /sync URL of "Backend - Voice
+  // Transcription Flow" (OpenAI Transcribe Audio). Unset = voice clips keep
+  // getting the "unsupported file" notice, exactly as before.
+  PROMPTX_TRANSCRIBE_WEBHOOK_URL: z.string().url().optional(),
+  VOICE_MAX_SECONDS: z.coerce.number().int().min(1).max(300).default(60),
+  VOICE_TRANSCRIBE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
   PROMPTX_MCP_URL: z.string().url().default("https://wf.promptxai.com/api/v1/projects/5aWNXP52EIYc1X6COAJUN/mcp-server/http"),
   PROMPTX_MCP_TOKEN: z.string().min(1, "PROMPTX_MCP_TOKEN is required"),
   PROMPTX_FLOW_WEBHOOK_URL: z.string().url().default("https://wf.promptxai.com/api/v1/webhooks/xTSViJNFiBtB4y9RMBYfD"),

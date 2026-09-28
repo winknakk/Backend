@@ -98,7 +98,8 @@ export class LINEAdapter {
     };
   }
 
-  private async downloadLINEContent(messageId: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  /** Also used by VoiceTranscriptionService for voice clips. */
+  async downloadLINEContent(messageId: string): Promise<{ buffer: Buffer; mimeType: string }> {
     const token = this.lineChannelAccessToken || process.env.LINE_CHANNEL_ACCESS_TOKEN;
     if (!token) {
       throw new Error("LINE Channel Access Token is not configured");
