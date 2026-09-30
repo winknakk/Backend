@@ -155,9 +155,14 @@ function flowQuestion(content: string): { kind: PendingKind; ticketNumber: strin
   return null;
 }
 
-/** The bare confirm step of the close question ("ยืนยันปิดเคส TCK-…", "ใช่ค่ะ") — carries no words of the customer's own. */
+/**
+ * Button taps and bare yeses on the way to a close ("ยืนยันปิดเคส TCK-…",
+ * "ใช่ค่ะ", the delivery chip "ใช้งานได้แล้ว TCK-…") — none carries words of
+ * the customer's own. The delivery chip only counts with its number: typed
+ * "ใช้งานได้แล้วค่ะ" is the customer speaking.
+ */
 const CLOSE_CONFIRM_TAP =
-  /^\s*(?:ยืนยัน\s*(?:ปิดเคส)?|ใช่(?:เลย)?|ตกลง|โอเค|ok|okay|ปิดเลย|ปิดได้เลย|ปิดเคสได้เลย)\s*(?:เคส\s*)?(?:TCK-\d{4}-\d{4,6})?\s*(?:ค่ะ|คะ|ครับ|คับ|จ้า|นะ|นะคะ|นะครับ)*\s*$/i;
+  /^\s*(?:(?:ยืนยัน\s*(?:ปิดเคส)?|ใช่(?:เลย)?|ตกลง|โอเค|ok|okay|ปิดเลย|ปิดได้เลย|ปิดเคสได้เลย)\s*(?:เคส\s*)?(?:TCK-\d{4}-\d{4,6})?|ใช้งานได้แล้ว\s*TCK-\d{4}-\d{4,6})\s*(?:ค่ะ|คะ|ครับ|คับ|จ้า|นะ|นะคะ|นะครับ)*\s*$/i;
 
 /**
  * What the customer last said in their own words before the close (newest

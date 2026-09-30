@@ -406,7 +406,11 @@ async function main() {
     pickCustomerCloseWords(["ยืนยันปิดเคส TCK-2026-10001", "ลองเข้าดูแล้ว ใช้งานได้ปกติแล้วค่ะ ขอบคุณมากนะคะ", "ระบบชดใช้เงินยืมย้อนสถานะไม่ได้"]) ===
       "ลองเข้าดูแล้ว ใช้งานได้ปกติแล้วค่ะ ขอบคุณมากนะคะ"
   );
-  check("H12b a bare 'ใช่ค่ะ' / sticker is skipped too", pickCustomerCloseWords(["ใช่ค่ะ", "[sticker]", "ใช้งานได้แล้ว TCK-2026-10001"]) === "ใช้งานได้แล้ว TCK-2026-10001");
+  check("H12b a bare 'ใช่ค่ะ' / sticker is skipped too", pickCustomerCloseWords(["ใช่ค่ะ", "[sticker]", "ใช้ได้แล้วครับ ขอบคุณ"]) === "ใช้ได้แล้วครับ ขอบคุณ");
+  check(
+    "H12e buttons only (delivery chip + confirm chip) → no quote; typed 'ใช้งานได้แล้วค่ะ' is quoted",
+    pickCustomerCloseWords(["ยืนยันปิดเคส TCK-2026-10001", "ใช้งานได้แล้ว TCK-2026-10001"]) === null && pickCustomerCloseWords(["ยืนยันปิดเคส", "ใช้งานได้แล้วค่ะ"]) === "ใช้งานได้แล้วค่ะ"
+  );
   check("H12c only taps → no quote, generic body", pickCustomerCloseWords(["ยืนยันปิดเคส", "ok"]) === null && closeCommentBody(null, "closed") === "ลูกค้ากดยืนยันปิดเคสผ่าน LINE");
   check("H12d header names the case", closeCommentHeader("TCK-2026-10001", "closed") === "✅ ลูกค้ายืนยันปิดเคส · TCK-2026-10001");
 
