@@ -13,6 +13,7 @@ import { traceRecorder } from "../../observability/TraceRecorder";
 import {
   LineOnboardingDecision,
   LineProjectOnboardingService,
+  PROJECT_RELINK_COMMAND_TEXTS,
 } from "../../services/LineProjectOnboardingService";
 import { createLogger } from "../../observability/logger";
 import { pool } from "../../adapters/postgres/PostgresAdapter";
@@ -33,7 +34,7 @@ import { LineTypingIndicatorService } from "../../services/LineTypingIndicatorSe
 import { lineCaseContextService, type CaseContextHint } from "../../services/LineCaseContextService";
 import type { PendingIntakeKind } from "../../domain/case/PendingIntake";
 import { lineImageAutoAttachService } from "../../services/LineImageAutoAttachService";
-import { voiceTranscriptionService } from "../../services/VoiceTranscriptionService";
+import { voiceCommandText, voiceTranscriptionService, type VoiceTranscriptionOutcome } from "../../services/VoiceTranscriptionService";
 import { recordBackendActivity } from "./backendConsole";
 
 const logger = createLogger("line-webhook");
@@ -401,14 +402,42 @@ export function registerLineWebhookRoutes(
         // remote database and the LINE API.
         const eventStartedAt = process.hrtime.bigint();
         if (event?.source?.userId) {
-          showLineLoadingAnimation(String(event.source.userId)).catch(() => {});
+          // A voice clip waits ~20 s for transcription before anything is
+          // sent; 5 s of dots left the chat looking dead for the rest. The
+          // first bot message dismisses the indicator either way.
+          const loadingSeconds = event?.message?.type === "audio" ? 30 : 5;
+          showLineLoadingAnimation(String(event.source.userId), loadingSeconds).catch(() => {});
         }
+        // Voice clips are transcribed BEFORE the onboarding decision, so a
+        // spoken "เมนู" / "เปลี่ยนโปรเจกต์" / project code meets the same
+        // command matching as typed text (operator 2026-09-30).
+        let voice: VoiceTranscriptionOutcome | null = null;
+        if (
+          event?.type === "message" &&
+          event?.message?.type === "audio" &&
+          event?.message?.id &&
+          event?.source?.userId &&
+          webhookEventId &&
+          voiceTranscriptionService.isEnabled()
+        ) {
+          voice = await voiceTranscriptionService.transcribeLineVoice({
+            messageId: String(event.message.id),
+            durationMs: Number(event.message.duration) || null,
+            correlationId: webhookEventId,
+          });
+        }
+        const voiceText = voice?.ok ? voice.text : undefined;
         const decision = await onboardingService.processEvent({
           type: String(event?.type || "unknown"),
           webhookEventId,
           destination,
           userId: event?.source?.userId ? String(event.source.userId) : undefined,
-          messageText: event?.message?.type === "text" ? String(event.message.text || "") : undefined,
+          messageText:
+            event?.message?.type === "text"
+              ? String(event.message.text || "")
+              : voiceText
+                ? voiceCommandText(voiceText, PROJECT_RELINK_COMMAND_TEXTS) ?? voiceText
+                : undefined,
           postbackData: event?.postback?.data ? String(event.postback.data) : undefined,
           isUnblocked: event?.follow?.isUnblocked === true,
         });
@@ -417,6 +446,20 @@ export function registerLineWebhookRoutes(
         if (decision.duplicate || decision.action === "IGNORE") {
           processed += 1;
           continue;
+        }
+        // Every transcribed clip is kept for the admin view, whatever the
+        // decision (a spoken "เมนู" ends in the REPLY branch below).
+        if (voice && decision.conversationId) {
+          await voiceTranscriptionService.recordLineVoice(
+            {
+              conversationId: Number(decision.conversationId),
+              messageId: String(event.message.id),
+              durationMs: Number(event.message.duration) || null,
+              quoteToken: event.message.quoteToken ?? null,
+              correlationId: webhookEventId,
+            },
+            voice
+          );
         }
         try {
           if (decision.action === "REPLY") {
@@ -718,28 +761,13 @@ export function registerLineWebhookRoutes(
               continue;
             }
 
-            // Voice clips (2026-09-28): transcribed, then rewritten into a text
-            // event so everything below — persistence, the confirmation
+            // Voice clips (2026-09-28): transcribed above, then rewritten into
+            // a text event so everything below — persistence, the confirmation
             // handler, case context, Fast Ack, batching, the AI flows — treats
             // the transcript exactly like typed text. Only while the
             // transcription flow is configured; otherwise the notice below.
             let voiceTurn = false;
-            if (
-              event?.type === "message" &&
-              event?.message?.type === "audio" &&
-              event?.message?.id &&
-              decision.conversationId &&
-              webhookEventId &&
-              voiceTranscriptionService.isEnabled()
-            ) {
-              const voice = await voiceTranscriptionService.transcribeLineVoice({
-                conversationId: Number(decision.conversationId),
-                projectId: decision.projectId ?? null,
-                messageId: String(event.message.id),
-                durationMs: Number(event.message.duration) || null,
-                quoteToken: event.message.quoteToken ?? null,
-                correlationId: webhookEventId,
-              });
+            if (voice && event?.message?.type === "audio" && decision.conversationId && webhookEventId) {
               if (!voice.ok) {
                 void customerNotificationService
                   .send({

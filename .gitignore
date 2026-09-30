@@ -3,3 +3,7 @@ assets/backend-console/
 node_modules/
 dist/
 .env
+
+# Customer media stored by the local storage fallback (LINE / WebChat / admin uploads).
+# Never commit customer files. Files committed before 2026-09-30 are still tracked.
+uploads/

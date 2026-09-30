@@ -24,19 +24,48 @@ import type { NotificationQuickReply } from "./CustomerNotificationService";
 
 const logger = createLogger("voice-transcription");
 
-export type VoiceTranscriptionOutcome =
-  | { ok: true; text: string }
-  | { ok: false; reason: "TOO_LONG" | "EMPTY" | "FAILED" };
+type StoredClip = { fileUrl: string; fileName: string; fileType: string; fileSize: number; storageKey: string };
 
-export interface LineVoiceInput {
-  conversationId: number;
-  projectId?: number | null;
+export type VoiceTranscriptionOutcome =
+  | { ok: true; text: string; stored: StoredClip | null }
+  | { ok: false; reason: "TOO_LONG" | "EMPTY" | "FAILED"; stored: StoredClip | null };
+
+export interface LineVoiceClip {
   /** LINE message id: the content id and the messages.external_id. */
   messageId: string;
   /** LINE `message.duration`, milliseconds. */
   durationMs?: number | null;
-  quoteToken?: string | null;
   correlationId?: string;
+}
+
+export interface LineVoiceRecord extends LineVoiceClip {
+  conversationId: number;
+  quoteToken?: string | null;
+}
+
+/** Whisper's spellings of "โปรเจกต์" (โปรเจค, โปรเจ็กต์, โปรเจ็ค …). */
+const PROJECT_SPELLINGS = /โปรเจ็?(?:กต์|คต์|ค|ก)/g;
+/** Particles and filler a spoken command carries: "เมนูค่ะ", "เปลี่ยนโปรเจกต์หน่อยครับ". */
+const SPOKEN_TAIL = /(?:\s*(?:ค่ะ|คะ|ค่า|ครับ|คับ|ค้าบ|นะ|จ้า|จ้ะ|หน่อย|ด้วย|เลย|please))+$/;
+const SPOKEN_ALIASES: Record<string, string> = { menu: "เมนู" };
+
+/**
+ * The typed command a transcript stands for, or null. Typed commands must be
+ * exact (LineProjectOnboardingService matches the whole message); speech
+ * arrives with particles, punctuation and variant spellings, so those are
+ * stripped here before the same exact match.
+ */
+export function voiceCommandText(transcript: string, commands: readonly string[]): string | null {
+  const t = String(transcript || "")
+    .toLowerCase()
+    .replace(/[.,!?。…"'“”]/g, " ")
+    .replace(PROJECT_SPELLINGS, "โปรเจกต์")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(SPOKEN_TAIL, "")
+    .trim();
+  const command = SPOKEN_ALIASES[t] ?? t;
+  return commands.includes(command) ? command : null;
 }
 
 /**
@@ -101,13 +130,18 @@ export class VoiceTranscriptionService {
     return typedAnswerDecision(transcript, chips);
   }
 
-  async transcribeLineVoice(input: LineVoiceInput): Promise<VoiceTranscriptionOutcome> {
+  /**
+   * Download, keep the clip, transcribe — no database writes. Runs before the
+   * onboarding decision (which needs the text to see a spoken "เมนู"), so the
+   * conversation may not be known yet; `recordLineVoice` persists afterwards.
+   */
+  async transcribeLineVoice(input: LineVoiceClip): Promise<VoiceTranscriptionOutcome> {
     if (input.durationMs && input.durationMs > config.VOICE_MAX_SECONDS * 1000) {
-      await this.persist(input, "", null);
-      return { ok: false, reason: "TOO_LONG" };
+      return { ok: false, reason: "TOO_LONG", stored: null };
     }
 
     let audio: { buffer: Buffer; mimeType: string };
+    let stored: StoredClip | null = null;
     try {
       const { LINEAdapter } = await import("../presentation/http/adapters/LINEAdapter");
       const { S3MediaStorageService } = await import("../media/services/S3MediaStorageService");
@@ -117,7 +151,6 @@ export class VoiceTranscriptionService {
 
       // The original clip is for the admin view only; failing to store it
       // must not cost the customer their message.
-      let stored = null;
       try {
         stored = await storage.upload({
           buffer: audio.buffer,
@@ -128,10 +161,9 @@ export class VoiceTranscriptionService {
       } catch (storeErr: any) {
         logger.warn({ messageId: input.messageId, error: storeErr.message }, "Could not store the voice clip; transcribing anyway");
       }
-      await this.persist(input, "", stored);
     } catch (dlErr: any) {
       logger.error({ messageId: input.messageId, error: dlErr.message }, "Could not download the LINE voice clip");
-      return { ok: false, reason: "FAILED" };
+      return { ok: false, reason: "FAILED", stored: null };
     }
 
     let text = "";
@@ -142,8 +174,6 @@ export class VoiceTranscriptionService {
           audio_file: `data:${DATA_URI_MIME};base64,${audio.buffer.toString("base64")}`,
           source_mime_type: audio.mimeType,
           duration_ms: input.durationMs ?? null,
-          conversation_id: input.conversationId,
-          project_id: input.projectId ?? null,
           correlation_id: input.correlationId ?? null,
         },
         { headers: { "Content-Type": "application/json" }, timeout: config.VOICE_TRANSCRIBE_TIMEOUT_MS, maxBodyLength: Infinity }
@@ -154,16 +184,20 @@ export class VoiceTranscriptionService {
         { messageId: input.messageId, status: err.response?.status, error: err.message },
         "Voice transcription flow failed"
       );
-      return { ok: false, reason: "FAILED" };
+      return { ok: false, reason: "FAILED", stored };
     }
 
     if (isSilenceTranscript(text)) {
       logger.info({ messageId: input.messageId, text }, "Voice clip transcribed to nothing usable");
-      return { ok: false, reason: "EMPTY" };
+      return { ok: false, reason: "EMPTY", stored };
     }
-    await this.persist(input, text, null);
-    logger.info({ messageId: input.messageId, conversationId: input.conversationId, chars: text.length }, "Voice clip transcribed");
-    return { ok: true, text };
+    logger.info({ messageId: input.messageId, chars: text.length }, "Voice clip transcribed");
+    return { ok: true, text, stored };
+  }
+
+  /** Writes the clip's `messages` row (transcript or empty) and its attachment. */
+  async recordLineVoice(record: LineVoiceRecord, outcome: VoiceTranscriptionOutcome): Promise<void> {
+    await this.persist(record, outcome.ok ? outcome.text : "", outcome.stored);
   }
 
   /**
@@ -172,11 +206,7 @@ export class VoiceTranscriptionService {
    * stored clip as its attachment. The text path's own insert later hits the
    * same (conversation_id, external_id) and only rewrites the content.
    */
-  private async persist(
-    input: LineVoiceInput,
-    content: string,
-    stored: { fileUrl: string; fileName: string; fileType: string; fileSize: number; storageKey: string } | null
-  ): Promise<void> {
+  private async persist(input: LineVoiceRecord, content: string, stored: StoredClip | null): Promise<void> {
     try {
       const saved = await pool.query<{ id: number }>(
         `INSERT INTO messages (conversation_id, role, content, message_type, external_id, quote_token, created_at)

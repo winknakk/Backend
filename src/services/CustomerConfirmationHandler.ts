@@ -119,6 +119,7 @@ const PASSIVE_NOTIFICATION_TYPES: string[] = [
   "voice_unclear",
   "voice_too_long",
   "voice_confirm_by_tap",
+  "team_comment",
 ];
 
 /** Pending questions whose chips a sticker reminder can rebuild (2026-09-24). */
@@ -152,6 +153,36 @@ function flowQuestion(content: string): { kind: PendingKind; ticketNumber: strin
   // "ยกเลิกเคส" without a number means the draft, which the gate's CANCEL_RESET owns.
   if (isPendingCreatePrompt(content)) return { kind: "create", ticketNumber: num };
   return null;
+}
+
+/** The bare confirm step of the close question ("ยืนยันปิดเคส TCK-…", "ใช่ค่ะ") — carries no words of the customer's own. */
+const CLOSE_CONFIRM_TAP =
+  /^\s*(?:ยืนยัน\s*(?:ปิดเคส)?|ใช่(?:เลย)?|ตกลง|โอเค|ok|okay|ปิดเลย|ปิดได้เลย|ปิดเคสได้เลย)\s*(?:เคส\s*)?(?:TCK-\d{4}-\d{4,6})?\s*(?:ค่ะ|คะ|ครับ|คับ|จ้า|นะ|นะคะ|นะครับ)*\s*$/i;
+
+/**
+ * What the customer last said in their own words before the close (newest
+ * first in `recent`): the newest message that is not the bare confirm tap,
+ * a sticker/placeholder or empty. Never searches further back than that, so
+ * an old problem report is never quoted as the reason for closing.
+ */
+export function pickCustomerCloseWords(recent: Array<string | null | undefined>): string | null {
+  for (const raw of recent) {
+    const text = String(raw || "").replace(/\s+/g, " ").trim();
+    if (!text || /^\[[^\]]*\]$/.test(text)) continue;
+    if (CLOSE_CONFIRM_TAP.test(text)) continue;
+    return text.slice(0, 1000);
+  }
+  return null;
+}
+
+export function closeCommentHeader(ticketNumber: string | null | undefined, kind: "closed" | "reopen_new_issue_prompt"): string {
+  const n = ticketNumber ? ` · ${ticketNumber}` : "";
+  return kind === "closed" ? `✅ ลูกค้ายืนยันปิดเคส${n}` : `✅ ปิดเคส: ลูกค้าแจ้งว่าเป็นปัญหาใหม่ (จะเปิดเคสใหม่แยก)${n}`;
+}
+
+export function closeCommentBody(words: string | null, kind: "closed" | "reopen_new_issue_prompt"): string {
+  if (words) return `ข้อความลูกค้า: "${words}"`;
+  return kind === "closed" ? "ลูกค้ากดยืนยันปิดเคสผ่าน LINE" : "ลูกค้าเลือก 'ปัญหาใหม่' ผ่าน LINE";
 }
 
 /**
@@ -599,6 +630,10 @@ export class CustomerConfirmationHandler {
     }
 
     await this.notify(input, ticket, notifyAs, closedEventId ? `ticket_event:${closedEventId}` : `ticket:${ticket.id}:closed`, { quickReplies: [] });
+    // Demo 3.2: the engineer sees in Plane why the case closed, in the
+    // customer's own words ("ลองเข้าดูแล้ว ใช้งานได้ปกติแล้วค่ะ"), not only a
+    // state change. Fire-and-forget: Plane never blocks the customer reply.
+    void this.mirrorCloseToPlane(input, ticket, notifyAs);
     // A closed case must not stay the conversation's focus (spec v2 Flow 3 step 7).
     void conversationFocusService.releaseTerminalTicket(ticket.id).catch(() => {});
     // Customer "Done" email (Gmail via the notification flow), originated here
@@ -606,6 +641,32 @@ export class CustomerConfirmationHandler {
     void doneEmailService.notifyClosed({ ticketId: ticket.id, closeEventId: closedEventId, correlationId: input.correlationId }).catch(() => {});
     logger.info({ ticketId: ticket.id, conversationId: input.conversationId, correlationId: input.correlationId, from: ticket.status }, "Ticket closed by customer confirmation");
     return { handled: true, ticketId: ticket.id, from: ticket.status, to: "CLOSED" };
+  }
+
+  private async mirrorCloseToPlane(
+    input: { conversationId: number },
+    ticket: OpenTicket,
+    notifyAs: "closed" | "reopen_new_issue_prompt"
+  ): Promise<void> {
+    try {
+      const { rows } = await pool.query<{ content: string }>(
+        `SELECT content FROM messages
+          WHERE conversation_id = $1 AND role = 'customer'
+            AND created_at >= NOW() - INTERVAL '2 hours'
+          ORDER BY id DESC LIMIT 8`,
+        [input.conversationId]
+      );
+      const words = pickCustomerCloseWords(rows.map((r) => r.content));
+      const { PlaneService } = await import("./planeService");
+      const { AdapterFactory } = await import("../adapters/AdapterFactory");
+      const planeService = new PlaneService(AdapterFactory.getAdapter());
+      await planeService.addCustomerFeedbackComment(ticket.id, closeCommentBody(words, notifyAs), {
+        ticketNumber: ticket.ticket_number,
+        header: closeCommentHeader(ticket.ticket_number, notifyAs),
+      });
+    } catch (err: any) {
+      logger.warn({ ticketId: ticket.id, error: err?.message }, "Plane close comment failed");
+    }
   }
 
   // ---------------------------------------------------------------------------

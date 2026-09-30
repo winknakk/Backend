@@ -34,6 +34,7 @@ const NEW_CASE_WINDOW_IGNORED_TYPES = [
   "voice_unclear",
   "voice_too_long",
   "voice_confirm_by_tap",
+  "team_comment",
 ];
 
 /**

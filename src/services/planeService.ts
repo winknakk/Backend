@@ -1463,7 +1463,11 @@ export class PlaneService {
    * work item. Returns false (never throws) when the ticket is not linked or
    * Plane refuses — feedback is already persisted on the ticket by then.
    */
-  async addCustomerFeedbackComment(ticketId: string | number, text: string, meta: { ticketNumber?: string | null; reopenedCount?: number | null } = {}): Promise<boolean> {
+  async addCustomerFeedbackComment(
+    ticketId: string | number,
+    text: string,
+    meta: { ticketNumber?: string | null; reopenedCount?: number | null; header?: string } = {}
+  ): Promise<boolean> {
     try {
       const { ticket } = await this.dbAdapter.getTicketCompanyContext(String(ticketId));
       if (!ticket) return false;
@@ -1472,7 +1476,8 @@ export class PlaneService {
       const projectConfig = await this.getProjectConfigForTicket(ticket);
       const resolvedId = await this.resolvePlaneWorkItemId(String(ticketId), String(planeIssueId));
       const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
-      const header = `👤 Customer feedback (Re-Open${meta.reopenedCount ? ` #${meta.reopenedCount}` : ""}${meta.ticketNumber ? ` · ${meta.ticketNumber}` : ""})`;
+      const header =
+        meta.header || `👤 Customer feedback (Re-Open${meta.reopenedCount ? ` #${meta.reopenedCount}` : ""}${meta.ticketNumber ? ` · ${meta.ticketNumber}` : ""})`;
       await this.apiClient.addWorkItemComment(projectConfig, resolvedId, `<p><strong>${esc(header)}</strong></p><p>${esc(text)}</p>`);
       return true;
     } catch (err: any) {

@@ -16,7 +16,7 @@ import { ticketStateMachine } from "./domain/ticket/TicketStateMachine";
 import { conversationFocusService } from "./services/ConversationFocusService";
 import { customerNotificationService, CustomerNotificationService } from "./services/CustomerNotificationService";
 import { cancelAlertService, doneEmailService, reopenAlertService } from "./services/UrgentAlertService";
-import { customerConfirmationHandler } from "./services/CustomerConfirmationHandler";
+import { closeCommentBody, closeCommentHeader, customerConfirmationHandler, pickCustomerCloseWords } from "./services/CustomerConfirmationHandler";
 import { detectReopenScope, isBareShortAnswer, isDeclineReopen, isExplicitDeclineCancel, isExplicitDeclineClose } from "./domain/ticket/CustomerConfirmation";
 
 // ---------------------------------------------------------------------------
@@ -398,6 +398,17 @@ async function main() {
   H = addTicket(8, "IN_PROGRESS", "ระบบชดใช้เงินยืม - ย้อนสถานะไม่ได้");
   r = await customer("ทำได้ละ แต่ยังช้าอยู่นิดนึง");
   check("H11f a leftover clause ('แต่ยังช้า') is not a cancel", r.sent.every((n) => n.notification_type !== "cancel_confirmation_request") && H.status === "IN_PROGRESS", `${types(r.sent)} H=${H.status}`);
+
+  // -------------------------------------------------------------------------
+  console.log("\nH12 — the close is mirrored to Plane in the customer's own words (demo 3.2)");
+  check(
+    "H12a the natural sentence is quoted, the confirm tap skipped",
+    pickCustomerCloseWords(["ยืนยันปิดเคส TCK-2026-10001", "ลองเข้าดูแล้ว ใช้งานได้ปกติแล้วค่ะ ขอบคุณมากนะคะ", "ระบบชดใช้เงินยืมย้อนสถานะไม่ได้"]) ===
+      "ลองเข้าดูแล้ว ใช้งานได้ปกติแล้วค่ะ ขอบคุณมากนะคะ"
+  );
+  check("H12b a bare 'ใช่ค่ะ' / sticker is skipped too", pickCustomerCloseWords(["ใช่ค่ะ", "[sticker]", "ใช้งานได้แล้ว TCK-2026-10001"]) === "ใช้งานได้แล้ว TCK-2026-10001");
+  check("H12c only taps → no quote, generic body", pickCustomerCloseWords(["ยืนยันปิดเคส", "ok"]) === null && closeCommentBody(null, "closed") === "ลูกค้ากดยืนยันปิดเคสผ่าน LINE");
+  check("H12d header names the case", closeCommentHeader("TCK-2026-10001", "closed") === "✅ ลูกค้ายืนยันปิดเคส · TCK-2026-10001");
 
   // -------------------------------------------------------------------------
   console.log("\nDetectors and Fast Ack");

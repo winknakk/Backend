@@ -91,7 +91,10 @@ export type CustomerNotificationType =
   // never confirms a close / cancel / re-open; that stays a tap or typed reply.
   | "voice_unclear"
   | "voice_too_long"
-  | "voice_confirm_by_tap";
+  | "voice_confirm_by_tap"
+  // An engineer's Plane comment that starts with "@ลูกค้า" (demo 2.5,
+  // 2026-09-30); `detail` is the comment text without the marker.
+  | "team_comment";
 
 /**
  * Facts the case card is built from. Loaded from `tickets` by ticket id when
@@ -850,6 +853,11 @@ export class CustomerNotificationService {
         return `ข้อความเสียงยาวเกิน ${config.VOICE_MAX_SECONDS} วินาทีค่ะ รบกวนส่งเสียงสั้นลง หรือพิมพ์อธิบายมาได้เลยนะคะ`;
       case "voice_confirm_by_tap":
         return "ได้รับข้อความเสียงแล้วค่ะ เรื่องการยืนยัน รบกวนแตะปุ่มหรือพิมพ์ตอบแทนนะคะ";
+      case "team_comment": {
+        const message = String(detail || "").trim();
+        if (!message) return "";
+        return `💬 ข้อความจากทีมงาน${ticketNumber ? ` (${ticketNumber})` : ""}\n${message}`;
+      }
     }
   }
 
@@ -1305,7 +1313,7 @@ export class CustomerNotificationService {
     if (
       quickReplies.length === 0 &&
       (req.quickReplies === undefined || req.quickReplies === null) &&
-      (req.notificationType === "progress_update" || req.notificationType === "resolution_nudge") &&
+      (req.notificationType === "progress_update" || req.notificationType === "resolution_nudge" || req.notificationType === "team_comment") &&
       req.ticketId
     ) {
       quickReplies = await this.pendingQuestionChips(req.conversationId, Number(req.ticketId));

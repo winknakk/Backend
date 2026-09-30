@@ -5,6 +5,7 @@ import { pool } from "../adapters/postgres/PostgresAdapter";
 import { config } from "../config/env";
 import { ticketStateMachine } from "../domain/ticket/TicketStateMachine";
 import { customerNotificationService } from "./CustomerNotificationService";
+import { PlaneCommentRelay, planeCommentRelay } from "./PlaneCommentRelay";
 import { createLogger } from "../observability/logger";
 import { traceRecorder } from "../observability/TraceRecorder";
 
@@ -55,6 +56,8 @@ export interface PlaneReverseSyncSummary {
   deleted: number;
   unlinked: number;
   failed: number;
+  /** "@ลูกค้า" Plane comments pushed to the customer this cycle (demo 2.5). */
+  commentsRelayed?: number;
 }
 
 /**
@@ -171,6 +174,7 @@ export function verifyPlaneWebhookSignature(
 
 export class PlaneWebhookService {
   private readonly doneNotificationDispatcher: (planeIssueId: string) => Promise<void>;
+  private readonly commentRelay: Pick<PlaneCommentRelay, "relay">;
 
   /**
    * Per-project state list, so the poller resolves a work item's state id
@@ -185,8 +189,11 @@ export class PlaneWebhookService {
   constructor(
     private readonly dbAdapter: DatabaseAdapter,
     private readonly httpClient: Pick<typeof axios, "get"> = axios,
-    doneNotificationDispatcher?: (planeIssueId: string) => Promise<void>
+    doneNotificationDispatcher?: (planeIssueId: string) => Promise<void>,
+    commentRelay?: Pick<PlaneCommentRelay, "relay">
   ) {
+    // Same HTTP client as the issue GETs, so an injected fake covers both.
+    this.commentRelay = commentRelay || (httpClient === axios ? planeCommentRelay : new PlaneCommentRelay(httpClient));
     this.doneNotificationDispatcher =
       doneNotificationDispatcher || ((planeIssueId) => this.dispatchCustomerDoneNotification(planeIssueId));
   }
@@ -547,7 +554,7 @@ export class PlaneWebhookService {
         // observed failure count.
         const ticketsRes = await pool.query(
           `SELECT id, plane_issue_id, plane_workspace_slug, plane_project_id, project_id, org_id,
-                  ticket_number, plane_last_seen_updated_at
+                  ticket_number, plane_last_seen_updated_at, conversation_id
            FROM tickets
            WHERE (
                    (plane_workspace_slug = $1 AND plane_project_id = $2)
@@ -583,6 +590,24 @@ export class PlaneWebhookService {
               headers: { "X-API-Key": apiKey },
               timeout: 5000,
             });
+
+            // "@ลูกค้า …" comments → the customer's LINE (demo 2.5). Checked
+            // before the updated_at skip: a new comment need not bump the
+            // work item's updated_at.
+            const relayed = await this.commentRelay.relay(ticket, {
+              apiBase,
+              workspaceSlug: workspace_slug,
+              planeProjectId: plane_project_id,
+              issueId,
+              apiKey,
+            });
+            summary.commentsRelayed = (summary.commentsRelayed || 0) + relayed.sent;
+            if (relayed.rateLimited) {
+              summary.rateLimited = true;
+              summary.retryAfterMs = relayed.retryAfterMs;
+              logger.warn({ issueId, retryAfterMs: summary.retryAfterMs }, "Plane rate-limited the comment relay; stopping this cycle early");
+              return summary;
+            }
 
             // Skip work items Plane has not touched since we last applied
             // them. Without this the poller rewrote every linked ticket on

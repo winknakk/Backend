@@ -3,7 +3,8 @@
  * No database, no network. Run: npx tsx src/test-voice-transcription.ts
  */
 import assert from "node:assert/strict";
-import { isSilenceTranscript, parseTranscriptResponse, typedAnswerDecision } from "./services/VoiceTranscriptionService";
+import { isSilenceTranscript, parseTranscriptResponse, typedAnswerDecision, voiceCommandText } from "./services/VoiceTranscriptionService";
+import { PROJECT_RELINK_COMMAND_TEXTS } from "./services/LineProjectOnboardingService";
 
 let failures = 0;
 function check(name: string, fn: () => void) {
@@ -56,6 +57,18 @@ check("ordinary report passes", () =>
   assert.equal(typedAnswerDecision("พิมพ์ใบเสร็จไม่ออกค่ะ", null), null));
 check("bare ใช่ with nothing pending passes (handler ignores it)", () =>
   assert.equal(typedAnswerDecision("ใช่ค่ะ", null), null));
+
+console.log("spoken menu commands");
+const COMMANDS = PROJECT_RELINK_COMMAND_TEXTS;
+check("เมนู", () => assert.equal(voiceCommandText("เมนู", COMMANDS), "เมนู"));
+check("เมนูค่ะ.", () => assert.equal(voiceCommandText("เมนูค่ะ.", COMMANDS), "เมนู"));
+check("Menu", () => assert.equal(voiceCommandText("Menu.", COMMANDS), "เมนู"));
+check("เปลี่ยนโปรเจ็คหน่อยครับ", () => assert.equal(voiceCommandText("เปลี่ยนโปรเจ็คหน่อยครับ", COMMANDS), "เปลี่ยนโปรเจกต์"));
+check("เชื่อมโปรเจคใหม่นะคะ", () => assert.equal(voiceCommandText("เชื่อมโปรเจคใหม่นะคะ", COMMANDS), "เชื่อมโปรเจกต์ใหม่"));
+check("เริ่มใช้งานค่ะ", () => assert.equal(voiceCommandText("เริ่มใช้งานค่ะ", COMMANDS), "เริ่มใช้งาน"));
+check("a report mentioning the menu is not a command", () =>
+  assert.equal(voiceCommandText("กดเมนูแล้วไม่ขึ้นอะไรเลยค่ะ", COMMANDS), null));
+check("ordinary report is not a command", () => assert.equal(voiceCommandText("เข้าระบบไม่ได้ค่ะ", COMMANDS), null));
 
 if (failures > 0) {
   console.error(`\n${failures} voice-transcription check(s) failed`);
