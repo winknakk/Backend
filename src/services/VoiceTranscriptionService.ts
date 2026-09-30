@@ -4,8 +4,8 @@
  *
  *   LINE audio event → download (api-data.line.me, the clip expires quickly)
  *     → original kept in media storage for the admin view
- *     → "Backend - Voice Transcription Flow" (/sync webhook → OpenAI
- *       Transcribe Audio, Thai) → { text }
+ *     → "Backend - Voice Transcription Flow" (/sync webhook → Groq
+ *       Transcribe Audio, whisper-large-v3, Thai) → { text }
  *     → messages row, message_type 'audio', content = transcript
  *
  * Off until PROMPTX_TRANSCRIBE_WEBHOOK_URL is set; lineWebhook then keeps
@@ -42,8 +42,9 @@ export interface LineVoiceInput {
 /**
  * The engine's data-URI parser only accepts a mime of letters, "-", "+" and
  * "/" (activepieces engine `processors/file.ts`), so LINE's `audio/x-m4a`
- * would be dropped. `audio/mpeg` passes and names the file `.mpga`, a format
- * OpenAI accepts; the service reads the container itself.
+ * would be dropped. `audio/mpeg` passes and names the file `.mpga`; Groq
+ * probes the real container (verified 2026-09-30: WAV bytes sent as
+ * `unknown.mpga` transcribed correctly).
  */
 const DATA_URI_MIME = "audio/mpeg";
 
@@ -59,7 +60,7 @@ export function isSilenceTranscript(text: string): boolean {
   return t === "" || SILENCE_HALLUCINATIONS.test(t);
 }
 
-/** The flow returns `{ text }`; tolerate the OpenAI body passed through whole or nested. */
+/** The flow returns `{ text }`; tolerate the Whisper API body passed through whole or nested. */
 export function parseTranscriptResponse(data: unknown): string {
   if (typeof data === "string") return data.trim();
   const d = (data ?? {}) as Record<string, any>;

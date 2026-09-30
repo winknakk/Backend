@@ -27,7 +27,7 @@ export const EnvSchema = z.object({
   PROMPTX_HUMAN_REPLY_WEBHOOK_URL: z.string().url().optional(),
   PROMPTX_PROMOTE_TICKET_WEBHOOK_URL: z.string().url().optional(),
   // LINE voice messages (2026-09-28): the /sync URL of "Backend - Voice
-  // Transcription Flow" (OpenAI Transcribe Audio). Unset = voice clips keep
+  // Transcription Flow" (Groq Transcribe Audio). Unset = voice clips keep
   // getting the "unsupported file" notice, exactly as before.
   PROMPTX_TRANSCRIBE_WEBHOOK_URL: z.string().url().optional(),
   VOICE_MAX_SECONDS: z.coerce.number().int().min(1).max(300).default(60),
