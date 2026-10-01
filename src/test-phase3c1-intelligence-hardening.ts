@@ -268,7 +268,7 @@ async function run() {
     [/SELECT \* FROM conversation_summaries/, () => (summaryState.row ? [summaryState.row] : [])],
     [/INSERT INTO conversation_summaries/, () => {
       if (!summaryState.claimable) return [];
-      summaryState.row = summaryState.row || { prompt_version: "conv-summary-v1", summary: null, source_message_count: 0, source_last_message_id: null };
+      summaryState.row = summaryState.row || { prompt_version: "conv-summary-v2", summary: null, source_message_count: 0, source_last_message_id: null };
       summaryState.row.generation_status = "generating";
       return [{ id: 1 }];
     }],

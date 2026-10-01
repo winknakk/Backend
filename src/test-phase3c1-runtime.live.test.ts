@@ -474,7 +474,7 @@ async function main() {
     assert.ok(!("ticket_status" in ready.json.summary), "model's ticket_status was stripped");
     const [row] = await q(`SELECT * FROM conversation_summaries WHERE conversation_id = $1`, [S.conversationId]);
     assert.equal(Number(row.project_id), A.projectId);
-    assert.equal(row.prompt_version, "conv-summary-v1");
+    assert.equal(row.prompt_version, "conv-summary-v2");
     assert.equal(row.generation_status, "ready");
     assert.equal(row.provider, "promptx");
     assert.equal(row.model, null);
@@ -656,7 +656,7 @@ async function main() {
     assert.equal(rows.filter((r: any) => r.event_type === "ai.daily_narrative").length, narrativeCalls);
     for (const r of rows) {
       assert.equal(r.detail.provider, "promptx");
-      assert.ok(["conv-summary-v1", "daily-narrative-v1"].includes(r.detail.promptVersion));
+      assert.ok(["conv-summary-v2", "daily-narrative-v1"].includes(r.detail.promptVersion));
       assert.equal(typeof r.detail.latencyMs, "number");
       assert.equal(r.detail.model, null);
       assert.equal(r.detail.inputTokens, null);

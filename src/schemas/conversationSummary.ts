@@ -22,13 +22,49 @@ const TextList = (itemMax: number, listMax: number) =>
     .transform((items) => items.map(cleanText).filter((s) => s.length > 0))
     .pipe(z.array(z.string().max(itemMax)).max(listMax));
 
+/**
+ * Closed vocabulary for risk_flags. Anything else a model emits is dropped,
+ * so the console never shows an invented category.
+ */
+export const SUMMARY_RISK_FLAGS = [
+  "credential_shared",
+  "account_access",
+  "security_incident",
+  "data_exposure",
+  "service_outage",
+  "critical_request",
+  "recurring_issue",
+  "customer_frustrated",
+  "multi_issue",
+] as const;
+export type SummaryRiskFlag = (typeof SUMMARY_RISK_FLAGS)[number];
+
+const RiskFlags = z
+  .array(z.string())
+  .transform((items) =>
+    Array.from(
+      new Set(
+        items
+          .map((s) => cleanText(s).toLowerCase())
+          .filter((s): s is SummaryRiskFlag => (SUMMARY_RISK_FLAGS as readonly string[]).includes(s))
+      )
+    )
+  );
+
 export const ConversationSummaryOutputSchema = z
   .object({
     summary_th: Text(1500).pipe(z.string().min(1)),
     customer_goal: Text(300).default(""),
     topics: TextList(120, 8).default([]),
+    /** Each distinct problem the customer raised (multi-issue conversations list several). */
+    issues: TextList(300, 8).default([]),
     open_questions: TextList(300, 8).default([]),
     actions_taken: TextList(300, 10).default([]),
+    /** Only a cause someone in the transcript stated; empty when nobody did. Never inferred. */
+    stated_root_cause: Text(300).default(""),
+    /** What the customer explicitly confirmed (fixed / not fixed / per issue); empty when nothing was confirmed. */
+    customer_confirmation: Text(300).default(""),
+    risk_flags: RiskFlags.default([]),
     suggested_next_action: Text(300).default(""),
   })
   .strip();

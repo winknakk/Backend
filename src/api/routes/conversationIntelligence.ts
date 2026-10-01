@@ -44,6 +44,23 @@ async function authorizeConversation(
   return { conversationId, projectId };
 }
 
+/**
+ * True when the conversation_summaries table does not exist yet (migration
+ * 052 not applied in this environment). Postgres reports undefined_table.
+ */
+export function isSummaryStoreMissing(err: any): boolean {
+  return err?.code === "42P01" && /conversation_summaries/.test(String(err?.message || ""));
+}
+
+/** 503 with a stable code so the console can show "not enabled" instead of an error. */
+function sendSummaryStoreMissing(reply: FastifyReply) {
+  return reply.status(503).send({
+    error: "Service Unavailable",
+    code: "SUMMARY_UNAVAILABLE",
+    message: "AI summary is not enabled in this environment yet",
+  });
+}
+
 export async function registerConversationIntelligenceRoutes(
   fastify: FastifyInstance,
   deps: { pool?: any; summaryService?: ConversationSummaryService } = {}
@@ -81,6 +98,7 @@ export async function registerConversationIntelligenceRoutes(
       if (err instanceof ConversationNotFoundError) {
         return reply.status(404).send({ error: "Not Found", message: `Conversation ${auth.conversationId} not found` });
       }
+      if (isSummaryStoreMissing(err)) return sendSummaryStoreMissing(reply);
       logger.error({ error: err.message, conversationId: auth.conversationId }, "Failed to load conversation summary");
       return reply.status(500).send({ error: "Internal Server Error", message: "Conversation summary is unavailable" });
     }
@@ -98,6 +116,7 @@ export async function registerConversationIntelligenceRoutes(
       if (err instanceof ConversationNotFoundError) {
         return reply.status(404).send({ error: "Not Found", message: `Conversation ${auth.conversationId} not found` });
       }
+      if (isSummaryStoreMissing(err)) return sendSummaryStoreMissing(reply);
       logger.error({ error: err.message, conversationId: auth.conversationId }, "Failed to refresh conversation summary");
       return reply.status(500).send({ error: "Internal Server Error", message: "Conversation summary is unavailable" });
     }
