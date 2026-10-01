@@ -2541,12 +2541,17 @@ fastify.all("/api/v1/internal/rag", async (request, reply) => {
   if (method === "GET" || method === "DELETE") {
     const q = request.query as any;
     query = q.query;
-    projectId = q.projectId || q.project_id || "1";
+    projectId = q.projectId || q.project_id || "";
   } else {
     const body = (request.body || {}) as any;
     const payload = body.data ? { ...body.data } : body;
     query = payload.query;
-    projectId = payload.projectId || payload.project_id || "1";
+    projectId = payload.projectId || payload.project_id || "";
+  }
+
+  // No default project: a caller that names none gets an error, not project 1's knowledge.
+  if (!String(projectId).trim()) {
+    return reply.code(400).send({ success: false, error: "projectId is required" });
   }
 
   const orgId = request.tenantContext?.orgId;

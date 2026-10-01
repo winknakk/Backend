@@ -1,4 +1,5 @@
 import { KnowledgeResult } from "../schemas/validation";
+import type { KnowledgeScope } from "./knowledgeScope";
 
 export interface IEmbeddingService {
   embedQuery(text: string): Promise<number[]>;
@@ -9,7 +10,8 @@ export interface IVectorStore {
   addDocuments(documents: Array<{ id: string; content: string; metadata?: any }>): Promise<void>;
   similaritySearch(
     queryVector: number[],
-    k?: number
+    k?: number,
+    scope?: KnowledgeScope
   ): Promise<Array<{ id: string; content: string; score: number; metadata?: any }>>;
 }
 

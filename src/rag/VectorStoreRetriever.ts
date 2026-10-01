@@ -1,5 +1,6 @@
 import { IRetriever, IEmbeddingService, IVectorStore } from "./types";
 import { KnowledgeResult } from "../schemas/validation";
+import { resolveKnowledgeScope } from "./knowledgeScope";
 
 export class VectorStoreRetriever implements IRetriever {
   private embeddingService: IEmbeddingService;
@@ -11,17 +12,20 @@ export class VectorStoreRetriever implements IRetriever {
   }
 
   async retrieve(query: string, filters?: { projectId?: string; tenantId?: string }): Promise<KnowledgeResult[]> {
-    const queryVector = await this.embeddingService.embedQuery(query);
-    const searchResults = await this.vectorStore.similaritySearch(queryVector, 5);
+    // Fail closed: without a project scope nothing is retrieved.
+    const scope = resolveKnowledgeScope(filters);
+    if (!scope) return [];
+    const activeProjectId = scope.projectId;
+    const activeTenantId = scope.tenantId;
 
-    const { getOptionalRequestContext } = require("../kernel/context/RequestContextHolder");
-    const context = getOptionalRequestContext();
-    const activeProjectId = context?.projectId || filters?.projectId || "1";
-    const activeTenantId = context?.tenantId || filters?.tenantId || "1";
+    const queryVector = await this.embeddingService.embedQuery(query);
+    const searchResults = await this.vectorStore.similaritySearch(queryVector, 5, scope);
 
     const filtered = searchResults.filter((doc) => {
       const docTenantId = doc.metadata?.tenantId || doc.metadata?.companyId || "1";
-      const docProjectId = doc.metadata?.projectId || "1";
+      // A document without a project tag belongs to no project.
+      const docProjectId = doc.metadata?.projectId ?? doc.metadata?.project_id;
+      if (docProjectId === undefined || docProjectId === null) return false;
       return String(docTenantId) === String(activeTenantId) && String(docProjectId) === String(activeProjectId);
     });
 

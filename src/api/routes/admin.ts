@@ -3,6 +3,7 @@ import { z } from "zod";
 import { config } from "../../config/env";
 import { MetricAggregator } from "../../aiops/dashboard/MetricAggregator";
 import { IngestionService } from "../../aiops/ragops/IngestionService";
+import { resolveKnowledgeScope } from "../../rag/knowledgeScope";
 import { EvalTestRunner } from "../../aiops/llmops/EvalTestRunner";
 import { TrafficSplitter } from "../../aiops/prompt-control/TrafficSplitter";
 import { authHook } from "../../middleware/auth";
@@ -215,6 +216,16 @@ export async function registerAdminRoutes(fastify: FastifyInstance, deps: AdminR
         error: "Bad Request",
         message: parsed.error.issues.map((e) => `${e.path.join(".")}: ${e.message}`).join(", "),
       });
+    }
+
+    // The target project is checked against the operator's server-side scope;
+    // an upload may not write into a project the caller cannot access.
+    const scope = resolveKnowledgeScope(parsed.data);
+    if (!scope) {
+      return reply.code(400).send({ error: "Bad Request", message: "projectId is required" });
+    }
+    if (!canAccessProject(request, scope.projectId)) {
+      return reply.code(403).send({ error: "Forbidden", message: "Access to this project is not authorized" });
     }
 
     const chunks = await deps.ingestionService.ingestDocument(parsed.data);

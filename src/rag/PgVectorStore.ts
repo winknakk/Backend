@@ -1,5 +1,6 @@
 import { pool } from "../adapters/postgres/PostgresAdapter";
 import { IVectorStore } from "./types";
+import { KnowledgeScope, resolveKnowledgeScope } from "./knowledgeScope";
 
 export class PgVectorStore implements IVectorStore {
   async addDocuments(documents: Array<{ id: string; content: string; metadata?: any }>): Promise<void> {
@@ -24,12 +25,14 @@ export class PgVectorStore implements IVectorStore {
 
   async similaritySearch(
     queryVector: number[],
-    k: number = 5
+    k: number = 5,
+    scope?: KnowledgeScope
   ): Promise<Array<{ id: string; content: string; score: number; metadata?: any }>> {
-    const { getOptionalRequestContext } = require("../kernel/context/RequestContextHolder");
-    const context = getOptionalRequestContext();
-    const activeProjectId = context?.projectId || "1";
-    const activeTenantId = context?.tenantId || "1";
+    // Fail closed: no project scope, no documents.
+    const resolved = scope ?? resolveKnowledgeScope();
+    if (!resolved) return [];
+    const activeProjectId = resolved.projectId;
+    const activeTenantId = resolved.tenantId;
 
     const { rows } = await pool.query(
       `SELECT doc_id, content, metadata, 1 - (embedding <=> $1::vector) AS score
