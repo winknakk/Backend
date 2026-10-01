@@ -452,6 +452,44 @@ async function run() {
     await app.close();
   });
 
+  await test("B11 missing conversation_summaries (052 not applied) -> status unavailable, live facts, no model call, no background refresh", async () => {
+    const missingTable: Handler = [/conversation_summaries/, () => {
+      throw Object.assign(new Error('relation "conversation_summaries" does not exist'), { code: "42P01" });
+    }];
+    const pool = fakePool([missingTable, ...summaryHandlers]);
+    let calls = 0;
+    const svc = new ConversationSummaryService({ pool, chat: async () => { calls++; return '{"summary_th":"x"}'; } });
+
+    const view = await svc.getSummary(1, 10);
+    assert.equal(view.status, "unavailable");
+    assert.equal(view.summary, null);
+    assert.equal(view.stale, false);
+    assert.equal(view.lastErrorCategory, "storage_not_migrated");
+    assert.equal(view.facts.ticket?.ticketNumber, "TCK-5", "facts are still read live");
+
+    const refreshed = await svc.refresh(1, 10, { force: true });
+    assert.equal(refreshed.status, "unavailable");
+    assert.equal(calls, 0, "the model is never called when the summary cannot be stored");
+    assert.ok(pool.calls.every((c) => !/INSERT INTO conversation_summaries/.test(c.sql)), "no claim attempted");
+
+    const authPool = fakePool([[/SELECT project_id FROM conversations WHERE id = \$1/, () => [{ project_id: 1 }]]]);
+    let refreshCalls = 0;
+    const summaryService = {
+      getSummary: async () => view,
+      refresh: async () => { refreshCalls++; return view; },
+      toBotContext: ConversationSummaryService.prototype.toBotContext,
+    };
+    const app = await buildApp({ unrestricted: false, orgId: "o", projectIds: [1] }, authPool, summaryService);
+    const res = await app.inject({ method: "GET", url: "/api/admin/conversations/10/ai-summary" });
+    assert.equal(res.statusCode, 200, "a missing migration is a state, not a server error");
+    const body = JSON.parse(res.body);
+    assert.equal(body.status, "unavailable");
+    assert.equal(body.refreshing, false);
+    assert.equal(refreshCalls, 0, "no background refresh against missing storage");
+    assert.ok(!/does not exist|42P01|relation/i.test(res.body), "database error text is not returned");
+    await app.close();
+  });
+
   await test("B10 projectId=all resolves only to authorized projects", () => {
     const reply: any = { code: 0, status(c: number) { this.code = c; return this; }, send() { return this; } };
     const req: any = { tenantScope: { unrestricted: false, orgId: "o", projectIds: [1, 3] }, principal: { subject: "op" } };

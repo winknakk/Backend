@@ -19,7 +19,19 @@ export interface SummaryProvenance {
   messageCountAtGeneration: number;
 }
 
-export type SummaryStatus = "missing" | "generating" | "ready" | "failed";
+/**
+ * `unavailable`: summary storage does not exist on this database
+ * (migration 052 not applied). Facts are still read live; nothing is generated.
+ */
+export type SummaryStatus = "missing" | "generating" | "ready" | "failed" | "unavailable";
+
+/** Raised when `conversation_summaries` is missing (Postgres undefined_table, 42P01). */
+export class SummaryStorageUnavailableError extends Error {
+  constructor() {
+    super("conversation_summaries table is missing (migration 052 not applied)");
+    this.name = "SummaryStorageUnavailableError";
+  }
+}
 
 export interface ConversationSummaryView {
   conversationId: number;
@@ -85,13 +97,28 @@ export class ConversationSummaryService {
   }
 
   private async loadRow(projectId: number, conversationId: number): Promise<any | null> {
-    const res = await this.pool.query(
-      `SELECT * FROM conversation_summaries
-        WHERE project_id = $1 AND conversation_id = $2 AND prompt_version = $3
-        LIMIT 1;`,
-      [projectId, conversationId, CONVERSATION_SUMMARY_PROMPT_VERSION]
-    );
-    return res.rows[0] || null;
+    try {
+      const res = await this.pool.query(
+        `SELECT * FROM conversation_summaries
+          WHERE project_id = $1 AND conversation_id = $2 AND prompt_version = $3
+          LIMIT 1;`,
+        [projectId, conversationId, CONVERSATION_SUMMARY_PROMPT_VERSION]
+      );
+      return res.rows[0] || null;
+    } catch (err: any) {
+      if (err?.code === "42P01") throw new SummaryStorageUnavailableError();
+      throw err;
+    }
+  }
+
+  /** The view for a database without summary storage: live facts, no summary. */
+  private unavailableView(projectId: number, conversationId: number, facts: ConversationFacts): ConversationSummaryView {
+    return {
+      ...this.toView(projectId, conversationId, facts, null),
+      stale: false,
+      status: "unavailable",
+      lastErrorCategory: "storage_not_migrated",
+    };
   }
 
   private toView(projectId: number, conversationId: number, facts: ConversationFacts, row: any | null): ConversationSummaryView {
@@ -129,8 +156,13 @@ export class ConversationSummaryService {
   /** Current summary plus authoritative facts. Never calls the model. */
   async getSummary(projectId: number, conversationId: number): Promise<ConversationSummaryView> {
     const facts = await this.contextBuilder.readFacts(projectId, conversationId);
-    const row = await this.loadRow(projectId, conversationId);
-    return this.toView(projectId, conversationId, facts, row);
+    try {
+      const row = await this.loadRow(projectId, conversationId);
+      return this.toView(projectId, conversationId, facts, row);
+    } catch (err) {
+      if (err instanceof SummaryStorageUnavailableError) return this.unavailableView(projectId, conversationId, facts);
+      throw err;
+    }
   }
 
   toBotContext(view: ConversationSummaryView): ConversationBotContext {
@@ -171,7 +203,14 @@ export class ConversationSummaryService {
 
   private async doRefresh(projectId: number, conversationId: number, force: boolean): Promise<ConversationSummaryView> {
     const context = await this.contextBuilder.build(projectId, conversationId);
-    const current = await this.loadRow(projectId, conversationId);
+    let current: any | null;
+    try {
+      current = await this.loadRow(projectId, conversationId);
+    } catch (err) {
+      // No storage: never call the model for a summary that cannot be kept.
+      if (err instanceof SummaryStorageUnavailableError) return this.unavailableView(projectId, conversationId, context.facts);
+      throw err;
+    }
     const currentView = this.toView(projectId, conversationId, context.facts, current);
 
     if (!force && currentView.summary && !currentView.stale) {

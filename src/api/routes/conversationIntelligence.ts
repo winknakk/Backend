@@ -64,7 +64,12 @@ export async function registerConversationIntelligenceRoutes(
     try {
       const view = await summaryService.getSummary(auth.projectId, auth.conversationId);
       let refreshing = false;
-      if ((view.stale || !view.summary) && view.status !== "generating" && view.facts.messageCount > 0) {
+      if (
+        (view.stale || !view.summary) &&
+        view.status !== "generating" &&
+        view.status !== "unavailable" &&
+        view.facts.messageCount > 0
+      ) {
         refreshing = true;
         void summaryService.refresh(auth.projectId, auth.conversationId).catch((err: any) => {
           logger.warn({ error: err.message, conversationId: auth.conversationId }, "Background summary refresh failed");
