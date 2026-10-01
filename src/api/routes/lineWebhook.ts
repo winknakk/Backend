@@ -36,6 +36,8 @@ import type { PendingIntakeKind } from "../../domain/case/PendingIntake";
 import { lineImageAutoAttachService } from "../../services/LineImageAutoAttachService";
 import { voiceCommandText, voiceTranscriptionService, type VoiceTranscriptionOutcome } from "../../services/VoiceTranscriptionService";
 import { recordBackendActivity } from "./backendConsole";
+import { redactLineGatewayPayload } from "../../security/secretRedaction";
+import { safetyHintForLineEvents } from "../../domain/safety/SupportSafety";
 
 const logger = createLogger("line-webhook");
 
@@ -207,11 +209,12 @@ async function forwardPromptXWebhook(
 ): Promise<void> {
   await axios.post(
     url,
-    {
+    // Credentials a customer types are masked before leaving the backend.
+    redactLineGatewayPayload({
       destination,
       events: [event],
       ...(ticketx ? { ticketx } : {}),
-    },
+    }),
     {
       headers: { "Content-Type": "application/json" },
       timeout: 15000,
@@ -1276,7 +1279,7 @@ export function registerLineWebhookRoutes(
                   projectId: decision.projectId,
                   payload: {
                     destination,
-                    events: [event],
+                    events: redactLineGatewayPayload({ events: [event] }).events,
                     ticketx: {
                       onboardingVerified: true,
                       projectId: decision.projectId,
@@ -1289,6 +1292,7 @@ export function registerLineWebhookRoutes(
                       executionToken,
                       correlationId: webhookEventId || undefined,
                       caseContext,
+                      safety: safetyHintForLineEvents([event]),
                     },
                   },
                   sequenceAt: new Date(),
@@ -1311,6 +1315,7 @@ export function registerLineWebhookRoutes(
                   executionToken,
                   correlationId: webhookEventId || undefined,
                   caseContext,
+                  safety: safetyHintForLineEvents([event]),
                 });
               }
 

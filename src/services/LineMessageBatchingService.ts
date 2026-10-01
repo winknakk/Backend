@@ -3,6 +3,8 @@ import { createHash } from "crypto";
 import { AgentSessionQueueService } from "./AgentSessionQueueService";
 import { AgentSessionQueueWorker } from "./AgentSessionQueueWorker";
 import type { CaseContextHint } from "./LineCaseContextService";
+import { redactLineGatewayPayload } from "../security/secretRedaction";
+import { safetyHintForLineEvents } from "../domain/safety/SupportSafety";
 
 const logger = createLogger("line-batch");
 
@@ -125,7 +127,8 @@ export class LineMessageBatchingService {
     const lastDecision = events[events.length - 1].decision;
     const allLineEvents = events.map((e) => e.event);
 
-    const payload = {
+    // Masked here so neither the queue row nor the gateway sees a credential.
+    const payload = redactLineGatewayPayload({
       destination,
       events: allLineEvents,
       ticketx: {
@@ -147,10 +150,19 @@ export class LineMessageBatchingService {
         // Flow 6 hint (2026-09-17): forwarded by Channel Gateway - LINE as
         // case_intent / case_ticket_number / case_force_new for the AI gate.
         caseContext: lastDecision.caseContext ?? null,
+        // Support-safety hint over the whole batch, computed on the raw text
+        // (before redaction) and forwarded by Channel Gateway as safety_category.
+        safety: safetyHintForLineEvents(allLineEvents),
       },
-    };
+    });
 
     const convId = lastDecision.conversationId;
+    if (payload.ticketx.safety) {
+      logger.warn(
+        { convId, category: payload.ticketx.safety.category, action: payload.ticketx.safety.action },
+        "[line-batch] Support-safety rule matched; hint attached for the gate"
+      );
+    }
 
     try {
       if (convId && this.queueService && this.queueWorker) {

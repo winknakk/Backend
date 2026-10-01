@@ -1,4 +1,5 @@
 import { pool } from "../adapters/postgres/PostgresAdapter";
+import { redactSecrets } from "../security/secretRedaction";
 
 /**
  * Project-scoped context for conversation-level AI work.
@@ -210,7 +211,7 @@ export class ConversationContextBuilder {
     for (const row of msgRes.rows) {
       const text = messageText(row);
       if (!text) continue;
-      lines.push({ speaker: speakerFor(String(row.role), row.message_purpose ?? null), text: minimizePii(text) });
+      lines.push({ speaker: speakerFor(String(row.role), row.message_purpose ?? null), text: minimizePii(redactSecrets(text)) });
     }
 
     const { transcript, omitted } = trimTranscript(lines);

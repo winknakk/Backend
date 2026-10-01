@@ -5,6 +5,7 @@ import { tokenForContext } from "../domain/execution/ExecutionContextService";
 import { LineTypingIndicatorService } from "./LineTypingIndicatorService";
 import { customerNotificationService } from "./CustomerNotificationService";
 import { pool } from "../adapters/postgres/PostgresAdapter";
+import { redactLineGatewayPayload } from "../security/secretRedaction";
 
 const logger = createLogger("agent-session-worker");
 
@@ -133,12 +134,16 @@ export class AgentSessionQueueWorker {
         // a retry after revocation or expiry still fails closed.
         const stored = (currentItem.payload || {}) as any;
         const contextId = stored?.ticketx?.executionContextId;
-        const outboundPayload = contextId
-          ? {
-              ...stored,
-              ticketx: { ...stored.ticketx, executionToken: tokenForContext(String(contextId)) },
-            }
-          : stored;
+        // Credentials a customer typed are masked before leaving the backend;
+        // rows queued before this redaction existed are covered here too.
+        const outboundPayload = redactLineGatewayPayload(
+          contextId
+            ? {
+                ...stored,
+                ticketx: { ...stored.ticketx, executionToken: tokenForContext(String(contextId)) },
+              }
+            : stored
+        );
 
         // High-water mark taken BEFORE dispatch so a reply persisted
         // quickly by the flow cannot be missed.

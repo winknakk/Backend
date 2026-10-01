@@ -216,6 +216,50 @@ add(
   "ACTIVE CASE RULE applies only when no ticket number is named, which is the correct precedence."
 );
 
+// --- Support safety rules (2026-10-01, PM1 cases 24 / 37 / 39) --------------
+add(
+  "P-15",
+  "customer prompt: never ask for, repeat or set a credential; [REDACTED_SECRET] handled",
+  "Security: no password request/disclosure, no reset outside an authorized flow.",
+  /CREDENTIALS\. Never ask for, repeat, or confirm a password/.test(customerPrompt) &&
+    /\[REDACTED_SECRET\]/.test(customerPrompt) &&
+    /Never say you set, reset, changed, or sent a password/.test(customerPrompt)
+);
+add(
+  "P-16",
+  "customer prompt: no account-existence or role/permission disclosure",
+  "Security: never reveal whether a person has an account or what privileges they hold.",
+  /NO ACCOUNT OR PERMISSION DISCLOSURE/.test(customerPrompt)
+);
+add(
+  "P-17",
+  "customer prompt: no claimed server/system action without a reported result; critical requests escalate",
+  "AI behavior: never claim an action without tool evidence; critical incident -> escalate.",
+  /NO CLAIMED ACTIONS\./.test(customerPrompt) && /passed to the responsible team as urgent/.test(customerPrompt)
+);
+add(
+  "P-18",
+  "customer prompt: no guessed root cause or ETA; silence is not resolution",
+  "AI behavior: don't guess root cause / ETA; customer silent != resolved.",
+  /NO GUESSED CAUSES OR TIMES/.test(customerPrompt) && /SILENCE IS NOT RESOLUTION/.test(customerPrompt)
+);
+add(
+  "P-19",
+  "gate: reads the backend safety hint and always escalates critical / disclosure requests",
+  "Critical incident: STOP autonomous action -> escalate -> authorized human.",
+  /Safety hint \(empty when none\): \{\{trigger\.body\.safety_category\}\}/.test(gatePrompt) &&
+    /ALWAYS ESCALATE when the Safety hint is critical_incident, account_disclosure, or privilege_disclosure/.test(gatePrompt)
+);
+{
+  const gateway = fs.readFileSync(path.resolve(path.dirname(FLOW), "Channel Gateway - LINE.json"), "utf8");
+  add(
+    "P-20",
+    "Channel Gateway forwards the backend safety hint as safety_category",
+    "The gate can only route on the hint if the gateway carries it.",
+    /"safety_category":\s*"\{\{trigger\.body\.ticketx\.safety\.category\}\}"/.test(gateway)
+  );
+}
+
 const passed = results.filter((r) => r.ok);
 const failed = results.filter((r) => !r.ok);
 

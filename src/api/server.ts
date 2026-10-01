@@ -73,6 +73,8 @@ import { AgentManager } from "../agent/AgentRuntime";
 import { Orchestrator } from "../orchestrator/Orchestrator";
 import { InboundMessageSchema } from "../schemas/validation";
 import rootLogger, { createLogger } from "../observability/logger";
+import { redactSecrets } from "../security/secretRedaction";
+import { classifySupportSafety } from "../domain/safety/SupportSafety";
 import { startTimer } from "../observability/timing";
 import { authHook, authenticateToken, internalApiGuard } from "../middleware/auth";
 import { AuthPrincipal } from "../infrastructure/security/SessionTokenService";
@@ -738,7 +740,10 @@ async function bootstrap() {
         const promptxPayload: any = {
           channel: "webchat",
           customer_ref: resolvedSenderRef,
-          message: job.data.text,
+          // Credentials a customer typed are masked before leaving the backend.
+          message: redactSecrets(job.data.text),
+          // Support-safety hint from the raw text; the gate escalates on it.
+          safety_category: classifySupportSafety(job.data.text)?.category ?? "",
           project_id: convProjectId,
           org_id: convOrgId,
           destination: "default",
